@@ -1,0 +1,26 @@
+{
+  "name": "ai-pr-reviewer",
+  "version": "1.0.0",
+  "description": "Khung orchestration d'agent AI PR Reviewer (Cline rules, Memory Bank, verify, Git Handoff).",
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/test-pure-logic.mjs",
+    "verify": "node scripts/full-verify.mjs",
+    "test:baseline": "node scripts/extract-behavior-map.mjs && cp scripts/behavior-map-current.json scripts/behavior-map-baseline.json",
+    "map": "node scripts/extract-behavior-map.mjs",
+    "intake": "node scripts/github-task-intake.mjs",
+    "notify": "node scripts/notify-telegram.mjs"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^11.20.0",
+      "onFail": "download"
+    }
+  },
+  "devDependencies": {
+    "acorn": "^8.12.0",
+    "acorn-walk": "^8.3.0",
+    "jsdom": "^24.0.0"
+  }
+}

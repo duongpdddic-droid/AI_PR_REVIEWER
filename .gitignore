@@ -1,0 +1,18 @@
+node_modules/
+.env*
+*.bak
+*.bak2
+temp_*
+scripts/temp_*
+scripts/behavior-map-current.json
+
+# Local-only secrets/artifacts (never commit)
+_local_backup/
+key.env
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Ad-hoc debug
+.vscode/

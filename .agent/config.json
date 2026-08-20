@@ -1,0 +1,24 @@
+{
+  "project": "AI_PR_REVIEWER",
+  "project_name": "AI_PR_REVIEWER",
+  "reviewType": "git-pr",
+  "activeReviewer": "local",
+  "defaultModel": "local/qwen2.5-coder:32b",
+  "readOnly": true,
+  "requireHumanMerge": true,
+  "maxReviewCostUsd": 2,
+  "repo": "duongpdddic-droid/AI_PR_REVIEWER",
+  "worktree": "pr-reviewer-worktrees/",
+  "coderWorkspace": "coder-workspace",
+  "reviewerWorkspace": "reviewer-workspace",
+  "labels": {
+    "review_requested": "reviewer:local",
+    "review_in_progress": "status:review-in-progress",
+    "changes_requested": "status:changes-requested",
+    "approved": "reviewer:approved",
+    "ready_to_code": "status:ready-for-cline"
+  },
+  "findingsFile": "review-state.json",
+  "promptsDir": "reviewer-agent/prompts",
+  "orchestrator": "scripts/agent-runner.mjs"
+}

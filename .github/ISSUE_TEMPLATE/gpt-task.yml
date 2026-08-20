@@ -1,0 +1,109 @@
+name: "GPT giao việc cho Cline"
+description: "Task có phạm vi, tiêu chí nghiệm thu và bằng chứng kiểm tra rõ ràng"
+title: "[GPT-TASK] "
+labels:
+  - "agent:cline"
+  - "status:ready-for-cline"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Task này do GPT phân tích và giao cho Cline thực hiện.
+        Cline phải giữ đúng phạm vi, chạy kiểm tra và bàn giao bằng Pull Request.
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: "Mục tiêu"
+      description: "Kết quả cuối cùng cần đạt được."
+      placeholder: "Mô tả ngắn gọn kết quả cần đạt..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "Bằng chứng và hiện trạng"
+      description: "Lỗi, file, hàm, ảnh hoặc hành vi đã được xác nhận."
+      placeholder: |
+        - File/hàm liên quan:
+        - Hiện tượng:
+        - Bằng chứng:
+    validations:
+      required: true
+
+  - type: textarea
+    id: allowed_scope
+    attributes:
+      label: "Phạm vi được phép thay đổi"
+      description: "Liệt kê chính xác file hoặc module Cline được phép sửa."
+      placeholder: |
+        - src/**
+        - scripts/*.mjs
+    validations:
+      required: true
+
+  - type: textarea
+    id: forbidden_scope
+    attributes:
+      label: "Không được thay đổi"
+      description: "Các vùng, hành vi hoặc dữ liệu phải giữ nguyên."
+      placeholder: |
+        - Không deploy
+        - Không đổi schema/dữ liệu production
+        - Không refactor ngoài phạm vi
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: "Yêu cầu thực hiện"
+      description: "Checklist công việc dành cho Cline."
+      placeholder: |
+        - [ ] Sửa...
+        - [ ] Bổ sung test...
+        - [ ] Cập nhật Memory Bank...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: "Tiêu chí nghiệm thu"
+      description: "Điều kiện để GPT chấp thuận Pull Request."
+      value: |
+        - [ ] `pnpm verify` PASS
+        - [ ] `pnpm test` PASS
+        - [ ] Tiêu chí kiểm soát chất lượng (Quality gate) đạt yêu cầu nếu có
+        - [ ] Không có lỗi console hoặc log mới
+        - [ ] Không thay đổi ngoài phạm vi
+        - [ ] Có đầy đủ bằng chứng kiểm tra trong Pull Request
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk
+    attributes:
+      label: "Mức rủi ro"
+      options:
+        - "Thấp — sửa nhỏ, dễ hoàn tác"
+        - "Trung bình — thay đổi logic hoặc nhiều file"
+        - "Cao — dữ liệu, deploy hoặc thao tác khó hoàn tác"
+    validations:
+      required: true
+
+  - type: textarea
+    id: handoff
+    attributes:
+      label: "Quy tắc bàn giao"
+      value: |
+        1. Tạo nhánh riêng từ `main` mới nhất.
+        2. Chỉ sửa trong phạm vi được phép.
+        3. Chạy đầy đủ các lệnh kiểm tra áp dụng.
+        4. Commit theo Conventional Commits bằng tiếng Anh.
+        5. Push nhánh và mở Draft Pull Request.
+        6. Liên kết Issue bằng `Closes #<issue-number>`.
+        7. Gắn label `status:review-requested` khi sẵn sàng cho GPT review.
+    validations:
+      required: true
