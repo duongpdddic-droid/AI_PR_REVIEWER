@@ -9,14 +9,3 @@
   "telegramChat": null,
   "aiderPath": "aider"
 }
-
-{
-  "project": "AI_PR_REVIEWER",
-  "reviewType": "git-pr",
-  "defaultModel": "local/qwen2.5-coder:32b",
-  "readOnly": true,
-  "repo": "duongpdddic-droid/AI_PR_REVIEWER",
-  "worktree": "reviewer-agent-worktree/"
-  "apiKey": "YOUR_OPENAI_API_KEY",
-
-}
