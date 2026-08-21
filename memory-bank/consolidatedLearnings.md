@@ -14,6 +14,8 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Triệu chứng**: `git push ... 2>&1` in ra `50caf6c..7d5bae1 main -> main` (thành công) nhưng command báo exit 1 (`NativeCommandError`) vì PowerShell coi stderr progress của native command là lỗi.
 - **Nguyên nhân gốc**: git ghi progress vào stderr; `$ErrorActionPreference`/pipe `2>&1` của PowerShell biến stderr thành error record.
 - **Tránh lặp lại**: KHÔNG kết luận fail/thành công chỉ từ exit code của native command qua PowerShell; verify bằng trạng thái thật — `git rev-parse HEAD origin/main`, `git status -sb`, hoặc output dòng kết quả (`main -> main`).
+- **Bổ sung 22/08/2026**: `git push ... 2>&1 | Select-Object` có thể trả "Everything up-to-date" (bọc thành NativeCommandError) dù remote chưa nhận commit — thông báo giả. Verify push bằng lệnh truy vấn thẳng remote: `git ls-remote origin main` so với `rev-parse HEAD`; KHÔNG bọc `2>&1` quanh `git push`.
+
 
 ## L-003 (21/08/2026) — `gh --json` thiếu field consumer cần
 - **Triệu chứng**: `listReviewPRs` query `'--json', 'number,title,url'` nhưng vòng xử lý đọc `pr.labels` → `undefined`, logic skip `agent:gpt` vô hiệu.
