@@ -2,7 +2,6 @@
   "project": "AI_PR_REVIEWER",
   "project_name": "AI_PR_REVIEWER",
   "reviewType": "git-pr",
-  "activeReviewer": "local",
   "defaultModel": "local/qwen2.5-coder:32b",
   "readOnly": true,
   "requireHumanMerge": true,
@@ -12,13 +11,14 @@
   "coderWorkspace": "coder-workspace",
   "reviewerWorkspace": "reviewer-workspace",
   "labels": {
-    "review_requested": "reviewer:local",
-    "review_in_progress": "status:review-in-progress",
+    "review_requested": "status:review-requested",
+    "review_in_progress": "status:in-progress",
     "changes_requested": "status:changes-requested",
-    "approved": "reviewer:approved",
-    "ready_to_code": "status:ready-for-cline"
+    "approved": "status:approved",
+    "ready_to_code": "status:ready-for-cline",
+    "blocked": "status:blocked"
   },
   "findingsFile": "review-state.json",
   "promptsDir": "reviewer-agent/prompts",
-  "orchestrator": "scripts/agent-runner.mjs"
+  "orchestrator": "scripts/reviewer-orchestrator.mjs"
 }
