@@ -26,7 +26,7 @@ Không dùng Telegram, file inbox cục bộ hoặc lịch sử chat làm nguồ
 
 ## 3. Vai trò
 
-### GPT
+### GPT và AI_PR_VIEWER
 
 - Phân tích yêu cầu và hiện trạng repository.
 - Tạo Issue bằng mẫu `GPT giao việc cho Cline`.

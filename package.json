@@ -9,6 +9,9 @@
     "test:baseline": "node scripts/extract-behavior-map.mjs && cp scripts/behavior-map-current.json scripts/behavior-map-baseline.json",
     "map": "node scripts/extract-behavior-map.mjs",
     "intake": "node scripts/github-task-intake.mjs",
+    "orchestrate": "node scripts/unified-orchestrator.mjs",
+    "autonomous": "node scripts/autonomous-run.mjs",
+    "autonomous:execute": "node scripts/autonomous-run.mjs --execute",
     "notify": "node scripts/notify-telegram.mjs"
   },
   "devEngines": {

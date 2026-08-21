@@ -17,3 +17,7 @@ jobs:
         run: node scripts/full-verify.mjs
       - name: Run tests
         run: pnpm test
+      - name: Smoke unified-orchestrator (dry-run)
+        run: node scripts/unified-orchestrator.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}

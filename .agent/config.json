@@ -7,6 +7,11 @@
   "requireHumanMerge": true,
   "maxReviewCostUsd": 2,
   "repo": "duongpdddic-droid/AI_PR_REVIEWER",
+  "targetRepos": [
+    "duongpdddic-droid/QLDA_DTXD"
+  ],
+  "maxReviewRounds": 3,
+  "notifyTelegram": true,
   "worktree": "pr-reviewer-worktrees/",
   "coderWorkspace": "coder-workspace",
   "reviewerWorkspace": "reviewer-workspace",
@@ -20,5 +25,5 @@
   },
   "findingsFile": "review-state.json",
   "promptsDir": "reviewer-agent/prompts",
-  "orchestrator": "scripts/reviewer-orchestrator.mjs"
+  "orchestrator": "scripts/unified-orchestrator.mjs"
 }

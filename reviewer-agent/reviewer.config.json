@@ -3,7 +3,11 @@
   "reviewType": "git-pr",
   "defaultModel": "local/qwen2.5-coder:32b",
   "readOnly": true,
-  "repo": "duongpdddic-droid/QLDA_DTXD",
+  "repo": "duongpdddic-droid/AI_PR_REVIEWER",
+  "targetRepos": [
+    "duongpdddic-droid/QLDA_DTXD"
+  ],
+  "maxReviewRounds": 3,
   "worktree": "reviewer-agent-worktree/",
   "apiKey": "YOUR_OPENAI_API_KEY",
   "telegramChat": null,
