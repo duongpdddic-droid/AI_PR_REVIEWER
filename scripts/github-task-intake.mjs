@@ -62,7 +62,8 @@ const ROOT = process.cwd();
 
 // Issue #20: repository canonical duy nhất được phép claim. Override CHỈ cho test fixture
 // (GITHUB_TASK_INTAKE_REMOTE_REPO) — production bắt buộc đúng giá trị này.
-const CANONICAL_REPO = 'duongpdddic-droid/AI_PR_REVIEWER';
+const CANONICAL_REPO = process.env.REVIEWER_TARGET_REPO ||
+                     require('../reviewer-agent/reviewer.config.json').repo;
 
 // ---------------------------------------------------------------- pure helpers
 

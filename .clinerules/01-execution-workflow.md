@@ -216,3 +216,9 @@ Mục đích: nhận lệnh Telegram cả khi Cline đang giữa task, không ch
   - Không tự `clasp push` hoặc deploy.
   - Không sửa ngoài phạm vi Issue.
   - Tối đa ba vòng review–fix; vượt giới hạn phải chuyển `status:blocked`.
+- **Quy tắc phối hợp giữa các Reviewer và Coder**:
+  - Khi một reviewer (GPT hoặc AI_PR_VIEWER) thực hiện review sau, reviewer đó **bắt buộc phải đọc ý kiến/finding của reviewer trước đó**, đưa ra nhận xét phản biện hoặc bổ sung, và báo cáo lại kết quả so sánh này cho người dùng.
+  - Đối với Coder (Cline):
+    - Nếu **cả hai reviewer đều phê duyệt (`approved`)**, Coder thực thi theo các chỉ dẫn/yêu cầu của reviewer thực hiện sau cùng.
+    - Nếu **chỉ mới có 1 reviewer phê duyệt**, Coder phải dừng lại và mở câu hỏi xin ý kiến người dùng xem có đồng ý tiến hành thực thi hay không trước khi tiếp tục.
+

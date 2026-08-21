@@ -93,6 +93,8 @@ Giao thức đầy đủ nằm tại `docs/AGENT_HANDOFF_PROTOCOL.md`.
 - Người dùng giữ quyền quyết định merge, `clasp push`, deploy và thao tác ảnh hưởng dữ liệu.
 - Cline chỉ nhận task có `agent:cline` và `status:ready-for-cline`.
 - Cline tự phát hiện/claim Issue hợp lệ tại Auto-Boot và checkpoint an toàn qua `scripts/github-task-intake.mjs` (read-only mặc định; claim chỉ sau preflight workspace/Git PASS: repo root xác định bằng git, remote canonical `duongpdddic-droid/QLDA_DTXD`, branch `main`/`master`, worktree sạch ngoài allowlist `memory-bank/`, base không lệch `origin/main`, tối đa 1 workspace cùng remote trong thư mục cha — nếu không: `BLOCKED_WRONG_REMOTE` / `BLOCKED_ACTIVE_ISSUE_BRANCH` / `DETACHED_HEAD` / `BLOCKED_DIRTY_WORKTREE` / `ERROR_FETCH` / `BLOCKED_STALE_BASE` / `BLOCKED_MULTIPLE_WORKSPACES` / `BLOCKED_REPO_MISMATCH` (khi `GITHUB_REPOSITORY` lệch origin canonical — repo read/mutation luôn từ origin), fail-closed không mutation; env test-only `SKIP_REMOTE`/`SKIP_FETCH`/`PARENT` chỉ hiệu lực với `GITHUB_TASK_INTAKE_TEST=1` — CLI production không bypass remote/fetch bằng env; idempotent, read-after-write trước khi báo `CLAIMED`, marker đi kèm verify labels; task branch được tạo sau claim khi biết Issue number).
+- `agent:local-reviewer` | Reviewer AI_PR_VIEWER, quyền đồng đẳng với GPT | AI_PR_VIEWER
+
 - Khi bàn giao, Cline chuyển sang `status:review-requested` và `agent:gpt`, **BẮT BUỘC** gửi thông báo Telegram (`node scripts/notify-telegram.mjs`, kiểm tra exit code, ghi `SENT`/`FAILED`); khi `status:blocked`/Decision Gate cũng gửi Telegram. `telegram-bridge.mjs --process` không phải bằng chứng đã thông báo.
 - GPT dùng finding `[GPT-REV-NNN]`; Cline phản hồi `[CLINE-FIX-NNN]`.
 - Không tự merge, không tự deploy, không sửa ngoài phạm vi Issue.

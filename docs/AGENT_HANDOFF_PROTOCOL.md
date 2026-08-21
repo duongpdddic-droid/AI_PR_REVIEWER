@@ -61,6 +61,8 @@ Không dùng Telegram, file inbox cục bộ hoặc lịch sử chat làm nguồ
 |---|---|---|
 | `agent:gpt` | Đang chờ GPT phân tích hoặc review | GPT |
 | `agent:cline` | Đang chờ Cline thực hiện | Cline |
+| `agent:local-reviewer` | Đang chờ AI_PR_VIEWER phân tích hoặc review | AI_PR_VIEWER |
+
 | `status:ready-for-cline` | Đặc tả đã sẵn sàng | Cline |
 | `status:in-progress` | Cline đang thực hiện | Cline |
 | `status:review-requested` | Cline đã bàn giao | GPT |
