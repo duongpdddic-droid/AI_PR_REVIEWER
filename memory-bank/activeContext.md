@@ -64,8 +64,8 @@ Hybrid label + issue việc sửa (không tạo PR mới, không tự approve):
 - `package.json`: +script `orchestrate` → unified-orchestrator; `pnpm orchestrate` dry-run thật: phát hiện PR QLDA_DTXD#32 đã có `agent:gpt` → skip đúng "chống xử lý lại", DONE exit 0.
 
 ### Còn lại (cần người dùng)
-- [ ] Tạo secret `ORCHESTRATOR_PAT` (PAT có quyền repo trên target repos) + variable `ORCHESTRATOR_EXECUTE=true` để bật chạy lịch `--execute` trên GitHub Actions.
-- [ ] Commit + push toàn bộ thay đổi (worktree đang dirty → preflight `--execute` local sẽ fail-closed `BLOCKED_DIRTY_WORKTREE` cho tới khi commit).
+- [x] ~~Tạo secret `ORCHESTRATOR_PAT` + variable `ORCHESTRATOR_EXECUTE`~~ — ĐÃ BẬT (21/08/2026 16:42 UTC): set qua `gh variable/secret set` từ máy local (giá trị secret không in ra chat). Dispatch thử run [32504320114](https://github.com/duongpdddic-droid/AI_PR_REVIEWER/actions/runs/32504320114): `execute=true`, scan QLDA_DTXD#32 → skip đúng (đã có `agent:gpt`), `DONE`, run xanh ~16s. Cron `*/15` đã hoạt động.
+- [x] Commit `7d5bae1` + push origin/main xong (21/08/2026).
 
 ### Quyết định bổ sung (Decision Gate — Bố chốt 21/08/2026 23:05)
 - **BỎ toàn bộ nửa Aider Reviewer**: không khôi phục dispatch aider/model local review cho target repos. Việc deprecate `agent-runner.mjs` (từng chứa dispatch Aider Reviewer) là đúng chủ đích, không phải capability gap.

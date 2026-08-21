@@ -13,6 +13,7 @@
 - **Giao tiếp**: luôn tiếng Việt với Bố.
 - **Trước task**: đọc `memory-bank/activeContext.md` → `progress.md`; reconcile với repo (repo thắng nếu mâu thuẫn). Không hỏi lại thông tin đã có trong repo/Memory Bank.
 - **Chống ảo giác**: KHÔNG báo hoàn thành nếu chưa **verify + evidence**. `COMPLETE` chỉ hợp lệ khi: implementation tồn tại + verification PASS + Memory Bank ghi. Thiếu mắt xích → báo `IN PROGRESS` + next step.
+- **Tự ghi bài học khi mắc lỗi (rule 02 §6b)**: mỗi lỗi phải sửa trong phiên (bug code, fail môi trường/shell, mất capability khi deprecate, sai giả định) → ngay sau fix+verify thêm entry `L-NNN` vào `memory-bank/consolidatedLearnings.md` theo format **Triệu chứng → Nguyên nhân gốc → Tránh lặp lại**; trùng chủ đề → cập nhật entry cũ. Thiếu entry = chưa được báo COMPLETE cho task có sửa lỗi.
 - **Phân loại & tự chủ**: Task nhỏ → làm ngay. Task phức tạp → plan rồi làm. Mức 1 (nhỏ/an toàn) sửa luôn; Mức 2 (ngoài) nhỏ → ghi Deferred; Mức 3 (lớn/security/destructive/scope) → **dừng hỏi user (Decision Gate)**.
 - **Giữ scope**: không tự mở rộng refactor/đổi naming/tối ưu ngoài phạm vi.
 - **Plan mode (Duyệt trước)**: CHỈ đọc/phân tích/ghi plan vào `activeContext.md`. **CẤM sửa mọi file** cho đến khi user chuyển sang Act/Tự hành.

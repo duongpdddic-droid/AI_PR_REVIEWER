@@ -79,7 +79,20 @@ Chỉ đánh dấu `[x]` khi đủ: Implementation tồn tại + Verification PA
 - `progress.md`: summary ngắn (đã đổi gì, trạng thái, kết quả verify). **Quy ước giờ bắt buộc**: mọi entry ghi rõ ngày VÀ giờ (`dd/MM/yyyy HH:mm`) lấy từ `Get-Date` tại thời điểm ghi; cấm bịa giờ.
 - `taskHistory.md`: chỉ khi có nội dung đáng truy nguyên (architectural decision, thay đổi process, deviation, root cause, workaround, failure). Template: Objective/Plan/Decision/Deviation/Root Cause/Verification/Delay-Blocker.
 - `PROJECT_ANALYSIS.md`: chỉ khi thêm/xóa module, đổi architecture/dependency/cấu trúc.
-- `consolidatedLearnings.md`: chỉ khi lesson tái sử dụng, không hiển nhiên.
+- `consolidatedLearnings.md`: **bắt buộc theo §6b khi phiên có sửa lỗi**; ngoài ra chỉ khi lesson tái sử dụng, không hiển nhiên.
+
+## 6b. Tự ghi bài học khi mắc lỗi (bắt buộc)
+- **Trigger**: mọi lỗi phải sửa trong phiên, kể cả lỗi nhỏ:
+  - Bug code/logic do mình viết;
+  - Command/tool fail vì môi trường, shell quirk, process treo, exit code sai lệch;
+  - Capability bị mất/khuyết khi deprecate/thay thế runner hoặc refactor lớn;
+  - Sai giả định dẫn đến phải đổi thiết kế (đặc biệt sau Decision Gate);
+  - Verify/test fail mà nguyên nhân không hiển nhiên.
+- **Hành động**: NGAY SAU khi fix xong + verification PASS (không gom cuối task), thêm 1 entry vào `memory-bank/consolidatedLearnings.md`:
+  - Đánh số tiếp `L-NNN` (lấy số lớn nhất hiện có + 1), kèm ngày (`dd/MM/yyyy` từ `Get-Date`).
+  - Format cố định: **Triệu chứng → Nguyên nhân gốc → Tránh lặp lại**; phần tránh lặp lại phải cụ thể, hành động được (lệnh, flag config, bước check).
+- **Không ghi** (tránh noise): typo thuần; lỗi one-off không thể tái lập và không rút ra được quy tắc; entry trùng nội dung đã có → **cập nhật entry cũ** thay vì thêm mới.
+- **Hook hoàn thành**: task nào phát sinh sửa lỗi thì trước khi báo COMPLETE phải rà `consolidatedLearnings.md` đã ghi đủ entry cho các lỗi đó chưa — thiếu entry = chưa đủ điều kiện báo hoàn thành.
 
 ## 7. Deferred Issues
 Ghi ngắn: `- [ ] <issue> — lý do defer`. Chỉ đưa vào task nếu nó block hoàn thành hoặc tạo rủi ro nghiêm trọng kỹ thuật/security/data. Không tự mở rộng scope.

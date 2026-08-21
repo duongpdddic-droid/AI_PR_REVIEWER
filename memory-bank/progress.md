@@ -10,7 +10,7 @@
 - [x] `.agent/config.json`: `orchestrator` → unified; +`notifyTelegram`. Dọn 2 file rác tên U+2011 trong `.agent/`.
 - [x] `pnpm test` 53/53 PASS (+20 test routing); `pnpm verify` 32/32 PASS.
 - [x] Dry-run thật trên QLDA_DTXD: DONE exit 0; 4 wrapper smoke exit 0 không mutation; `pnpm orchestrate` (script mới) skip đúng PR#32 đã có `agent:gpt`.
-- [ ] Cần người dùng: secret `ORCHESTRATOR_PAT` + `ORCHESTRATOR_EXECUTE=true` để bật lịch execute; commit/push thay đổi.
+- [x] Cần người dùng: secret `ORCHESTRATOR_PAT` + `ORCHESTRATOR_EXECUTE=true` để bật lịch execute; commit/push thay đổi. → **XONG 21/08/2026 23:42**: commit `7d5bae1` pushed; secret+variable set qua gh CLI; dispatch run 32504320114 xanh (`execute=true`, DONE, không mutation — PR#32 skip đúng). Cron `*/15` LIVE.
 
 ## 20/08/2026 20:35 — Khởi tạo bộ khung AI_PR_REVIEWER — COMPLETED
 
