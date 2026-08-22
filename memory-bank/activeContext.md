@@ -23,7 +23,10 @@ Cline executor; KHÔNG tự gắn status:approved, KHÔNG merge/deploy.
 10. [x] Kênh Telegram notify repo này đã hoạt động (copy `~/.qldadtxd/tg.json` → `~/.ai-pr-reviewer/tg.json`).
 
 ## Bước hiện tại
-PR 1 đã MERGE. Chuyển sang chuẩn bị PR 2 (QLDA_DTXD thêm `.github/ai-review-policy.json`) khi Bố ra lệnh.
+PR 2 (QLDA_DTXD) đã tạo + bàn giao: PR duongpdddic-droid/QLDA_DTXD#42, branch
+`chore/issue-2-review-policy`, commit `42eb69c27366225daf61813d6884382479e8d10f`,
+labels `agent:gpt` + `status:review-requested`, CI "Verify code and data" PASS.
+Dừng chờ GPT review. Local QLDA_DTXD đã trả về `main`.
 
 ## Quyết định
 - Policy dùng JSON thay YAML (vòng 1); vòng 2 bump policyVersion `2026-08-23.1` (taxonomy + decisionId).
@@ -31,14 +34,20 @@ PR 1 đã MERGE. Chuyển sang chuẩn bị PR 2 (QLDA_DTXD thêm `.github/ai-re
 - Ngoại lệ quy mô cho PR #3: người dùng chỉ thị sửa trực tiếp trên branch (đã ghi body + comment CLINE-FIX-031).
 - gpt-approval là user-relay gate (không tự xác minh danh tính GPT) — docs ghi rõ.
 - Merge PR #3 không qua GPT approval: theo lệnh trực tiếp của Bố (quyền merge thuộc người dùng).
+- Policy bản QLDA_DTXD giữ nguyên policyVersion `2026-08-23.1`, chỉ khác `requiredChecks`
+  = `Verify code and data` (tên check-run thật, xác minh qua API tại `6db6dee`) — tránh CI_UNKNOWN.
+- Approval GPT vòng fix 2 đến SAU merge (`1ae6d16` stale vs `de9d6cc` gồm thêm `5fba130`/`955864e`
+  ops/docs): ghi nhận truy nguyên, không revert.
 
 ## Vấn đề trì hoãn
 - [ ] `MO_TA_AI_PR_VIEWER.MD` còn tên cũ AI_PR_VIEWER — tài liệu lịch sử, cần quyết định xóa/archive.
-- [ ] PR2 (QLDA_DTXD) thêm policy → target repo hết CI_UNKNOWN fail-closed.
+- [x] ~~PR2 (QLDA_DTXD) thêm policy~~ — DONE: PR QLDA_DTXD#42 chờ GPT review.
+- [ ] Labels cũ trong QLDA_DTXD (`reviewer:gemini`, `reviewer:dual`, `review-fix`) chưa xóa — ngoài scope tài liệu, cần Bố quyết.
+- [ ] Issue #2 chưa đóng — còn điều kiện mục F (GPT-APPROVED đúng SHA từng PR, user merge).
 - [ ] reviewer-agent/ inert giữ nguyên theo Decision Gate 21/08.
 - [x] ~~watchdog-hibernate.mjs thiếu~~ — ĐÃ COPY 23/08/2026 05:22 (`955864e`), heartbeat PASS.
 - [x] ~~Telegram notify FAIL thiếu token~~ — ĐÃ XỬÝ 23/08/2026 05:13 (byte-copy config, SENT).
 
 ## Bước tiếp theo
-PR2: thêm `.github/ai-review-policy.json` (bản `2026-08-23.1` đã chuẩn hóa) vào QLDA_DTXD
-qua PR riêng — chờ lệnh Bố. Issue #2 chưa đóng (còn PR2).
+Chờ GPT review PR QLDA_DTXD#42 (dừng theo lệnh). Sau approval + Bố cho merge → merge PR2,
+đóng điều kiện còn lại của Issue #2 (nếu đủ) hoặc báo Bố quyết đóng.

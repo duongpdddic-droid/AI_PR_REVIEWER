@@ -1,5 +1,16 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 06:00 — Issue #2 phần B: PR2 tại QLDA_DTXD đã bàn giao — COMPLETED
+
+- [x] Đồng bộ main AI_PR_REVIEWER (`de9d6cc`, tree sạch); khảo sát đặc tả B1–B6 + CI QLDA_DTXD.
+- [x] Branch `chore/issue-2-review-policy` từ `origin/main` QLDA_DTXD (`6db6dee`); commit `42eb69c` (7 files, +271/−132).
+- [x] Thêm `.github/ai-review-policy.json` `2026-08-23.1` (requiredChecks = "Verify code and data" — tên check-run thật).
+- [x] Rewrite `docs/AGENT_HANDOFF_PROTOCOL.md` REV-ISSUE-2; sync `AGENTS.md` + `.clinerules/01` §13 + PR/Issue templates + memory-bank progress (QLDA_DTXD).
+- [x] Quality gates QLDA_DTXD: `pnpm verify` 13/13, `pnpm test` PASS (59 assertions), `pnpm test:data` PASS, `git diff --check` sạch (fix blank EOF trước commit).
+- [x] PR duongpdddic-droid/QLDA_DTXD#42: OPEN non-draft, labels `agent:gpt` + `status:review-requested` read-back OK, body read-back OK, CI PASS 25s.
+- [x] Local QLDA_DTXD trả về `main` (up to date origin/main) — không chiếm branch task.
+- Dừng chờ GPT review theo lệnh; KHÔNG merge/deploy.
+
 ## 23/08/2026 05:22 — PR #3 MERGED + copy watchdog sang repo này — COMPLETED
 
 - [x] Copy `scripts/watchdog-hibernate.mjs` từ QLDA_DTXD (chỉ phụ thuộc `./tg-notify-core.mjs` có sẵn + `~/.qldadtxd` dùng chung); `pnpm verify` 44/44 PASS; commit `955864e` push; CI PASS.
