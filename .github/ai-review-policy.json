@@ -1,5 +1,5 @@
 {
-  "policyVersion": "2026-08-22.1",
+  "policyVersion": "2026-08-23.1",
   "description": "Policy canonical cho quy trinh AI PR Review (Issue #2). Tai lieu nguoi doc (AGENT_HANDOFF_PROTOCOL.md, AGENTS.md, .clinerules) PHAI tham chieu file nay, khong tu dinh nghia ban thu hai.",
   "scope": {
     "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD"],
@@ -10,14 +10,17 @@
   ],
   "blockingSeverities": [
     "critical",
-    "high"
+    "important"
   ],
+  "severityTaxonomy": ["critical", "important", "suggestion"],
   "finalReviewer": "agent:gpt",
   "preReviewer": "reviewer:local",
   "executor": "agent:cline",
   "maxReviewRounds": 3,
   "diffLimits": {
-    "maxLines": 1500
+    "maxLines": 1500,
+    "metric": "additions-plus-deletions",
+    "overLimitBehavior": "blocking-decision-gate"
   },
   "authority": {
     "ciVerification": "AI_PR_REVIEWER local",
@@ -40,6 +43,7 @@
       "reviewer",
       "headSha",
       "policyVersion",
+      "decisionId",
       "ciEvidence",
       "openBlockingFindings",
       "reviewedAt"

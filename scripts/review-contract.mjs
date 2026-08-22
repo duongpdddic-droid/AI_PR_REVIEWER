@@ -138,8 +138,17 @@ export function planCiRouting({ ciState } = {}) {
 // Kết quả semantic pre-review của local reviewer (chỉ 2 verdict hợp lệ).
 // verdict: 'PRE_REVIEW_PASS' | 'PRE_REVIEW_FINDINGS'
 // round = số vòng findings đã phát hành trước đó; >= maxRounds → blocked.
+// decisionGate khác null (vd 'diff-limit') → chặn ngay bằng Decision Gate:
+// status:blocked, KHÔNG trả Cline như lỗi code và KHÔNG handoff approval (GPT-REV-031).
 // KHÔNG BAO GIỜ trả label status:approved — approval cuối thuộc GPT.
-export function planPreReviewOutcome({ verdict, round = 0, maxRounds = 3 } = {}) {
+export function planPreReviewOutcome({ verdict, round = 0, maxRounds = 3, decisionGate = null } = {}) {
+  if (decisionGate) {
+    return {
+      action: 'block-decision-gate',
+      addLabels: [LABELS.blocked],
+      removeLabels: [LABELS.reviewing, AGENTS.cline],
+    };
+  }
   if (verdict === 'PRE_REVIEW_PASS') {
     return {
       action: 'handoff-gpt',
@@ -172,6 +181,7 @@ export function buildApprovalMarker(record) {
     reviewer: String(record.reviewer), // 'agent:gpt'
     headSha: String(record.headSha),   // full 40-hex SHA
     policyVersion: String(record.policyVersion),
+    decisionId: String(record.decisionId), // ID quyết định do người dùng relay cung cấp (GPT-REV-032)
     ciEvidence: record.ciEvidence ?? null,
     openBlockingFindings: Number(record.openBlockingFindings ?? 0),
     reviewedAt: String(record.reviewedAt),
@@ -207,7 +217,37 @@ export function isApprovalValid(record, ctx) {
   if (ctx.repository && String(record.repository) !== String(ctx.repository)) return { valid: false, reason: 'sai repository' };
   if (ctx.prNumber != null && Number(record.prNumber) !== Number(ctx.prNumber)) return { valid: false, reason: 'sai PR number' };
   if (Number(record.openBlockingFindings ?? 0) > 0) return { valid: false, reason: 'còn finding blocking mở' };
+  if (!String(record.decisionId || '').trim()) return { valid: false, reason: 'marker thiếu decisionId (không hợp lệ theo GPT-REV-032)' };
   return { valid: true, reason: null };
+}
+
+// User-relay approval payload (GPT-REV-032): bằng chứng ủy quyền do NGƯỜI DÙNG cung cấp,
+// ràng buộc tuyệt đối repo + PR + full HEAD SHA + policyVersion + decision ID.
+// Gate fail-closed: thiếu/lệch bất kỳ trường nào → KHÔNG mutation nào được phép.
+// Lưu ý xác thực: payload chứng minh người relay nắm đúng ngữ cảnh tại thời điểm gọi;
+// script KHÔNG thể tự xác minh danh tính GPT — đảm bảo đó thuộc về kênh relay con người.
+export function validateApprovalPayload(payload, ctx) {
+  if (!payload || typeof payload !== 'object') return { ok: false, error: 'thiếu approval payload' };
+  const p = (k) => String(payload[k] ?? '').trim();
+  const required = ['repository', 'prNumber', 'headSha', 'policyVersion', 'decisionId'];
+  for (const k of required) {
+    if (!p(k)) return { ok: false, error: `payload thiếu ${k}` };
+  }
+  if (!/^[0-9a-f]{40}$/i.test(p('headSha'))) return { ok: false, error: 'payload headSha không phải full 40-hex SHA' };
+  if (!/^\S+$/.test(p('decisionId'))) return { ok: false, error: 'decisionId không được chứa khoảng trắng' };
+  if (ctx && ctx.repository && p('repository') !== String(ctx.repository)) {
+    return { ok: false, error: `payload repository (${p('repository')}) không khớp PR thực tế (${ctx.repository})` };
+  }
+  if (ctx && ctx.prNumber != null && Number(p('prNumber')) !== Number(ctx.prNumber)) {
+    return { ok: false, error: `payload prNumber (${p('prNumber')}) không khớp PR thực tế (${ctx.prNumber})` };
+  }
+  if (ctx && ctx.headSha && p('headSha').toLowerCase() !== String(ctx.headSha).toLowerCase()) {
+    return { ok: false, error: `payload headSha không khớp HEAD hiện tại của PR` };
+  }
+  if (ctx && ctx.policyVersion && p('policyVersion') !== String(ctx.policyVersion)) {
+    return { ok: false, error: `payload policyVersion (${p('policyVersion')}) không khớp policy tại HEAD (${ctx.policyVersion})` };
+  }
+  return { ok: true, error: null };
 }
 
 // Approval hiệu lực MỚI NHẤT cho HEAD hiện tại, hoặc null.
@@ -265,8 +305,14 @@ export function countReviewRounds(comments) {
   return max;
 }
 
-// Gate: còn finding Critical/high đang mở thì KHÔNG được đề xuất/ghi nhận approval.
-export function gateOpenFindings(findings, blockingSeverities = ['critical', 'high']) {
+// Taxonomy severity canonical (GPT-REV-034): critical | important | suggestion.
+// Blocking = critical + important; dùng đồng nhất trong policy/code/docs/test.
+export const SEVERITIES = ['critical', 'important', 'suggestion'];
+export const DEFAULT_BLOCKING_SEVERITIES = ['critical', 'important'];
+
+// Gate: còn finding Critical/Important đang mở thì KHÔNG được đề xuất/ghi nhận approval
+// (finding Important mở cũng chặn handoff/approval — GPT-REV-034).
+export function gateOpenFindings(findings, blockingSeverities = DEFAULT_BLOCKING_SEVERITIES) {
   const block = new Set(blockingSeverities.map((s) => String(s).toLowerCase()));
   return (Array.isArray(findings) ? findings : []).filter((f) => {
     const sev = String((f && f.severity) || '').toLowerCase();
@@ -309,9 +355,13 @@ export function scanDiffForSecrets(diffText) {
 }
 
 // Giới hạn kích thước diff theo policy.diffLimits.maxLines (0/undefined = không giới hạn).
+// Metric canonical (GPT-REV-031): churn review = additions + deletions — cả hai phía diff
+// đều tốn công review, chỉ đếm additions đã đánh giá thấp quy mô thật của PR.
 export function evaluateDiffLimits(policy, diffText) {
   const limit = Number(policy && policy.diffLimits && policy.diffLimits.maxLines) || 0;
-  if (!limit) return { over: false, lines: 0, limit };
-  const added = String(diffText || '').split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
-  return { over: added > limit, lines: added, limit };
+  const lines = String(diffText || '').split('\n');
+  const added = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+  const removed = lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+  const churn = added + removed;
+  return { over: limit > 0 && churn > limit, lines: churn, added, removed, limit };
 }

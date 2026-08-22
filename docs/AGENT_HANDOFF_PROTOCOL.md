@@ -46,8 +46,14 @@ Không dùng Telegram, file inbox cục bộ hoặc lịch sử chat làm nguồ
 ### GPT (`agent:gpt` — final reviewer)
 
 - Chỉ GPT được phát quyết định APPROVAL cuối, relay bởi người dùng qua:
-  `node scripts/gpt-approval.mjs --repo <owner/repo> --pr <số> --note "<trích quyết định>"`.
-- Script tự kiểm chứng trước khi ghi: PR open + CI PASS + có `PRE_REVIEW_PASS` tại đúng HEAD đó.
+  `node scripts/gpt-approval.mjs --repo <owner/repo> --pr <số> --payload '<json>' [--note "<trích quyết định>"]`
+  với json = `{"repository":"<owner/repo>","prNumber":<số>,"headSha":"<full 40 hex>","policyVersion":"<version hiện hành>","decisionId":"<id không khoảng trắng>"}`.
+- **Giới hạn xác thực (GPT-REV-032)**: script là user-relay gate fail-closed — payload phải khớp
+  tuyệt đối repo + PR + full HEAD SHA + policyVersion + decision ID, nếu thiếu/lệch → từ chối,
+  không mutation. Script KHÔNG tự xác minh danh tính GPT; đảm bảo relay đúng quyết định GPT
+  thuộc về người dùng. Không có code path tự động nào được gọi gate này.
+- Thứ tự mutation an toàn (GPT-REV-033): đăng marker TRƯỚC → read-back xác nhận → sau đó mới
+  chuyển `status:approved`; lỗi giữa chừng → PR không bao giờ kết thúc approved-thiếu-marker.
 - Thu hồi approval: `--revoke "<lý do>"`.
 
 ### Cline
@@ -138,7 +144,7 @@ Label vai trò:
 Mỗi finding của pre-reviewer/reviewer phải có:
 
 - Mã: `[LOCAL-REV-001]`, `[LOCAL-REV-002]`... (GPT dùng `[GPT-REV-NNN]` chỉ khi được người dùng lệnh review).
-- Mức độ: Critical, High, Medium hoặc Low — Critical/High là blocking theo `blockingSeverities`.
+- Mức độ theo taxonomy canonical trong policy (`severityTaxonomy`): Critical | Important | Suggestion — Critical và Important là blocking; finding Important còn mở cũng chặn handoff/approval (GPT-REV-034).
 - File và khu vực liên quan; vấn đề đã xác nhận (evidence); rủi ro.
 - Yêu cầu sửa có thể kiểm chứng + điều kiện đóng finding.
 
@@ -156,7 +162,7 @@ PR chỉ đủ điều kiện bàn giao GPT khi:
 
 - GitHub Actions PASS đủ `requiredChecks` trong policy (fail-closed nếu thiếu/không đọc được).
 - `pnpm verify` PASS; `pnpm test` (+ `pnpm test:integration`) PASS với dự án có cấu hình.
-- Không có review thread Critical/High chưa xử lý.
+- Không có review thread Critical/Important chưa xử lý.
 - Không có file ngoài phạm vi; không chứa secret, backup, file tạm hoặc log.
 - Memory Bank cập nhật nếu task làm thay đổi trạng thái dự án.
 
@@ -180,8 +186,9 @@ bằng chứng `SENT`/`FAILED` (xem §11).
 - Tối đa `maxReviewRounds` (policy) vòng pre-review → Cline Fix cho một PR.
 - Không tạo finding mới chỉ để thay đổi phong cách nếu không ảnh hưởng tiêu chí.
 - Thay đổi ngoài Issue phải tạo Issue mới hoặc được người dùng duyệt.
-- Diff vượt `diffLimits.maxLines` (policy) → finding Medium khuyến nghị tách PR (không block approval
-  trừ khi policy đổi `blockingSeverities`).
+- Diff vượt `diffLimits.maxLines` (policy, metric additions-plus-deletions) → finding Critical
+  blocking + **Decision Gate**: chuyển `status:blocked`, không trả Cline như lỗi code và không
+  handoff approval; chỉ người dùng có thể ghi nhận ngoại lệ hoặc yêu cầu tách PR (GPT-REV-031).
 - GPT không tự merge; Cline không tự deploy; reviewer:local không approve.
 
 ## 10. Quy tắc hoàn thành

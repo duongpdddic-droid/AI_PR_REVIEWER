@@ -23,7 +23,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
-  AGENTS, LABELS, POLICY_PATH,
+  AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, POLICY_PATH,
   canMutatePr, countReviewRounds, evaluateChecks, evaluateDiffLimits,
   gateOpenFindings, isStaleEvent, mutationKey, normalizeStatusLabels,
   planApprovalDrift, planCiRouting, planPreReviewOutcome, scanDiffForSecrets,
@@ -146,9 +146,10 @@ function markerBlock(key, extraMarker = '') {
 // Đây là pre-review; tuyệt đối không sinh approval hay status:approved.
 export function runSemanticPreReview(policy, diffText) {
   let findings;
+  let decisionGate = null;
   if (diffText === null || diffText === undefined) {
     findings = [{
-      severity: 'high',
+      severity: 'important',
       status: 'open',
       fileSymbol: '(toàn bộ diff)',
       evidence: 'Không đọc được diff của PR',
@@ -160,20 +161,23 @@ export function runSemanticPreReview(policy, diffText) {
     findings = scanDiffForSecrets(diffText);
     const lim = evaluateDiffLimits(policy, diffText);
     if (lim.over) {
+      // Vượt giới hạn quy mô diff là blocking + Decision Gate (GPT-REV-031):
+      // KHÔNG trả Cline như lỗi code thông thường và KHÔNG handoff approval.
+      decisionGate = 'diff-limit';
       findings.push({
-        severity: 'medium', // medium → không block theo blockingSeverities mặc định
+        severity: 'critical',
         status: 'open',
-        fileSymbol: `(diff ${lim.lines} dòng thêm > giới hạn ${lim.limit})`,
-        evidence: 'Diff vượt diffLimits.maxLines trong policy',
-        risk: 'Review chất lượng thấp khi diff quá lớn',
-        requiredFix: 'Tách PR nhỏ hơn hoặc xin người dùng phê duyệt ngoại lệ',
-        acceptanceCriteria: `Số dòng thêm <= ${lim.limit}`,
+        fileSymbol: `(diff ${lim.lines} dòng churn (${lim.added}+/${lim.removed}-) > giới hạn ${lim.limit})`,
+        evidence: `Diff vượt diffLimits.maxLines theo metric additions-plus-deletions của policy`,
+        risk: 'Review chất lượng thấp khi quy mô diff vượt ngưỡng; Decision Gate kích thước bị vô hiệu',
+        requiredFix: 'Tách PR nhỏ hơn HOẶC người dùng ghi nhận ngoại lệ qua Decision Gate (status:blocked)',
+        acceptanceCriteria: `Tổng dòng thêm+xóa (churn) <= ${lim.limit} hoặc có ngoại lệ người dùng`,
       });
     }
   }
-  const openBlocking = gateOpenFindings(findings, (policy && policy.blockingSeverities) || ['critical', 'high']);
+  const openBlocking = gateOpenFindings(findings, (policy && policy.blockingSeverities) || DEFAULT_BLOCKING_SEVERITIES);
   const verdict = openBlocking.length ? 'PRE_REVIEW_FINDINGS' : 'PRE_REVIEW_PASS';
-  return { verdict, findings, openBlocking };
+  return { verdict, findings, openBlocking, decisionGate };
 }
 
 function formatFindingsComment(findings, round) {
@@ -289,6 +293,7 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     verdict: pre.verdict,
     round: rounds,
     maxRounds: policy ? policy.maxReviewRounds : 3,
+    decisionGate: pre.decisionGate,
   });
 
   const outKey = mutationKey({
@@ -301,25 +306,30 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     if (pre.verdict === 'PRE_REVIEW_PASS') {
       parts.push(`🟢 **PRE_REVIEW_PASS** — pre-review deterministic sạch. Bàn giao GPT (${AGENTS.gpt}) phê duyệt cuối.`);
     } else {
-      parts.push(`🔴 **PRE_REVIEW_FINDINGS** — ${pre.openBlocking.length} finding Critical/High đang mở:\n\n${formatFindingsComment(pre.openBlocking, outcome.action === 'block' ? rounds : rounds + 1)}`);
+      parts.push(`🔴 **PRE_REVIEW_FINDINGS** — ${pre.openBlocking.length} finding Critical/Important đang mở:\n\n${formatFindingsComment(pre.openBlocking, rounds + 1)}`);
       if (outcome.action === 'block') {
         parts.push(`⛔ Vượt maxReviewRounds (${rounds}/${policy ? policy.maxReviewRounds : 3}) — chuyển \`status:blocked\`, cần người dùng quyết định.`);
+      } else if (outcome.action === 'block-decision-gate') {
+        parts.push(`⛔ **DECISION GATE** — vượt giới hạn quy mô diff theo policy (\`diffLimits.maxLines\`, metric additions-plus-deletions): KHÔNG handoff approval, KHÔNG trả Cline như lỗi code thông thường. Chuyển \`status:blocked\` — người dùng quyết định tách PR nhỏ hơn hoặc ghi nhận ngoại lệ.`);
       }
     }
+    // Chỉ vòng request-fix mới tăng bộ đếm round; block/decision-gate không phải vòng fix.
+    const roundMarker = outcome.action === 'request-fix' ? ` <!-- ai-pr-reviewer:round=${rounds + 1} -->` : '';
     const extraMarker = pre.verdict === 'PRE_REVIEW_PASS'
       ? ` <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headSha} -->`
-      : ` <!-- ai-pr-reviewer:round=${rounds + 1} -->`;
+      : roundMarker;
     parts.push(markerBlock(outKey, extraMarker));
     io.postComment(repo, number, parts.join('\n\n'));
   }
 
   if (!dryRun) {
     applyHandoff(io, repo, number, { addLabels: outcome.addLabels, removeLabels: outcome.removeLabels });
-    result.preReview = { verdict: pre.verdict, openBlocking: pre.openBlocking.length, outcome: outcome.action };
+    result.preReview = { verdict: pre.verdict, openBlocking: pre.openBlocking.length, decisionGate: pre.decisionGate, outcome: outcome.action };
 
     const summary = {
       'handoff-gpt': `PRE_REVIEW_PASS — bàn giao GPT phê duyệt cuối (status:review-requested + agent:gpt).`,
       'request-fix': `PRE_REVIEW_FINDINGS (${pre.openBlocking.length} blocking) — trả Cline sửa qua nhãn PR.`,
+      'block-decision-gate': `Diff vượt giới hạn policy (${pre.decisionGate}) — status:blocked, Decision Gate: người dùng quyết định.`,
       'block': `Vượt tối đa ${rounds} vòng fix — status:blocked, cần người dùng quyết định.`,
     }[outcome.action];
     result.notified = io.notify('Kết quả pre-review', `${repo}#${number}: ${summary}`);

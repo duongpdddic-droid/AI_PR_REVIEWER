@@ -14,11 +14,14 @@ import {
 // --- review-contract (Issue #2) — hợp đồng review mới ---
 import {
   LABELS as RL, AGENTS as RA, REVIEWER_LOCAL, POLICY_PATH,
+  DEFAULT_BLOCKING_SEVERITIES, SEVERITIES,
   normalizeStatusLabels, validatePolicy, evaluateChecks, planCiRouting,
   planPreReviewOutcome, buildApprovalMarker, parseApprovalMarkers, isApprovalValid,
   effectiveApproval, planApprovalDrift, isStaleEvent, canMutatePr, mutationKey,
   countReviewRounds, gateOpenFindings, scanDiffForSecrets, evaluateDiffLimits,
+  validateApprovalPayload,
 } from './review-contract.mjs';
+import { runSemanticPreReview } from './unified-orchestrator.mjs';
 import { withRetry } from './tg-notify-core.mjs';
 
 const checks = [];
@@ -28,9 +31,9 @@ const tru = (name, got) => checks.push({ name, ok: Boolean(got), got });
 const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
 const policy = {
-  policyVersion: '2026-08-22.1',
+  policyVersion: '2026-08-23.1',
   requiredChecks: ['verify'],
-  blockingSeverities: ['critical', 'high'],
+  blockingSeverities: ['critical', 'important'],
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
@@ -126,7 +129,7 @@ eq('C.3 validatePolicy thiếu version', validatePolicy({ requiredChecks: [], ma
   const marker = buildApprovalMarker({
     repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA,
     policyVersion: policy.policyVersion, ciEvidence: { ciState: 'pass' },
-    openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z',
+    decisionId: 'dec-c4', openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z',
   });
   tru('C.4 marker html comment', marker.startsWith('<!-- ai-review-approval:{') && marker.endsWith('-->'));
   const recs = parseApprovalMarkers([`nội dung thường ${marker} đuôi`]);
@@ -138,8 +141,9 @@ eq('C.3 validatePolicy thiếu version', validatePolicy({ requiredChecks: [], ma
   eq('C.4 invalid khác reviewer', isApprovalValid({ ...recs[0], reviewer: 'agent:cline' }, { headSha: SHA }).valid, false);
   eq('C.4 invalid policy lệch', isApprovalValid(recs[0], { headSha: SHA, policyVersion: 'khác' }).valid, false);
   eq('C.4 invalid còn blocking', isApprovalValid({ ...recs[0], openBlockingFindings: 2 }, { headSha: SHA }).valid, false);
+  eq('C.4 invalid thiếu decisionId', isApprovalValid({ ...recs[0], decisionId: '' }, { headSha: SHA }).valid, false);
   eq('C.4 marker hỏng bỏ qua', parseApprovalMarkers(['<!-- ai-review-approval:{hỏng -->']).length, 0);
-  const old = buildApprovalMarker({ ...{ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, openBlockingFindings: 0 }, reviewedAt: '2026-08-21T00:00:00Z' });
+  const old = buildApprovalMarker({ ...{ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-old', openBlockingFindings: 0 }, reviewedAt: '2026-08-21T00:00:00Z' });
   eq('C.4 effective chọn mới nhất',
     effectiveApproval([old, marker], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion }).reviewedAt,
     '2026-08-22T00:00:00Z');
@@ -151,7 +155,7 @@ eq('C.3 validatePolicy thiếu version', validatePolicy({ requiredChecks: [], ma
   eq('C.5 drift phát hiện', d.drift, true);
   tru('C.5 drift gỡ approved', d.removeLabels.includes('status:approved'));
   tru('C.5 drift thêm review-requested + gpt', d.addLabels.includes('status:review-requested') && d.addLabels.includes('agent:gpt'));
-  const marker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z' });
+  const marker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-c5', openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z' });
   eq('C.5 approval hợp lệ → không drift', planApprovalDrift({ labels: ['status:approved'], comments: [marker], headSha: SHA, repository: 'o/r', prNumber: 7 }).drift, false);
   eq('C.5 không phải approved → bỏ qua', planApprovalDrift({ labels: ['status:reviewing'], comments: [], headSha: SHA }).drift, false);
 }
@@ -192,16 +196,18 @@ eq('C.9 rounds 0', countReviewRounds(['bình thường']), 0);
 eq('C.9 rounds 2', countReviewRounds(['x <!-- ai-pr-reviewer:round=2 -->']), 2);
 eq('C.9 rounds max', countReviewRounds(['<!-- ai-pr-reviewer:round=1 -->', '<!-- ai-pr-reviewer:round=3 -->']), 3);
 
-// C.10 gate findings blocking.
+// C.10 gate findings blocking (taxonomy canonical: critical | important | suggestion).
 {
   const fs = [
     { severity: 'critical', status: 'open' },
-    { severity: 'high', status: 'resolved' },
-    { severity: 'medium', status: 'open' },
+    { severity: 'important', status: 'resolved' },
+    { severity: 'suggestion', status: 'open' },
   ];
-  eq('C.10 gate chỉ critical mở', gateOpenFindings(fs).length, 1);
-  eq('C.10 gate policy tuỳ chỉnh', gateOpenFindings(fs, ['medium', 'critical']).length, 2);
-  eq('C.10 gate rỗng', gateOpenFindings([]).length, 0);
+  eq('C.10 gate chỉ critical mở (important đã xử lý)', gateOpenFindings(fs).length, 1);
+  tru('C.10 Important mở cũng chặn (GPT-REV-034)', gateOpenFindings([{ severity: 'important', status: 'open' }]).length === 1);
+  eq('C.10 suggestion không chặn', gateOpenFindings([{ severity: 'suggestion', status: 'open' }]).length, 0);
+  eq('C.10 default blocking = critical+important', DEFAULT_BLOCKING_SEVERITIES.join(','), 'critical,important');
+  eq('C.10 taxonomy canonical', SEVERITIES.join(','), 'critical,important,suggestion');
 }
 
 // C.11 secret scan trên diff.
@@ -222,10 +228,16 @@ eq('C.9 rounds max', countReviewRounds(['<!-- ai-pr-reviewer:round=1 -->', '<!--
   eq('C.11 diff rỗng', scanDiffForSecrets('').length, 0);
 }
 
-// C.12 giới hạn diff.
+// C.12 giới hạn diff (metric canonical: churn = additions + deletions — GPT-REV-031).
 eq('C.12 dưới giới hạn', evaluateDiffLimits(policy, '+' + '\n+'.repeat(50)).over, false);
 eq('C.12 vượt giới hạn', evaluateDiffLimits(policy, '+' + '\n+'.repeat(150)).over, true);
 eq('C.12 không cấu hình giới hạn', evaluateDiffLimits({ diffLimits: {} }, '+' + '\n+'.repeat(999)).over, false);
+eq('C.12 churn = added + removed', evaluateDiffLimits(policy, '+' + '\n+'.repeat(40) + '\n-' + '\n-'.repeat(60)).lines, 102);
+tru('C.12 chỉ deletion cũng vượt', evaluateDiffLimits(policy, '-' + '\n-'.repeat(120)).over === true);
+{
+  const r = evaluateDiffLimits(policy, '+\n-\n+');
+  eq('C.12 chi tiết added/removed', `${r.added}/${r.removed}`, '2/1');
+}
 
 // C.13 withRetry có giới hạn (Issue #2 A7).
 {
@@ -247,6 +259,42 @@ eq('C.14 REVIEWER_LOCAL', REVIEWER_LOCAL, 'reviewer:local');
 eq('C.14 POLICY_PATH', POLICY_PATH, '.github/ai-review-policy.json');
 tru('C.14 không có local-reviewer trong AGENTS', !Object.values(RA).includes('agent:local-reviewer'));
 eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
+
+// --- Vòng 2 fix theo GPT review (GPT-REV-031..034) ---
+
+// C.15 (GPT-REV-031): diff vượt 1.500 dòng KHÔNG THỂ PRE_REVIEW_PASS → Decision Gate.
+{
+  const big = Array.from({ length: 1501 }, (_, i) => `+line ${i}`).join('\n');
+  const r = runSemanticPreReview({ ...policy, diffLimits: { maxLines: 1500 } }, big);
+  eq('C.15 diff 1501 dòng → FINDINGS (không PASS)', r.verdict, 'PRE_REVIEW_FINDINGS');
+  eq('C.15 decisionGate = diff-limit', r.decisionGate, 'diff-limit');
+  const outcome = planPreReviewOutcome({ verdict: r.verdict, round: 0, maxRounds: 3, decisionGate: r.decisionGate });
+  eq('C.15 action block-decision-gate', outcome.action, 'block-decision-gate');
+  tru('C.15 blocked + KHÔNG handoff gpt', outcome.addLabels.includes(RL.blocked) && !outcome.addLabels.includes(RA.gpt));
+  tru('C.15 finding vượt ngưỡng là critical (blocking)', r.openBlocking.some((f) => f.severity === 'critical' && String(f.evidence).includes('additions-plus-deletions')));
+  // Diff đúng giới hạn thì vẫn PASS.
+  const ok = runSemanticPreReview({ ...policy, diffLimits: { maxLines: 1500 } }, Array.from({ length: 1500 }, (_, i) => `+l ${i}`).join('\n'));
+  eq('C.15 đúng 1500 churn vẫn PASS', ok.verdict, 'PRE_REVIEW_PASS');
+}
+
+// C.16 (GPT-REV-032): approval payload phải ràng buộc repo/pr/SHA/policy/decisionId — fail-closed.
+{
+  const ctx = { repository: 'o/r', prNumber: 7, headSha: SHA, policyVersion: policy.policyVersion };
+  const base = { repository: 'o/r', prNumber: 7, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-1' };
+  eq('C.16 payload hợp lệ', validateApprovalPayload(base, ctx).ok, true);
+  for (const k of Object.keys(base)) {
+    const broken = { ...base };
+    delete broken[k];
+    tru(`C.16 thiếu ${k} → chặn`, !validateApprovalPayload(broken, ctx).ok);
+  }
+  tru('C.16 sai repository → chặn', !validateApprovalPayload({ ...base, repository: 'other/r' }, ctx).ok);
+  tru('C.16 sai prNumber → chặn', !validateApprovalPayload({ ...base, prNumber: 8 }, ctx).ok);
+  tru('C.16 SHA ngắn (<40 hex) → chặn', !validateApprovalPayload({ ...base, headSha: 'abc123def456' }, ctx).ok);
+  tru('C.16 SHA lệch HEAD → chặn', !validateApprovalPayload({ ...base, headSha: SHA2 }, ctx).ok);
+  tru('C.16 sai policyVersion → chặn', !validateApprovalPayload({ ...base, policyVersion: '2026-08-22.1' }, ctx).ok);
+  tru('C.16 decisionId trống/khoảng trắng → chặn', !validateApprovalPayload({ ...base, decisionId: '  ' }, ctx).ok);
+  tru('C.16 payload null → chặn', !validateApprovalPayload(null, ctx).ok);
+}
 
 let fail = 0;
 console.log('\n=== TEST PURE LOGIC ===');
