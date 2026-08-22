@@ -10,7 +10,7 @@
 - Tuyệt đối không: tự ý merge vào `main`, deploy production, reset/stash/clean, đọc hoặc in giá trị secret.
 
 ## Vòng review PR (label loop)
-Khi PR ở target repo bị gắn `status:changes-requested` + `agent:cline` kèm Issue `[review-fix]`:
+Khi PR ở target repo bị gắn `status:changes-requested` + `agent:cline` (kèm findings `[LOCAL-REV-NNN]` trong comment PR — KHÔNG có issue [review-fix], mọi vòng fix đi qua nhãn trên PR):
 1. Checkout đúng branch của PR (worktree riêng, ví dụ `gh pr checkout <số>`).
 2. Đọc từng finding `[LOCAL-REV-NNN]` trong review comments của PR.
 3. Sửa đúng finding; phản hồi bằng `[CLINE-FIX-NNN]` kèm commit + lệnh kiểm tra.

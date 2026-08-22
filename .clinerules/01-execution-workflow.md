@@ -202,23 +202,35 @@ Mục đích: nhận lệnh Telegram cả khi Cline đang giữa task, không ch
 - Khi bàn giao:
   1. Chạy các quality gate áp dụng.
   2. Mở Draft Pull Request bằng `.github/PULL_REQUEST_TEMPLATE.md`.
-  3. Liên kết Issue bằng `Closes #<issue-number>`.
+  3. Liên kết Issue bằng `Ref #<issue-number>` (chỉ `Closes #` khi PR hoàn tất trọn vẹn Issue).
   4. Ghi commit và bằng chứng kiểm tra thật.
-  5. Chuyển sang `status:review-requested` và `agent:gpt`.
-  6. **BẮT BUỘC** thông báo bàn giao qua Telegram (GPT-REV-006): `node scripts/notify-telegram.mjs "<tiêu đề>" "<tóm tắt>"` → kiểm tra exit code (`0`=SENT; `1`/`2`=FAILED kèm lý do) → ghi bằng chứng vào Memory Bank. `telegram-bridge.mjs --process` KHÔNG được tính là bằng chứng đã thông báo.
-- Decision Gate/blocked (mọi kênh): gửi câu hỏi qua `scripts/progress-report.mjs` NHƯ chuẩn §5 và **BẮT BUỘC** thêm tin `notify-telegram.mjs` nêu `BLOCKED` + Issue/PR + câu cần quyết định, ghi `SENT`/`FAILED`.
+  5. Chuyển sang `status:review-requested` (REV-ISSUE-2: reviewer:local là PRE-reviewer —
+     CI verification fail-closed + pre-review deterministic, chỉ phát `PRE_REVIEW_PASS` |
+     `PRE_REVIEW_FINDINGS`, KHÔNG BAO GIỜ gắn `status:approved`; GPT (`agent:gpt`) là reviewer
+     phê duyệt cuối DUY NHẤT, approval ghi qua `scripts/gpt-approval.mjs` khóa full HEAD SHA +
+     policyVersion; quy tắc canonical: `.github/ai-review-policy.json`).
+  6. KHÔNG gửi báo cáo Telegram khi tạo Issue hay trong lúc thực hiện Issue — orchestrator chỉ
+     notify sau mutation thành công (script retry tối đa 3 lần, kiểm tra exit code). Riêng
+     `status:blocked`/Decision Gate vẫn hỏi người dùng theo §5.
+- Reviewer tự hành: orchestrator `scripts/unified-orchestrator.mjs` tự xử lý PR
+  `status:review-requested` (CI → `status:reviewing` → pre-review → bàn giao GPT hoặc trả Cline
+  `[LOCAL-REV-NNN]` qua nhãn PR — KHÔNG tạo issue [review-fix]); KHÔNG chờ hỏi người dùng đồng ý,
+  KHÔNG tự merge/deploy/approve.
+- Decision Gate/blocked (mọi kênh): dừng và hỏi người dùng theo §5.
 - Khi nhận review:
-  - Xử lý từng finding theo mã `[GPT-REV-NNN]`.
-  - Phản hồi bằng `[CLINE-FIX-NNN]`, commit, nội dung sửa và kết quả kiểm tra.
+  - Xử lý từng finding theo mã `[LOCAL-REV-NNN]`.
+  - Phản hồi bằng `[CLINE-FIX-NNN]`, commit, nội dung sửa và kết quả kiểm tra; push thẳng lên
+    branch của PR.
   - Không tự resolve thread nếu chưa có bằng chứng.
 - Giới hạn:
   - Không tự merge vào `main`.
   - Không tự `clasp push` hoặc deploy.
   - Không sửa ngoài phạm vi Issue.
-  - Tối đa ba vòng review–fix; vượt giới hạn phải chuyển `status:blocked`.
-- **Quy tắc phối hợp giữa các Reviewer và Coder**:
-  - Khi một reviewer (GPT hoặc AI_PR_VIEWER) thực hiện review sau, reviewer đó **bắt buộc phải đọc ý kiến/finding của reviewer trước đó**, đưa ra nhận xét phản biện hoặc bổ sung, và báo cáo lại kết quả so sánh này cho người dùng.
-  - Đối với Coder (Cline):
-    - Nếu **cả hai reviewer đều phê duyệt (`approved`)**, Coder thực thi theo các chỉ dẫn/yêu cầu của reviewer thực hiện sau cùng.
-    - Nếu **chỉ mới có 1 reviewer phê duyệt**, Coder phải dừng lại và mở câu hỏi xin ý kiến người dùng xem có đồng ý tiến hành thực thi hay không trước khi tiếp tục.
+  - Tối đa `maxReviewRounds` (policy) vòng review–fix; vượt giới hạn phải chuyển `status:blocked`.
+- **Phân vai approval (REV-ISSUE-2)**:
+  - CI PASS không sinh approval; chỉ cho phép `status:reviewing`.
+  - Chỉ GPT approval cuối; approval khóa HEAD SHA — HEAD đổi là vô hiệu, GPT phải review lại.
+  - Approval-drift: PR `status:approved` thiếu marker hợp lệ → orchestrator gỡ hiệu lực tự động.
+  - Merge/deploy luôn thuộc người dùng.
+
 

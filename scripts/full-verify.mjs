@@ -97,6 +97,20 @@ try {
   } else {
     add('test-pure-logic.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
   }
+  const intTest = path.join(ROOT, 'scripts', 'test-integration-orchestrator.mjs');
+  if (fs.existsSync(intTest)) {
+    const ri = spawnSync(node, [intTest], { encoding: 'utf8' });
+    add('test-integration-orchestrator.mjs', ri.status === 0, ri.status === 0 ? '' : (ri.stdout || ri.stderr || '').trim().split('\n').slice(-3).join(' | '));
+  } else {
+    add('test-integration-orchestrator.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
+  }
+  const gateTest = path.join(ROOT, 'scripts', 'test-integration-approval-gate.mjs');
+  if (fs.existsSync(gateTest)) {
+    const rg = spawnSync(node, [gateTest], { encoding: 'utf8' });
+    add('test-integration-approval-gate.mjs', rg.status === 0, rg.status === 0 ? '' : (rg.stdout || rg.stderr || '').trim().split('\n').slice(-3).join(' | '));
+  } else {
+    add('test-integration-approval-gate.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
+  }
 
   // 5. behavior map: refresh + baseline compare (baseline thiếu -> skip, không fail)
   const extractMap = path.join(ROOT, 'scripts', 'extract-behavior-map.mjs');

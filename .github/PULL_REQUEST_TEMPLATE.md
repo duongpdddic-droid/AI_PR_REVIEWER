@@ -1,6 +1,13 @@
 ## Issue liên quan
 
-Closes #
+Ref #
+<!-- Chỉ dùng "Closes #" khi PR này hoàn tất trọn vẹn Issue. -->
+
+## HEAD đã pre-review
+
+- Full SHA: `<điền full 40-hex SHA của commit cuối>`
+- Kết quả CI: PASS (required checks theo `.github/ai-review-policy.json`)
+- Pre-review: `PRE_REVIEW_PASS` (reviewer:local) — approval cuối thuộc GPT qua `scripts/gpt-approval.mjs`
 
 ## Mục tiêu
 
@@ -60,9 +67,11 @@ Kết quả:
 ## Trạng thái bàn giao
 
 - [ ] Draft — Cline đang thực hiện
-- [ ] Ready for GPT review
+- [ ] Ready for GPT review (`status:review-requested` + `agent:gpt`; CI PASS + PRE_REVIEW_PASS tại HEAD ghi trên)
 - [ ] Đã xử lý toàn bộ review thread
 
-## Ghi chú cho GPT Reviewer
+## Ghi chú cho GPT (final reviewer)
 
 Liệt kê khu vực cần GPT kiểm tra kỹ hoặc quyết định còn mở.
+GPT phê duyệt cuối được relay qua `node scripts/gpt-approval.mjs --repo <o/r> --pr <n> --note "<quyết định>"`;
+merge/deploy vẫn do người dùng thực hiện.
