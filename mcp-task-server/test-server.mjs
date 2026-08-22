@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { checkTransition, extractStatus, parseRepos, validateRepo } from "./server.mjs";
+import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs } from "./server.mjs";
 
 const REPO = "duongpdddic-droid/QLDA_DTXD";
 let passed = 0;
@@ -45,6 +45,32 @@ for (const bad of ["../etc/passwd", "a b/c", "owner/", "/repo", "a/b/c", "", "-R
   let threw = false;
   try { validateRepo(bad); } catch { threw = true; }
   ok(threw, `validateRepo chặn '${bad}'`);
+}
+
+// ---------------------------------------------------------------------------
+// 2b) Pure logic — ref validation & task_list filter args (nâng cấp A)
+// ---------------------------------------------------------------------------
+console.log("[2b] Ref validation & list filter args");
+ok(validateRef("feat/issue-31-coder") === "feat/issue-31-coder", "validateRef chấp nhận ref chuẩn");
+ok(validateRef("main") === "main", "validateRef chấp nhận 'main'");
+for (const bad of ["", "-R", "--head", "a b", "..", "a/../b", "feat\\x"]) {
+  let threw = false;
+  try { validateRef(bad); } catch { threw = true; }
+  ok(threw, `validateRef chặn ref bẩn '${bad}'`);
+}
+
+const listArgs = buildListArgs({ state: "open", status: "ready-for-cline", agent: "cline", limit: 250 });
+ok(listArgs[0] === "issue" && listArgs[1] === "list", "buildListArgs bắt đầu bằng gh issue list");
+ok(listArgs.includes("--state") && listArgs.includes("open"), "buildListArgs có --state open");
+ok(listArgs.includes("--limit") && listArgs.includes("250"), "buildListArgs có --limit 250");
+ok(listArgs.includes("--label") && listArgs.includes("status:ready-for-cline") &&
+   listArgs.includes("agent:cline"), "buildListArgs thêm --label status:*/agent:*");
+ok(!buildListArgs({}).includes("status:"), "buildListArgs không thêm label khi không lọc");
+
+for (const bad of [{ state: "weird" }, { limit: 0 }, { limit: 2000 }, { limit: 1.5 }]) {
+  let threw = false;
+  try { buildListArgs(bad); } catch { threw = true; }
+  ok(threw, `buildListArgs chặn input sai ${JSON.stringify(bad)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -97,9 +123,9 @@ try {
 
   const tools = await rpc("tools/list", {});
   const names = tools.result.tools.map((t) => t.name);
-  ok(names.length === 7 &&
-     ["task_list","task_get","task_create","task_claim","task_handoff","task_review","task_block"]
-       .every((n) => names.includes(n)), `tools/list đủ 7 tools (${names.join(", ")})`);
+  ok(names.length === 9 &&
+     ["task_list","task_get","task_create","task_claim","task_handoff","task_review","task_block","task_comment","task_pr"]
+       .every((n) => names.includes(n)), `tools/list đủ 9 tools (${names.join(", ")})`);
   ok(tools.result.tools.every((t) => t.inputSchema?.type === "object"), "mọi tool đều có inputSchema");
 
   // tools/call read-only trên repo thật

@@ -55,6 +55,16 @@ export function validateRepo(repo) {
   return repo;
 }
 
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+/** Validate tên nhánh/ref cho `gh pr create` (chặn flag injection kiểu `-R`, `--head`, path traversal `..`). */
+export function validateRef(ref) {
+  if (typeof ref !== "string" || !REF_RE.test(ref) || ref.startsWith("-") || ref.includes("..")) {
+    throw new Error(`Ref không hợp lệ: '${ref}'`);
+  }
+  return ref;
+}
+
 export function parseRepos(envValue) {
   return (envValue ?? "")
     .split(",")
@@ -114,11 +124,19 @@ async function listLabels(repo, number) {
   return issue.labels.map((l) => l.name);
 }
 
-/** Đặt status mới (+ agent) cho Issue: gỡ mọi label status/agent cũ, gắn nhãn mới. */
-async function setStatus(repo, number, toStatus, toAgent) {
+/** Đặt status mới (+ agent) cho Issue: gỡ mọi label status/agent cũ, gắn nhãn mới.
+ *  `expect`: danh sách status hợp lệ tại thời điểm này (re-check chống race giữa 2 gh call).
+ *  Nếu trạng thái đã đổi ngoài `expect` → fail-closed, KHÔNG mutation. */
+async function setStatus(repo, number, toStatus, toAgent, expect) {
   ensureLabel(repo, `status:${toStatus}`);
   if (toAgent) ensureLabel(repo, `agent:${toAgent}`, toAgent === "cline" ? "1d76db" : "d93f0b");
   const current = await listLabels(repo, number);
+  const cur = extractStatus(current);
+  if (expect && !expect.includes(cur)) {
+    throw new Error(
+      `Trạng thái đã đổi khi đang xử lý: mong đợi [${expect.join(", ")}], hiện tại '${cur ?? "(không có)"}' — không mutation`,
+    );
+  }
   const remove = current.filter(
     (l) =>
       l.startsWith("status:") ||
@@ -153,18 +171,31 @@ function summarize(repo, issue) {
   };
 }
 
+/** Dựng args cho `gh issue list` (lọc server-side status/agent/state/limit). */
+export function buildListArgs({ state = "open", status, agent, limit = 100 } = {}) {
+  if (!["open", "closed", "all"].includes(state)) {
+    throw new Error("'state' phải là 'open' | 'closed' | 'all'");
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+    throw new Error("'limit' phải là số nguyên 1..1000");
+  }
+  const args = ["issue", "list", "--state", state, "--limit", String(limit),
+    "--json", "number,title,labels,url"];
+  if (status) args.push("--label", `status:${status}`);
+  if (agent) args.push("--label", `agent:${agent}`);
+  return args;
+}
+
 export const ops = {
-  async task_list({ repo, repos } = {}) {
+  async task_list({ repo, repos, state, status, agent, limit } = {}) {
     const targets = repo ? [validateRepo(repo)] : (repos?.length ? repos : defaultRepos());
     if (targets.length === 0) {
       throw new Error("Chưa xác định repo: truyền 'repo', 'repos' hoặc đặt env MCP_TASK_REPOS");
     }
+    const listArgs = buildListArgs({ state, status, agent, limit });
     const out = [];
     for (const r of targets) {
-      const issues = JSON.parse(
-        gh(["issue", "list", "--state", "open", "--limit", "100",
-            "--json", "number,title,labels,url"], { repo: r }),
-      );
+      const issues = JSON.parse(gh(listArgs, { repo: r }));
       for (const i of issues) {
         if (i.labels.some((l) => TASK_LABEL_RE.test(l.name))) out.push(summarize(r, i));
       }
@@ -201,7 +232,7 @@ export const ops = {
     const current = await listLabels(r, number);
     const check = checkTransition("claim", extractStatus(current));
     if (!check.ok) throw new Error(check.error);
-    const labels = await setStatus(r, number, check.to, check.agent);
+    const labels = await setStatus(r, number, check.to, check.agent, TRANSITIONS.claim.from);
     return { repo: r, number, status: `status:${check.to}`, labels };
   },
 
@@ -211,7 +242,7 @@ export const ops = {
     const current = await listLabels(r, number);
     const check = checkTransition("handoff", extractStatus(current));
     if (!check.ok) throw new Error(check.error);
-    const labels = await setStatus(r, number, check.to, check.agent);
+    const labels = await setStatus(r, number, check.to, check.agent, TRANSITIONS.handoff.from);
     if (pr) {
       gh(["issue", "comment", String(number), "--body",
         `Bàn giao review: PR #${pr}. Labels: agent:gpt + status:review-requested.`], { repo: r });
@@ -226,13 +257,13 @@ export const ops = {
     const r = repo ?? defaultRepos()[0];
     if (!r) throw new Error("Chưa xác định repo");
     const current = await listLabels(r, number);
-    const check = checkTransition(verdict === "approve" ? "approve" : "requestChanges",
-      extractStatus(current));
+    const action = verdict === "approve" ? "approve" : "requestChanges";
+    const check = checkTransition(action, extractStatus(current));
     if (!check.ok) throw new Error(check.error);
     if (comment) {
       gh(["issue", "comment", String(number), "--body", String(comment)], { repo: r });
     }
-    const labels = await setStatus(r, number, check.to, check.agent);
+    const labels = await setStatus(r, number, check.to, check.agent, TRANSITIONS[action].from);
     return { repo: r, number, verdict, status: `status:${check.to}`, labels };
   },
 
@@ -245,6 +276,32 @@ export const ops = {
     const labels = await setStatus(r, number, "blocked", null);
     return { repo: r, number, status: "status:blocked", labels };
   },
+
+  async task_comment({ repo, number, body }) {
+    if (!Number.isInteger(number) || number <= 0) throw new Error("'number' phải là số nguyên dương");
+    if (!body || typeof body !== "string") throw new Error("'body' là bắt buộc");
+    const r = repo ?? defaultRepos()[0];
+    if (!r) throw new Error("Chưa xác định repo");
+    gh(["issue", "comment", String(number), "--body", String(body)], { repo: r });
+    return { repo: r, number, commented: true };
+  },
+
+  async task_pr({ repo, number, head, base = "main", title, body }) {
+    if (!Number.isInteger(number) || number <= 0) throw new Error("'number' phải là số nguyên dương");
+    if (!head || typeof head !== "string") throw new Error("'head' là bắt buộc (tên nhánh coder)");
+    validateRef(head);
+    validateRef(base);
+    const r = repo ?? defaultRepos()[0];
+    if (!r) throw new Error("Chưa xác định repo");
+    const prTitle = title ?? `PR cho Issue #${number}`;
+    const prBody = body ?? `Closes #${number}`;
+    const url = gh(["pr", "create", "--base", base, "--head", head,
+      "--title", prTitle, "--body", prBody], { repo: r }).trim();
+    const prNumber = Number(url.match(/\/pull\/(\d+)$/)?.[1]);
+    gh(["issue", "comment", String(number), "--body",
+      `Bàn giao review: PR #${prNumber ?? "?"}.`], { repo: r });
+    return { repo: r, number, pr: prNumber ?? null, url };
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -256,7 +313,11 @@ const numberProp = { type: "number", description: "Số Issue" };
 export const TOOLS = [
   { name: "task_list", description: "Liệt kê task (Issue có label agent:*/status:*) trên một hoặc nhiều repo",
     inputSchema: { type: "object", properties: { repo: repoProp,
-      repos: { type: "array", items: { type: "string" }, description: "Nhiều repo cho 1 lần liệt kê" } } } },
+      repos: { type: "array", items: { type: "string" }, description: "Nhiều repo cho 1 lần liệt kê" },
+      state: { type: "string", enum: ["open", "closed", "all"], description: "Trạng thái Issue (mặc định open)" },
+      status: { type: "string", description: "Lọc theo status:* (vd: ready-for-cline)" },
+      agent: { type: "string", enum: ["cline", "gpt"], description: "Lọc theo agent:*" },
+      limit: { type: "number", description: "Số task tối đa (1..1000, mặc định 100)" } } } },
   { name: "task_get", description: "Xem chi tiết một task Issue",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp }, required: ["number"] } },
   { name: "task_create", description: "Tạo Issue task mới (mặc định agent:cline + status:ready-for-cline)",
@@ -277,6 +338,15 @@ export const TOOLS = [
   { name: "task_block", description: "Đánh dấu blocked (cần người dùng quyết định)",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       reason: { type: "string" } }, required: ["number"] } },
+  { name: "task_comment", description: "Thêm comment vào Issue task (tiến độ, ghi chú)",
+    inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
+      body: { type: "string", description: "Nội dung comment" } }, required: ["number", "body"] } },
+  { name: "task_pr", description: "Tạo Pull Request từ nhánh coder và liên kết Issue (Closes #N)",
+    inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
+      head: { type: "string", description: "Nhánh nguồn (coder) — bắt buộc" },
+      base: { type: "string", description: "Nhánh đích (mặc định main)" },
+      title: { type: "string" }, body: { type: "string" } },
+      required: ["number", "head"] } },
 ];
 
 // ---------------------------------------------------------------------------
