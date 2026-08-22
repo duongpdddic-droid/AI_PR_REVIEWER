@@ -1,5 +1,13 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 05:22 — PR #3 MERGED + copy watchdog sang repo này — COMPLETED
+
+- [x] Copy `scripts/watchdog-hibernate.mjs` từ QLDA_DTXD (chỉ phụ thuộc `./tg-notify-core.mjs` có sẵn + `~/.qldadtxd` dùng chung); `pnpm verify` 44/44 PASS; commit `955864e` push; CI PASS.
+- [x] `node scripts/watchdog-hibernate.mjs --heartbeat` — exit 0 trong repo này.
+- [x] PR #3: `gh pr ready` (trước đó còn draft) → `--merge` **theo chỉ thị trực tiếp của Bố** (không chờ GPT duyệt vòng fix 2) → state MERGED, mergeCommit `de9d6cc4cad578e1e8a96bf0e2d34563750e9a6c`.
+- [x] Local `main` fast-forward `91e5871..de9d6cc` (+2352/−683, 24 files).
+- Ghi chú: merge trước GPT approval là quyết định của Bố — quyền merge thuộc người dùng theo protocol.
+
 ## 23/08/2026 05:13 — Khôi phục kênh Telegram notify repo này — COMPLETED
 
 - [x] Nguyên nhân FAIL exit 2: `notify-telegram.mjs` đọc config `~/.ai-pr-reviewer/tg.json` (không tồn tại), token thật nằm ở `~/.qldadtxd/tg.json`.
