@@ -1,5 +1,17 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 01:05 — Issue #2 PR1: hợp đồng review mới (GPT final approval, local pre-review) — COMPLETED (code+test)
+
+- [x] `scripts/review-contract.mjs` (mới): lõi thuần — evaluateChecks fail-closed (missing/unknown), planCiRouting (pass→`status:reviewing`, KHÔNG approve), planPreReviewOutcome (handoff-gpt/request-fix/block), approval marker khóa full HEAD SHA + policyVersion, planApprovalDrift, isStaleEvent/canMutatePr/mutationKey, normalizeStatusLabels (đúng 1 status:*), countReviewRounds, gateOpenFindings, scanDiffForSecrets, evaluateDiffLimits.
+- [x] `scripts/unified-orchestrator.mjs` viết lại: DI io adapter; bỏ auto-approve từ CI PASS; bỏ tạo issue [review-fix]; read-before-mutation + read-after-write verify + tự chữa multi-status; chặn event muộn (headSha đổi giữa chừng, PR closed/merged); idempotency key `repo::pr::headSha::policy::action`; quét cả PR approved để bắt approval-drift.
+- [x] `scripts/gpt-approval.mjs` (mới): cổng DUY NHẤT ghi approval GPT (`--note` / `--revoke`), kiểm chứng CI PASS + PRE_REVIEW_PASS tại đúng HEAD trước mutation.
+- [x] `.github/ai-review-policy.json` (mới): policy canonical v1 `2026-08-22.1`.
+- [x] `notify-telegram.mjs`: retry có giới hạn qua `withRetry` (tg-notify-core, 3 lần); giữ exit code 0/1/2.
+- [x] Xóa helper reviewer-side chết trong `autonomous-core.mjs` (planRouting/fixIssue*/parseChecks*/findingsFromFailedChecks) theo A6/A8.
+- [x] Tests: `test-pure-logic.mjs` viết lại 101/101 PASS; `test-integration-orchestrator.mjs` (mới, mock gh) 52/52 PASS — 14 kịch bản gồm happy-path, idempotency, fail-closed thiếu policy/checks, secret trong diff, drift, event muộn, read-after-write FAIL, dry-run 0 mutation.
+- [x] Docs/config đồng bộ REV-ISSUE-2: AGENT_HANDOFF_PROTOCOL.md viết lại; AGENTS.md; .clinerules/01 §13; PULL_REQUEST_TEMPLATE.md (+HEAD SHA); .agent/config.json + reviewer-agent/reviewer.config.json (label reviewing + policy + finalReviewer/preReviewer); conventions-coder/reviewer.
+- [x] Verify: pnpm test 101/101, pnpm test:integration 52/52, pnpm verify 39/39 — PASS. Bài học mới L-009…L-012 (PowerShell BOM/mojibake, idempotency nhánh con, dry-run guard).
+
 ## 22/08/2026 10:02 — Tạo Issue test handoff QLDA_DTXD#35 — COMPLETED
 
 - [x] Tạo issue `test(e2e): kiem tra luong tu nhan viec va ban giao review giua 2 agent` — https://github.com/duongpdddic-droid/QLDA_DTXD/issues/35, labels `agent:cline` + `status:ready-for-cline`, body hướng dẫn: nhánh từ main → thêm dòng `<!-- e2e-agent-handoff-test -->` vào README.md → verify pass → Draft PR `status:review-requested`.

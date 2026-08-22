@@ -40,6 +40,26 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: PowerShell 5.1 decode stdout của native command theo codepage single-byte ([Console]::OutputEncoding ≠ UTF-8) → byte UTF-8 của `gh` bị diễn giải thành CP1250. **Dữ liệu trên GitHub vẫn đúng UTF-8** — chỉ hiển thị/verify qua stdout mới vỡ.
 - **Tránh lặp lại**: KHÔNG dùng stdout `gh`/git làm bằng chứng verify encoding với text Unicode. Verify bằng script Node tạm (fetch API + `codePointAt(0)` so mã ký tự, ví dụ Đ = 272) hoặc `[IO.File]::ReadAllBytes`. Text Unicode đưa vào CLI luôn qua file (`--body-file` UTF-8), không truyền inline qua arg.
 
+## L-009 (22/08/2026) — PowerShell 5.1 `Set-Content -Encoding utf8` ghi BOM
+- **Triệu chứng**: trim `memory-bank/activeContext.md` bằng `Set-Content -Encoding utf8` → file có U+FEFF đầu file, vi phạm quy ước UTF-8 không BOM (full-verify sẽ fail ở BOM scan).
+- **Nguyên nhân gốc**: PowerShell 5.1 `-Encoding utf8` của `Set-Content`/`Out-File` mặc định ghi UTF-8 CÓ BOM.
+- **Tránh lặp lại**: ghi file text qua shell luôn dùng `[IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`; ưu tiên tool `editor` (không sinh BOM). Sau mỗi lần shell ghi file text, chạy BOM scan trước khi commit.
+
+## L-010 (22/08/2026) — Idempotency key phải phủ cả nhánh con của action
+- **Triệu chứng**: chạy lại orchestrator cùng HEAD phát hành trùng comment `PRE_REVIEW_PASS`, lặp mutation `status:reviewing` dù action đã có marker.
+- **Nguyên nhân gốc**: chỉ kiểm khóa action cấp 1 (`start-semantic-review`), quên verdict con `pre-review:PRE_REVIEW_*` có khóa riêng.
+- **Tránh lặp lại**: khi thêm action có nhánh con, khai báo toàn bộ khóa con trong cùng điểm kiểm idempotency (`processPr`); integration test bắt buộc case "chạy lại cùng HEAD → 0 mutation" cho từng nhánh (I.2).
+
+## L-011 (22/08/2026) — Dry-run phải chặn cả notify và nhánh mutation thứ hai
+- **Triệu chứng**: `processOneCycle({dryRun:true})` vẫn gọi Telegram và đổi nhãn ở nhánh pre-review.
+- **Nguyên nhân gốc**: guard `if (!dryRun)` chỉ bọc bước đầu; `applyHandoff(outcome)` + `io.notify(...)` cuối hàm nằm ngoài guard.
+- **Tránh lặp lại**: với hàm nhiều điểm mutation, gom mutation/notify sau một cờ `live = !dryRun`; integration test assert "0 comment + 0 notify + nhãn giữ nguyên" cho MỌI đường đi (I.14), không chỉ happy path.
+
+## L-012 (23/08/2026) — `Get-Content -Raw` không `-Encoding utf8` phá UTF-8 không BOM
+- **Triệu chứng**: trim `memory-bank/activeContext.md` bằng `Get-Content -Raw` + `Set-Content` → toàn bộ tiếng Việt trong file thành mojibake trên đĩa (double-encoding), phải viết lại file.
+- **Nguyên nhân gốc**: PowerShell 5.1 `Get-Content` mặc định decode file không BOM theo ANSI/codepage máy; nội dung UTF-8 bị diễn giải sai rồi được ghi lại UTF-8 → hỏng vĩnh viễn (khác L-006: chỉ hiển thị vỡ, dữ liệu còn nguyên).
+- **Tránh lặp lại**: CẤM dùng `Get-Content`/`Set-Content` cho file UTF-8 không BOM; mọi thao tác byte-chính xác qua `[IO.File]::ReadAllText/WriteAllText` với `UTF8Encoding($false)` hoặc tool `editor`. Nếu lỡ ghi hỏng: dừng, viết lại file từ nguồn đã biết (không cố "sửa" mojibake).
+
 ## L-007 (22/08/2026) — `gh pr list --label` đi qua search index có độ trễ
 - **Triệu chứng**: gắn nhãn `status:review-requested` cho PR bằng `gh pr edit` rồi chạy orchestrator ngay lập tức → "không có PR chờ review"; vài chục giây sau `gh pr list --label` lại thấy PR.
 - **Nguyên nhân gốc**: `gh pr list --label` dùng search API của GitHub, index có độ trễ cập nhật (giây–chục giây); `gh pr view` đọc trực tiếp nên luôn thấy giá trị mới.

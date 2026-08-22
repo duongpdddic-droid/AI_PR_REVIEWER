@@ -9,6 +9,22 @@
 //     thực tế, không suy đoán từ log; reset khi hoạt động trở lại.
 // Không dependency ngoài (chỉ Node stdlib). Các test ở scripts/test-tg-notify.mjs.
 
+// Retry có giới hạn cho thao tác gửi (Issue #2 A7): thử tối đa `attempts` lần,
+// nghỉ `delayMs * (số lần đã fail)` giữa các lần. Ném lỗi cuối cùng nếu hết lượt.
+export async function withRetry(fn, { attempts = 3, delayMs = 2000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn(i);
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts && delayMs > 0) await sleep(delayMs * i);
+    }
+  }
+  throw lastErr;
+}
+
+
 // Escape cho parse_mode=HTML của Telegram (chỉ & < >; KHÔNG escape dấu nháy để tiếng Việt an toàn).
 export function escapeHtml(s) {
   return String(s ?? '')

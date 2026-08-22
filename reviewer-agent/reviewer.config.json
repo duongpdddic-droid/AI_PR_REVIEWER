@@ -11,10 +11,12 @@
   "notifyTelegram": true,
   "labels": {
     "review_requested": "status:review-requested",
+    "reviewing": "status:reviewing",
     "changes_requested": "status:changes-requested",
     "approved": "status:approved",
     "blocked": "status:blocked"
   },
+  "reviewPolicyFile": ".github/ai-review-policy.json",
   "worktree": "reviewer-agent-worktree/",
   "apiKey": "YOUR_OPENAI_API_KEY",
   "telegramChat": null,

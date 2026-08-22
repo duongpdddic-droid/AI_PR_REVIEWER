@@ -16,13 +16,18 @@
   "coderWorkspace": "coder-workspace",
   "reviewerWorkspace": "reviewer-workspace",
   "labels": {
+    "queued": "status:queued",
     "review_requested": "status:review-requested",
     "review_in_progress": "status:in-progress",
+    "reviewing": "status:reviewing",
     "changes_requested": "status:changes-requested",
     "approved": "status:approved",
     "ready_to_code": "status:ready-for-cline",
     "blocked": "status:blocked"
   },
+  "reviewPolicyFile": ".github/ai-review-policy.json",
+  "finalReviewer": "agent:gpt",
+  "preReviewer": "reviewer:local",
   "findingsFile": "review-state.json",
   "promptsDir": "reviewer-agent/prompts",
   "orchestrator": "scripts/unified-orchestrator.mjs"

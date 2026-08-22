@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildMessage, eventKey, NotificationStore, EVENT_LABELS, shouldArm } from './tg-notify-core.mjs';
+import { buildMessage, eventKey, NotificationStore, EVENT_LABELS, shouldArm, withRetry } from './tg-notify-core.mjs';
 
 const configPath = process.env.AI_PR_REVIEWER_TG_CONFIG || path.join(os.homedir(), '.ai-pr-reviewer', 'tg.json');
 const GUARD_PATH = path.join(os.homedir(), '.ai-pr-reviewer', 'guard.json');
@@ -67,14 +67,23 @@ if (evIdx >= 0 || evFileIdx >= 0) {
   armTitle = argv[0] || 'Task hoan thanh';
 }
 
-const res = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ chat_id: chatId, text: body, parse_mode: 'HTML', disable_web_page_preview: true }),
-});
-if (!res.ok) {
-  const err = await res.text();
-  console.error('notify-telegram: HTTP ' + res.status + ' ' + err);
+// Gửi với retry có giới hạn (Issue #2 A7): tối đa 3 lần, nghỉ 2s*lượt-fail giữa các lần.
+let res = null;
+try {
+  await withRetry(async (attempt) => {
+    const r = await fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: body, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+    if (!r.ok) {
+      const errText = (await r.text()).slice(0, 300);
+      throw new Error('HTTP ' + r.status + ' ' + errText);
+    }
+    res = r;
+  }, { attempts: 3, delayMs: 2000 });
+} catch (e) {
+  console.error('notify-telegram: FAIL sau retry co gioi han — ' + (e && e.message));
   process.exit(1);
 }
 if (store && key) store.markSent(key); // chỉ đánh dấu SENT sau khi gửi thành công (retry sau lỗi vẫn cho phép)

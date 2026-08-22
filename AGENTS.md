@@ -82,21 +82,29 @@ Vì Bố không phân biệt task nặng/nhẹ, **agent tự đánh giá và C�
 
 ---
 
-## GitHub Handoff — GPT ↔ Cline
+## GitHub Handoff — Cline ↔ GPT (final reviewer) ↔ AI_PR_REVIEWER (pre-reviewer)
 
-Giao thức đầy đủ nằm tại `docs/AGENT_HANDOFF_PROTOCOL.md`.
+Giao thức đầy đủ nằm tại `docs/AGENT_HANDOFF_PROTOCOL.md`; quy tắc máy đọc được tại
+`.github/ai-review-policy.json` (REV-ISSUE-2).
 
-- GPT chịu trách nhiệm phân tích, tạo Issue, xác định phạm vi, review và nghiệm thu kỹ thuật.
+- **Phân vai**: reviewer:local = PRE-reviewer (CI verification fail-closed + pre-review deterministic,
+  chỉ phát `PRE_REVIEW_PASS` | `PRE_REVIEW_FINDINGS`, không bao giờ `status:approved`);
+  **agent:gpt là reviewer phê duyệt cuối DUY NHẤT**; approval ghi qua `scripts/gpt-approval.mjs`,
+  khóa full HEAD SHA + policyVersion (HEAD đổi → vô hiệu, GPT phải review lại).
 - Cline chịu trách nhiệm sửa code, chạy kiểm tra, commit, push và bàn giao qua Draft Pull Request.
 - GitHub Issue là nguồn sự thật của phạm vi và tiêu chí nghiệm thu cho task GitHub.
 - Pull Request là nguồn sự thật của diff, bằng chứng kiểm tra và review thread.
 - GitHub Actions là bằng chứng kiểm tra độc lập.
-- Người dùng giữ quyền quyết định merge, `clasp push`, deploy và thao tác ảnh hưởng dữ liệu.
+- Người dùng giữ quyền quyết định merge, `clasp push`, deploy và thao tác ảnh hưởng dữ liệu;
+  người dùng relay quyết định GPT qua `gpt-approval.mjs`.
 - Cline chỉ nhận task có `agent:cline` và `status:ready-for-cline`.
 - Cline tự phát hiện/claim Issue hợp lệ tại Auto-Boot và checkpoint an toàn qua `scripts/github-task-intake.mjs` (read-only mặc định; claim chỉ sau preflight workspace/Git PASS: repo root xác định bằng git, remote canonical `duongpdddic-droid/QLDA_DTXD`, branch `main`/`master`, worktree sạch ngoài allowlist `memory-bank/`, base không lệch `origin/main`, tối đa 1 workspace cùng remote trong thư mục cha — nếu không: `BLOCKED_WRONG_REMOTE` / `BLOCKED_ACTIVE_ISSUE_BRANCH` / `DETACHED_HEAD` / `BLOCKED_DIRTY_WORKTREE` / `ERROR_FETCH` / `BLOCKED_STALE_BASE` / `BLOCKED_MULTIPLE_WORKSPACES` / `BLOCKED_REPO_MISMATCH` (khi `GITHUB_REPOSITORY` lệch origin canonical — repo read/mutation luôn từ origin), fail-closed không mutation; env test-only `SKIP_REMOTE`/`SKIP_FETCH`/`PARENT` chỉ hiệu lực với `GITHUB_TASK_INTAKE_TEST=1` — CLI production không bypass remote/fetch bằng env; idempotent, read-after-write trước khi báo `CLAIMED`, marker đi kèm verify labels; task branch được tạo sau claim khi biết Issue number).
-- `agent:local-reviewer` | Reviewer AI_PR_VIEWER, quyền đồng đẳng với GPT | AI_PR_VIEWER
-
-- Khi bàn giao, Cline chuyển sang `status:review-requested` và `agent:gpt`, **BẮT BUỘC** gửi thông báo Telegram (`node scripts/notify-telegram.mjs`, kiểm tra exit code, ghi `SENT`/`FAILED`); khi `status:blocked`/Decision Gate cũng gửi Telegram. `telegram-bridge.mjs --process` không phải bằng chứng đã thông báo.
-- GPT dùng finding `[GPT-REV-NNN]`; Cline phản hồi `[CLINE-FIX-NNN]`.
-- Không tự merge, không tự deploy, không sửa ngoài phạm vi Issue.
-- Tối đa ba vòng review–fix; vượt giới hạn hoặc có mâu thuẫn phải chuyển `status:blocked`.
+- Khi bàn giao, Cline chuyển sang `status:review-requested`. Orchestrator tự pre-review
+  (CI → `status:reviewing` → `PRE_REVIEW_PASS` bàn giao GPT qua `agent:gpt`, hoặc findings trả Cline).
+  KHÔNG báo cáo Telegram khi tạo Issue hay trong lúc thực hiện Issue — orchestrator chỉ notify sau
+  mutation thành công; riêng `status:blocked`/Decision Gate vẫn hỏi người dùng.
+- Pre-reviewer phát hành finding `[LOCAL-REV-NNN]` trong comment PR (KHÔNG tạo issue [review-fix]);
+  Cline phản hồi `[CLINE-FIX-NNN]` và push thẳng lên branch của PR.
+- Không tự merge, không tự deploy, không tự approve, không sửa ngoài phạm vi Issue.
+- Tối đa `maxReviewRounds` (policy) vòng review–fix; vượt giới hạn hoặc có mâu thuẫn phải chuyển
+  `status:blocked`.

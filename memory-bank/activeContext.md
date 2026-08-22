@@ -1,51 +1,52 @@
 # Active Context (AI_PR_REVIEWER)
 
 ## Mục tiêu
-Hub review đa repo (target đầu tiên `duongpdddic-droid/QLDA_DTXD`): worktree sạch,
-orchestrator không destructive, vòng lặp coder khép kín theo nhãn PR
-(`status:review-requested` → review → `status:changes-requested` | `status:approved`).
+Thực hiện Issue #2 (duongpdddic-droid/AI_PR_REVIEWER#2): chuẩn hóa toàn bộ AI PR Review —
+tách CI verification ≠ semantic review ≠ approval ≠ merge authorization; approval khóa HEAD SHA;
+GPT là reviewer phê duyệt cuối DUY NHẤT; local reviewer chỉ pre-review
+(PRE_REVIEW_PASS | PRE_REVIEW_FINDINGS). Hai PR riêng: PR1 repo này trước, PR2 QLDA_DTXD sau.
 
 ## Chế độ
-Tự hành (act).
+Tự hành (act) — task đặc biệt, người dùng giao GPT toàn quyền quyết định kỹ thuật;
+Cline executor; KHÔNG tự gắn status:approved, KHÔNG merge/deploy.
 
-## Kế hoạch thực thi
-1. [x] Dọn worktree: gỡ gitlink mồ côi `QLDA_DTXD` khỏi git index — commit `efb20ec`.
-2. [x] Đồng bộ config: `reviewer-agent/reviewer.config.json` thêm `labels` + `notifyTelegram` (khớp `.agent/config.json`).
-3. [x] Routing orchestrator: pass → `status:approved`; fail → comment finding `[LOCAL-REV-NNN]`; sửa loop-breaker `agent:gpt` trong issue `[review-fix]`.
-4. [x] Coder loop: `.agent/conventions-coder.md` thêm mục "Vòng review PR (label loop)".
-5. [x] Kiểm thử & bàn giao: test/verify/smoke PASS; commit `ed6eb79` (local).
-6. [x] E2E smoke test trên GitHub thật (`QLDA_DTXD#33`, cả nhánh PASS lẫn FAIL) + cleanup trọn vẹn.
+## Kế hoạch thực thi (PR 1)
+1. [x] Đọc Issue #2 + khảo sát source.
+2. [x] Branch `chore/issue-2-review-contract` từ main.
+3. [x] Module thuần `scripts/review-contract.mjs` (policy/CI fail-closed/approval SHA-lock/drift/stale/rounds/gate/secret-scan/diff-limits/routing).
+4. [x] Rewrite `scripts/unified-orchestrator.mjs` (DI io; không auto-approve; không issue [review-fix]; read-after-write; chống event muộn; drift; idempotency key repo::pr::sha::policy::action).
+5. [x] `.github/ai-review-policy.json` v1 (`2026-08-22.1`, requiredChecks=[verify], blockingSeverities=[critical,high], maxReviewRounds=3, finalReviewer=agent:gpt).
+6. [x] `notify-telegram.mjs`: retry qua `withRetry` (3 lần) giữ exit code 0/1/2; `gpt-approval.mjs` mới là cổng duy nhất ghi approval GPT.
+7. [x] Tests: `test-pure-logic.mjs` 101/101 PASS (C.1–C.14) + `test-integration-orchestrator.mjs` mới 52/52 PASS (I.1–I.14); full-verify chạy cả hai.
+8. [x] Đồng bộ docs/config: AGENT_HANDOFF_PROTOCOL.md viết lại REV-ISSUE-2; AGENTS.md; .clinerules/01 §13; PR template (+ section HEAD SHA); .agent/config.json + reviewer.config.json (label reviewing, policy file, finalReviewer/preReviewer); conventions-coder/reviewer.
+9. [x] Quality gates: pnpm test 101/101, pnpm test:integration 52/52, pnpm verify 39/39 — PASS (23/08/2026 01:05).
+10. [>] Commit, push, mở Draft PR liên kết Issue #2, gắn agent:gpt + status:review-requested, ghi HEAD SHA. DỪNG chờ GPT review.
 
 ## Bước hiện tại
-Hoàn tất E2E — chờ người dùng push 3 commit local (`efb20ec`, `ed6eb79`, `8e0f954`).
-
-## 22/08/2026 12:20 (ACT) — Tiếp nhận `mcp-task-server` vào AI_PR_REVIEWER (chuyển từ QLDA_DTXD)
-- **Lý do**: `mcp-task-server` là công cụ điều phối Coder ↔ Reviewer đa repo (không phụ thuộc repo nào — repo truyền qua tham số `repo` / env `MCP_TASK_REPOS`), nên thuộc nhóm hạ tầng orchestration của AI_PR_REVIEWER chứ không neo vào repo nghiệp vụ QLDA_DTXD.
-- **Thay đổi**: copy `mcp-task-server/` + `.mcp.json` từ `C:\Users\Admin\.cline\QLDA_DTXD` → AI_PR_REVIEWER; thêm script `test:mcp` vào `package.json`.
-- **Settings toàn cục**: `cline_mcp_settings.json` `args[0]` trỏ `C:\Users\Admin\.cline\AI_PR_REVIEWER\mcp-task-server\server.mjs` (đã sửa, trước là `QLDA_DTXD\mcp-task-server\server.mjs`).
-- **Verify**: `node mcp-task-server/test-server.mjs` 34/34 PASS tại vị trí mới.
-
-## Bằng chứng thực thi (22/08/2026 09:50)
-- E2E PASS path: PR draft #33 (nhãn `status:review-requested`) → CI pass 24s → `--execute` log `✅ approve` → nhãn PR còn đúng 1 `status:approved`; comment "✅ Verification PASS 100% — đạt yêu cầu kỹ thuật… Quyền merge thuộc người dùng."; rerun idempotent ("không có PR chờ review").
-- E2E FAIL path: push commit phá cú pháp `Backend/Code.js` → CI fail → gắn lại `status:review-requested` (giả lập coder bàn giao) → `--execute` log `request-fix` + issue `[review-fix] PR #33 — vòng r1` (#34); nhãn PR thành `agent:cline` + `status:changes-requested`; comment chứa finding `[LOCAL-REV-001]` đủ schema (Severity/Evidence/Risk/Required fix/Acceptance criteria); body issue hướng dẫn loop-breaker mới (gỡ changes-requested+agent:cline, gắn lại review-requested).
-- Cleanup: issue #34 đóng kèm comment; PR #33 đóng + branch `test/smoke-e2e-orchestrator` xóa khỏi remote; temp clone `%TEMP%\qlda-dtxd-smoke` xóa (Test-Path=False); worktree local AI_PR_REVIEWER không đổi.
-- Commit Memory Bank trước đó: `8e0f954`.
+Bàn giao PR 1 — chờ GPT review (không tự merge). Sau đó mới làm PR 2 (QLDA_DTXD).
 
 ## Quyết định
-- **Bãi bỏ quyết định 21/08 20:42** ("KHÔNG bao giờ tự approve") theo chỉ thị mới của người dùng: CI PASS 100% → reviewer gắn `status:approved` (duyệt kỹ thuật); quyền MERGE vẫn thuộc người dùng.
-- Sửa loop-breaker: issue `[review-fix]` cũ bảo coder gắn lại `agent:gpt` lên PR → orchestrator skip PR vĩnh viễn. Giờ: gỡ `status:changes-requested` + `agent:cline`, gắn lại `status:review-requested`.
-- `checksDetail`: ưu tiên `gh pr checks --json name,state` (gh ≥ v2.31), fallback parser text emoji; output rỗng → phân loại theo exit code (0=pass, 8=pending, còn lại=fail).
+- Policy dùng JSON (`.github/ai-review-policy.json`) thay YAML — tránh thêm dependency parser;
+  Issue ghi "ví dụ .yml" nên định dạng máy đọc được là đạt (ghi chú trong PR cho GPT xác nhận).
+- Orchestrator đọc policy từ TARGET repo tại HEAD SHA của PR (gh api contents);
+  target chưa có policy (QLDA_DTXD trước PR2) → CI_UNKNOWN fail-closed → changes-requested.
+  Hành vi chủ đích, an toàn trong khoảng chuyển tiếp.
+- Pre-review deterministic (secret scan trên diff + diff limit) vì reviewer-engine LLM đang inert;
+  kết quả chỉ PRE_REVIEW_PASS/PRE_REVIEW_FINDINGS, không bao giờ chạm status:approved.
+- Approval chỉ được ghi qua `scripts/gpt-approval.mjs` (kiểm chứng CI PASS + PRE_REVIEW_PASS tại
+  đúng HEAD, idempotent theo HEAD); orchestrator quét cả PR status:approved để phát hiện approval-drift.
+- Uncommitted changes cũ (AGENTS.md, .clinerules/01, protocol — mô hình "local reviewer chính"
+  của Bố chốt 22/08) bị Issue #2 thay thế: gộp vào branch và sửa theo hướng GPT-final-approval,
+  không mất nội dung, không reset.
+- Xóa helper reviewer-side chết trong `autonomous-core.mjs` (planRouting/fixIssue*/parseChecks*/
+  findingsFromFailedChecks) — coder-side giữ nguyên.
+- `MO_TA_AI_PR_VIEWER.MD` giữ nguyên (tài liệu lịch sử, không phải quy tắc vận hành) — ghi Deferred.
 
 ## Vấn đề trì hoãn
-- [ ] Push 3 commit local lên `origin/main` — chờ chỉ thị (cron orchestrator trên remote đang chạy bản cũ).
-- [ ] PR approved rồi CI fail sau đó (push mới) không được quét lại — hành vi thiết kế, xem L-008; cân nhắc hạ cấp `status:approved` → `changes-requested` khi check fail mới xuất hiện.
-- [ ] `reviewer-agent/` giữ inert theo Decision Gate 21/08 23:05 — không dọn.
-- [ ] Static gates nâng cao (secret scan / out-of-scope) + `review-state.json` lease lock — xem taskHistory mục Giai đoạn 2.
+- [ ] `MO_TA_AI_PR_VIEWER.MD` còn tên cũ AI_PR_VIEWER — tài liệu lịch sử, cần quyết định xóa/archive.
+- [ ] Sau khi PR2 (QLDA_DTXD) thêm policy, target repo hết CI_UNKNOWN fail-closed.
+- [ ] reviewer-agent/ inert giữ nguyên theo Decision Gate 21/08.
+- [ ] requiredChecks="verify" cần đối chiếu tên check-run thực tế trên GitHub khi PR CI chạy.
 
 ## Bước tiếp theo
-- Người dùng: `git push origin main` để cron 15 phút dùng routing mới (đã kiểm chứng E2E cả hai nhánh).
-- Theo dõi chu kỳ cron đầu tiên sau push trên GitHub Actions.
-- Issue test handoff **QLDA_DTXD#35** đang OPEN (`agent:cline` + `status:ready-for-cline`) — chờ Cline workspace QLDA_DTXD claim; KHÔNG đóng từ phía này.
-
-## Lịch sử
-Xem `taskHistory.md` (archive 22/08/2026 09:31).
+Commit + push + Draft PR (Ref #2), gắn nhãn agent:gpt + status:review-requested, dừng chờ GPT.
