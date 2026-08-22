@@ -3,8 +3,9 @@
 ## Mục tiêu
 Thực hiện Issue #2 (duongpdddic-droid/AI_PR_REVIEWER#2): chuẩn hóa toàn bộ AI PR Review —
 tách CI verification ≠ semantic review ≠ approval ≠ merge authorization; approval khóa HEAD SHA;
-GPT là reviewer phê duyệt cuối DUY NHẤT; local reviewer chỉ pre-review
-(PRE_REVIEW_PASS | PRE_REVIEW_FINDINGS). Hai PR riêng: PR1 repo này trước, PR2 QLDA_DTXD sau.
+mô hình reviewer HAI GIAI ĐOẠN theo [USER-DECISION] sau Issue #2 (transition: GPT duyệt cuối hai
+PR triển khai; steadyState: reviewer:local mặc định, GPT chỉ escalation). Hai PR riêng:
+PR1 repo này (đã merge), PR2 QLDA_DTXD #42.
 
 ## Chế độ
 Tự hành (act) — task đặc biệt, người dùng giao GPT toàn quyền quyết định kỹ thuật;
@@ -23,10 +24,15 @@ Cline executor; KHÔNG tự gắn status:approved, KHÔNG merge/deploy.
 10. [x] Kênh Telegram notify repo này đã hoạt động (copy `~/.qldadtxd/tg.json` → `~/.ai-pr-reviewer/tg.json`).
 
 ## Bước hiện tại
-PR 2 (QLDA_DTXD) đã tạo + bàn giao: PR duongpdddic-droid/QLDA_DTXD#42, branch
-`chore/issue-2-review-policy`, commit `42eb69c27366225daf61813d6884382479e8d10f`,
-labels `agent:gpt` + `status:review-requested`, CI "Verify code and data" PASS.
-Dừng chờ GPT review. Local QLDA_DTXD đã trả về `main`.
+**Vòng fix [GPT-REV-035] trên PR QLDA_DTXD#42 HOÀN TẤT (23/08/2026 06:27)**: commit
+`7e9f251f403dd6912c58d6540cfec75bd3bda202` đã push; thêm `reviewerPhases` vào policy
+(`2026-08-23.2`: transition/steadyState + 6 approvalRequiresAllGates + 5 escalateToGptWhen +
+invariantsAllPhases); đồng bộ protocol/AGENTS/clinerules/templates; test mới
+`test-review-phases.mjs` 17/17 PASS cắm vào full-verify. Gates: pnpm verify 14/14, pnpm test
+59 assertions, test:data PASS, diff --check sạch; CI "Verify code and data" PASS tại `7e9f251f`.
+Comment `[CLINE-FIX-035]` đã đăng; labels `agent:gpt` + `status:review-requested`.
+Telegram: `--event-file` SENT (exit 0, eventKey `...PR#42@7e9f251...::done::ready-for-gpt-review`).
+Dừng chờ GPT re-review. Local QLDA_DTXD đang ở branch PR (chưa trả main).
 
 ## Quyết định
 - Policy dùng JSON thay YAML (vòng 1); vòng 2 bump policyVersion `2026-08-23.1` (taxonomy + decisionId).
@@ -34,8 +40,11 @@ Dừng chờ GPT review. Local QLDA_DTXD đã trả về `main`.
 - Ngoại lệ quy mô cho PR #3: người dùng chỉ thị sửa trực tiếp trên branch (đã ghi body + comment CLINE-FIX-031).
 - gpt-approval là user-relay gate (không tự xác minh danh tính GPT) — docs ghi rõ.
 - Merge PR #3 không qua GPT approval: theo lệnh trực tiếp của Bố (quyền merge thuộc người dùng).
-- Policy bản QLDA_DTXD giữ nguyên policyVersion `2026-08-23.1`, chỉ khác `requiredChecks`
-  = `Verify code and data` (tên check-run thật, xác minh qua API tại `6db6dee`) — tránh CI_UNKNOWN.
+- **[GPT-REV-035] 23/08/2026**: policy QLDA_DTXD bump `2026-08-23.2` thêm `reviewerPhases`;
+  giữ nguyên các key validator bắt buộc của `review-contract.mjs` để orchestrator không vỡ contract.
+  Wiring runtime steady-state approval thuộc PR orchestrator thứ hai của Issue #2 (repo này) —
+  ghi minh bạch trong [CLINE-FIX-035], không giấu.
+- Policy hai repo tạm lệch phiên bản (.2 vs .1) — known-drift, phải reconcile trước khi đóng Issue #2.
 - Approval GPT vòng fix 2 đến SAU merge (`1ae6d16` stale vs `de9d6cc` gồm thêm `5fba130`/`955864e`
   ops/docs): ghi nhận truy nguyên, không revert.
 
@@ -49,5 +58,6 @@ Dừng chờ GPT review. Local QLDA_DTXD đã trả về `main`.
 - [x] ~~Telegram notify FAIL thiếu token~~ — ĐÃ XỬÝ 23/08/2026 05:13 (byte-copy config, SENT).
 
 ## Bước tiếp theo
-Chờ GPT review PR QLDA_DTXD#42 (dừng theo lệnh). Sau approval + Bố cho merge → merge PR2,
-đóng điều kiện còn lại của Issue #2 (nếu đủ) hoặc báo Bố quyết đóng.
+Chờ GPT re-review PR QLDA_DTXD#42 tại HEAD `7e9f251` (dừng theo lệnh). Sau approval + Bố cho
+merge → merge PR2, đồng bộ policy `2026-08-23.2` (reviewerPhases) về repo này, wiring orchestrator
+cho steady-state approval, xử lý labels cũ, rồi đóng điều kiện còn lại của Issue #2.

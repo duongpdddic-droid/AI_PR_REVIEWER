@@ -1,5 +1,16 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 06:27 — Issue #2 phần B: fix [GPT-REV-035] trên PR QLDA_DTXD#42 — COMPLETED (chờ GPT re-review)
+
+- [x] GPT review PR #42 phát [GPT-REV-035] (blocking): contract khóa GPT final reviewer vĩnh viễn, trái [USER-DECISION] hai giai đoạn sau Issue #2.
+- [x] Commit `7e9f251f403dd6912c58d6540cfec75bd3bda202` (9 files, +247/−42) trên branch `chore/issue-2-review-policy`; push read-back khớp.
+- [x] Policy `.github/ai-review-policy.json` bump `2026-08-23.2` + `reviewerPhases`: transition (GPT duyệt cuối hai PR triển khai, `localReviewerCanApprove:false`) + steadyState (`reviewer:local` mặc định, approve khi đủ 6 `approvalRequiresAllGates`, GPT chỉ escalation theo 5 `escalateToGptWhen`, fail-closed) + `invariantsAllPhases` 9 gate bất biến; giữ nguyên key validator `review-contract.mjs`.
+- [x] Đồng bộ docs: protocol §1a mới (+§1/§3/§4/§5/§5a/§9/§10), `AGENTS.md`, `.clinerules/01` §13, PR template, gpt-task.yml — bỏ mọi câu "GPT final duy nhất vĩnh viễn".
+- [x] Test mới `scripts/test-review-phases.mjs` (17 asserts: P0 policy hợp lệ / P1 local không thể approve giai đoạn transition / P2 steady-state đủ gate / P3 escalation fail-closed); cắm `full-verify.mjs` bước 4a3 → chạy trong required check "Verify code and data".
+- [x] Gates: `pnpm verify` 14/14 PASS; `pnpm test` PASS (59 assertions); `pnpm test:data` PASS; `git diff --check` sạch; CI PASS tại `7e9f251f`.
+- [x] Bàn giao lại: comment `[CLINE-FIX-035]` (kèm commit/files/test + ghi minh bạch wiring runtime thuộc PR orchestrator thứ hai), labels `agent:gpt` + `status:review-requested`, PR body cập nhật HEAD SHA mới.
+- Known-drift: policy repo này còn `2026-08-23.1` — phải đồng bộ `2026-08-23.2` khi làm PR orchestrator tiếp theo của Issue #2. KHÔNG merge/deploy.
+
 ## 23/08/2026 06:00 — Issue #2 phần B: PR2 tại QLDA_DTXD đã bàn giao — COMPLETED
 
 - [x] Đồng bộ main AI_PR_REVIEWER (`de9d6cc`, tree sạch); khảo sát đặc tả B1–B6 + CI QLDA_DTXD.
