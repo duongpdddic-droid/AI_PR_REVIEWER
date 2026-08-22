@@ -39,6 +39,7 @@ Hoàn tất E2E — chờ người dùng push 3 commit local (`efb20ec`, `ed6eb7
 ## Bước tiếp theo
 - Người dùng: `git push origin main` để cron 15 phút dùng routing mới (đã kiểm chứng E2E cả hai nhánh).
 - Theo dõi chu kỳ cron đầu tiên sau push trên GitHub Actions.
+- Issue test handoff **QLDA_DTXD#35** đang OPEN (`agent:cline` + `status:ready-for-cline`) — chờ Cline workspace QLDA_DTXD claim; KHÔNG đóng từ phía này.
 
 ## Lịch sử
 Xem `taskHistory.md` (archive 22/08/2026 09:31).
