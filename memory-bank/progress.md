@@ -1,5 +1,15 @@
 # Progress (AI_PR_REVIEWER)
 
+## 22/08/2026 09:31 — Hub review đa repo: dọn worktree + vòng lặp coder theo nhãn PR — COMPLETED
+
+- [x] Gỡ gitlink mồ côi `QLDA_DTXD` (mode 160000) khỏi index → worktree sạch; commit `efb20ec`.
+- [x] `planRouting` pass → `status:approved` (gỡ `status:review-requested`); quyền merge thuộc người dùng (bãi bỏ quyết định 21/08 20:42).
+- [x] CI FAIL → comment PR kèm finding chuẩn `[LOCAL-REV-NNN]` (1 finding/check fail); helper mới `parseChecksJson`/`parseChecksOutput`/`classifyParsedChecks`/`findingsFromFailedChecks`; `checksDetail` ưu tiên `gh pr checks --json`, fallback text.
+- [x] Sửa loop-breaker: issue `[review-fix]` không còn bảo coder thêm `agent:gpt` (orchestrator skip PR vĩnh viễn) → gỡ `status:changes-requested` + `agent:cline`, gắn lại `status:review-requested`.
+- [x] `conventions-coder.md`: mục "Vòng review PR (label loop)" 7 bước; `reviewer.config.json` đồng bộ `labels` + `notifyTelegram`.
+- [x] Verify: `pnpm test` 73/73; `pnpm verify` 32/32; smoke dry-run QLDA_DTXD exit 0. Commit `ed6eb79` (chưa push).
+- Archive: `activeContext.md` cũ → `taskHistory.md`.
+
 ## 21/08/2026 23:05 — Tự động hoá routing AI_PR_REVIEWER ↔ Cline dự án — COMPLETED (code+test)
 
 - [x] Routing chốt: CI PASS → `agent:gpt` (không tự approve); CI FAIL → `status:changes-requested` + `agent:cline` + issue `[review-fix]` (agent:cline + ready-for-cline) trong target repo cho Cline dự án nhận qua intake; idempotent theo vòng; vượt `maxReviewRounds` → `status:blocked`.
