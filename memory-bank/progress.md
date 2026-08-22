@@ -1,5 +1,12 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 05:13 — Khôi phục kênh Telegram notify repo này — COMPLETED
+
+- [x] Nguyên nhân FAIL exit 2: `notify-telegram.mjs` đọc config `~/.ai-pr-reviewer/tg.json` (không tồn tại), token thật nằm ở `~/.qldadtxd/tg.json`.
+- [x] Fix: byte-copy nguyên file sang `~/.ai-pr-reviewer/tg.json` (không đọc/in nội dung — rule secret 04 §2).
+- [x] Gửi lại event `done` (fix round 2 PR #3): **SENT** tới chat 816272951, exit 0, eventKey `...::done::status:review-requested` đã mark.
+- [ ] Phát hiện mới (deferred): arm watchdog fail MODULE_NOT_FOUND — repo này thiếu `scripts/watchdog-hibernate.mjs`; notify vẫn SENT exit 0. Cần Bố quyết hướng xử lý.
+
 ## 23/08/2026 02:53 — Issue #2 PR1 vòng fix 2 (GPT-REV-031..034) — COMPLETED
 
 - [x] 031: `evaluateDiffLimits` metric churn = additions+deletions; `runSemanticPreReview` trả `decisionGate='diff-limit'`; `planPreReviewOutcome({decisionGate})` → `block-decision-gate` + `status:blocked` (không handoff GPT, không trả Cline, không tăng round). Policy `diffLimits.metric` + `overLimitBehavior`. Test pure C.15/C.12, integration I.15.

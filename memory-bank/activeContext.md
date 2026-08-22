@@ -42,8 +42,12 @@ Cline executor; KHÔNG tự gắn status:approved, KHÔNG merge/deploy.
 - [ ] `MO_TA_AI_PR_VIEWER.MD` còn tên cũ AI_PR_VIEWER — tài liệu lịch sử, cần quyết định xóa/archive.
 - [ ] Sau khi PR2 (QLDA_DTXD) thêm policy, target repo hết CI_UNKNOWN fail-closed.
 - [ ] reviewer-agent/ inert giữ nguyên theo Decision Gate 21/08.
-- [ ] Telegram notify FAIL exit 2 (thiếu token/config tại `~/.ai-pr-reviewer/tg.json`) — NHẮC BỐ:
-      cung cấp token/config hoặc xác nhận bỏ kênh Telegram cho repo này. KHÔNG coi là "đã thông báo".
+- [ ] `scripts/watchdog-hibernate.mjs` không tồn tại trong repo này — `notify-telegram.mjs` arm watchdog
+      luôn FAIL (MODULE_NOT_FOUND) dù notify vẫn SENT exit 0. Cần quyết định: copy script sang,
+      bỏ arm cho repo này, hoặc trỏ sang QLDA_DTXD.
+- [x] ~~Telegram notify FAIL thiếu token~~ — ĐÃ XỬÝ 23/08/2026 05:13: copy nguyên bản
+      `~/.qldadtxd/tg.json` → `~/.ai-pr-reviewer/tg.json` (byte-copy, không in nội dung);
+      gửi lại event done → **SENT** tới 816272951, exit 0, eventKey ghi nhận.
 
 ## Bước tiếp theo
 ĐÃ DỪNG: PR #3 HEAD `cd635d8a12d4836b8d9600d746771aee6eb36c3f`, CI PASS,
