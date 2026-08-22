@@ -1,5 +1,13 @@
 # Progress (AI_PR_REVIEWER)
 
+## 22/08/2026 09:50 — E2E smoke orchestrator trên GitHub thật (PASS + FAIL) — COMPLETED
+
+- [x] Tạo PR draft test `QLDA_DTXD#33` từ branch `test/smoke-e2e-orchestrator` (thay đổi doc thuần), nhãn `status:review-requested`; label được ensure tồn tại trước.
+- [x] PASS path: dry-run nhận diện đúng → CI pass → `--execute` → `status:approved`, comment tổng kết đúng, rerun idempotent.
+- [x] FAIL path: commit phá `Backend/Code.js` → CI fail → gắn lại `status:review-requested` → `--execute` → nhãn `agent:cline` + `status:changes-requested`, comment `[LOCAL-REV-001]` đủ schema, issue `[review-fix] PR #33 — vòng r1` (#34) labels agent:cline/status:ready-for-cline/review-fix, loop-breaker mới hoạt động.
+- [x] Cleanup: đóng #34 + #33, xóa branch remote, xóa temp clone; worktree AI_PR_REVIEWER không đổi.
+- [x] Phát hiện ghi nhận: search index delay của `gh pr list --label` (L-007) và PR approved-mất-nhãn-không-quét-lại (L-008, Deferred).
+
 ## 22/08/2026 09:31 — Hub review đa repo: dọn worktree + vòng lặp coder theo nhãn PR — COMPLETED
 
 - [x] Gỡ gitlink mồ côi `QLDA_DTXD` (mode 160000) khỏi index → worktree sạch; commit `efb20ec`.

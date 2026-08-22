@@ -40,3 +40,14 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: PowerShell 5.1 decode stdout của native command theo codepage single-byte ([Console]::OutputEncoding ≠ UTF-8) → byte UTF-8 của `gh` bị diễn giải thành CP1250. **Dữ liệu trên GitHub vẫn đúng UTF-8** — chỉ hiển thị/verify qua stdout mới vỡ.
 - **Tránh lặp lại**: KHÔNG dùng stdout `gh`/git làm bằng chứng verify encoding với text Unicode. Verify bằng script Node tạm (fetch API + `codePointAt(0)` so mã ký tự, ví dụ Đ = 272) hoặc `[IO.File]::ReadAllBytes`. Text Unicode đưa vào CLI luôn qua file (`--body-file` UTF-8), không truyền inline qua arg.
 
+## L-007 (22/08/2026) — `gh pr list --label` đi qua search index có độ trễ
+- **Triệu chứng**: gắn nhãn `status:review-requested` cho PR bằng `gh pr edit` rồi chạy orchestrator ngay lập tức → "không có PR chờ review"; vài chục giây sau `gh pr list --label` lại thấy PR.
+- **Nguyên nhân gốc**: `gh pr list --label` dùng search API của GitHub, index có độ trễ cập nhật (giây–chục giây); `gh pr view` đọc trực tiếp nên luôn thấy giá trị mới.
+- **Tránh lặp lại**: khi test thủ công luồng "gắn nhãn → quét", chờ ~30–60s hoặc chạy lại lần 2 trước khi kết luận miss. Cron 15 phút của orchestrator không bị ảnh hưởng thực tế. KHÔNG kết luận "orchestrator lỗi" chỉ từ 1 lần chạy ngay sau mutation nhãn.
+
+## L-008 (22/08/2026) — PR đã approved mất nhánh quét khi CI fail sau đó (hành vi thiết kế cần biết)
+- **Triệu chứng**: PR được approve (`status:approved`, mất `status:review-requested`); sau đó push commit mới làm CI đỏ → orchestrator không bao giờ phát hiện vì chỉ quét PR mang `status:review-requested` → PR "approved" đứng yên với CI fail.
+- **Nguyên nhân gốc**: điều kiện quét 1 nhãn duy nhất; approve gỡ nhãn quét.
+- **Tránh lặp lại / hướng xử lý**: trong flow chuẩn, chỉ coder gắn lại `status:review-requested` sau khi sửa — hợp lệ. Rủi ro thật chỉ xảy ra khi có người/agent push thêm vào PR đã approved. Đã ghi Deferred Issue: cân nhắc quét thêm `status:approved` và hạ cấp xuống `changes-requested` khi phát hiện check fail mới (chưa làm — cần quyết định scope riêng).
+
+
