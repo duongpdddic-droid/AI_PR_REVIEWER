@@ -20,13 +20,15 @@ Mọi transition sai thứ tự bị chặn fail-closed trước khi mutation.
 
 | Tool | Mô tả |
 |---|---|
-| `task_list` | Liệt kê task trên 1/nhiều repo (`repo` hoặc `repos[]`, mặc định env `MCP_TASK_REPOS`) |
+| `task_list` | Liệt kê task trên 1/nhiều repo (`repo` hoặc `repos[]`, mặc định env `MCP_TASK_REPOS`; tùy chọn lọc `state`/`status`/`agent`/`limit`) |
 | `task_get` | Xem chi tiết Issue task (number, title, agent, status, labels) |
 | `task_create` | Tạo Issue + label theo state machine |
 | `task_claim` | Coder nhận task → `in-progress` |
 | `task_handoff` | Coder bàn giao → `review-requested` + `agent:gpt` (tùy chọn kèm số PR) |
 | `task_review` | Reviewer chấm `approve` / `request-changes` |
 | `task_block` | Đánh dấu `blocked` + lý do |
+| `task_comment` | Thêm comment vào Issue task (tiến độ, ghi chú) |
+| `task_pr` | Tạo Pull Request từ nhánh coder (`head`), body mặc định `Closes #N`, tự comment link PR lên Issue |
 
 ## Đa repo
 
