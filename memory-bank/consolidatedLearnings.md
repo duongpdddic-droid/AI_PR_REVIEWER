@@ -70,4 +70,12 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: điều kiện quét 1 nhãn duy nhất; approve gỡ nhãn quét.
 - **Tránh lặp lại / hướng xử lý**: trong flow chuẩn, chỉ coder gắn lại `status:review-requested` sau khi sửa — hợp lệ. Rủi ro thật chỉ xảy ra khi có người/agent push thêm vào PR đã approved. Đã ghi Deferred Issue: cân nhắc quét thêm `status:approved` và hạ cấp xuống `changes-requested` khi phát hiện check fail mới (chưa làm — cần quyết định scope riêng).
 
+## L-013 (23/08/2026) — Replace chuỗi chứa backtick trong PowerShell + edit PR body phải read-back
+- **Triệu chứng**: thay dòng `- Full SHA: ``cda…`` `` trong body PR bằng `.Replace()` với chuỗi pattern viết `` `` `` (double backtick) → không khớp gì, body cũ giữ nguyên trong khi tưởng đã đổi; đồng thời append section mới làm body có heading thiếu dòng trống phía trước.
+- **Nguyên nhân gốc**: trong PowerShell single-quoted string, backtick là ký tự thường — viết 2 backtick để "escape" là sai (chỉ cần 1); và `gh pr edit --body-file` thành công không có nghĩa là nội dung replace đã đúng. `gh pr view --jq .body` hiển thị qua console còn gộp newline thành space, dễ tưởng body vỡ.
+- **Tránh lặp lại**: dựng chuỗi pattern bằng phép nối `'… `' + 'sha`'` thay vì gõ backtick kép; SAU MỌI edit PR body/issue chạy lại `gh pr view --json body` và Select-String kiểm tra chuỗi đích tồn tại trước khi coi là xong; heading markdown phải có dòng trống phía trước.
 
+## L-014 (23/08/2026) — Mock io dùng `??` fallback nuốt sentinel `null`
+- **Triệu chứng**: test I.16 truyền `diff: null` vào mock `getPrDiff() { return opts.diff ?? '+const a = 1;' }` → null bị fallback thành diff mặc định, pre-review PASS, test fail ngược kỳ vọng.
+- **Nguyên nhân gốc**: toán tử `??` fallback cho CẢ null lẫn undefined; không phân biệt "không truyền" với "truyền giá trị null có chủ đích" (diff không đọc được).
+- **Tránh lặp lại**: mock có giá trị mặc định cần phân biệt sentinel — dùng `(opts.diff === undefined ? DEFAULT : opts.diff)`; khi cần mô phỏng "dữ liệu không đọc được", truyền `null` tường minh và assert đường fail-closed tương ứng.

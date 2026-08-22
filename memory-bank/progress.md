@@ -1,5 +1,15 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 02:53 — Issue #2 PR1 vòng fix 2 (GPT-REV-031..034) — COMPLETED
+
+- [x] 031: `evaluateDiffLimits` metric churn = additions+deletions; `runSemanticPreReview` trả `decisionGate='diff-limit'`; `planPreReviewOutcome({decisionGate})` → `block-decision-gate` + `status:blocked` (không handoff GPT, không trả Cline, không tăng round). Policy `diffLimits.metric` + `overLimitBehavior`. Test pure C.15/C.12, integration I.15.
+- [x] 032: `gpt-approval.mjs` viết lại DI `performApproval`/`performRevoke` — bắt buộc `--payload` (hoặc --payload-file) ràng buộc repo/pr/full headSha/policyVersion/decisionId qua `validateApprovalPayload()`; marker thêm `decisionId`; không code path tự động gọi gate (test I.17 static+behavior). AGENT_HANDOFF_PROTOCOL.md ghi giới hạn xác thực.
+- [x] 033: giao dịch an toàn — marker TRƯỚC → read-back verify (`effectiveApproval` khớp decisionId) → gỡ nhãn → approved SAU; mọi lệnh gh error-checked; `ensureNotApproved()` phục hồi; test `test-integration-approval-gate.mjs` A.1–A.9 inject lỗi từng bước.
+- [x] 034: taxonomy canonical `critical|important|suggestion`; `SEVERITIES`/`DEFAULT_BLOCKING_SEVERITIES` export; `blockingSeverities=[critical,important]`; policy bump `2026-08-23.1`; docs AGENT_HANDOFF_PROTOCOL.md §6/§7 đồng nhất.
+- [x] Quality gates: `pnpm verify` 42/42, `pnpm test` 126/126, `pnpm test:integration` 73/73+50/50, `git diff --check` sạch; CI `verify` SUCCESS trên GitHub tại HEAD `cd635d8`.
+- [x] Bàn giao lại PR #3: 4 comment [CLINE-FIX-031..034], PR body cập nhật HEAD + bằng chứng, labels `agent:gpt` + `status:review-requested`. Dừng chờ GPT re-review.
+- Bài học vòng 2: L-013 (PowerShell string replace backtick / jq collapsing; always read back after PR body edit), L-014 (mock `??` fallback nuốt null sentinel — dùng `=== undefined` để hỗ trợ null).
+
 ## 23/08/2026 01:05 — Issue #2 PR1: hợp đồng review mới (GPT final approval, local pre-review) — COMPLETED (code+test)
 
 - [x] `scripts/review-contract.mjs` (mới): lõi thuần — evaluateChecks fail-closed (missing/unknown), planCiRouting (pass→`status:reviewing`, KHÔNG approve), planPreReviewOutcome (handoff-gpt/request-fix/block), approval marker khóa full HEAD SHA + policyVersion, planApprovalDrift, isStaleEvent/canMutatePr/mutationKey, normalizeStatusLabels (đúng 1 status:*), countReviewRounds, gateOpenFindings, scanDiffForSecrets, evaluateDiffLimits.
