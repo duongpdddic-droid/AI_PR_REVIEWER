@@ -20,7 +20,7 @@ Cline executor; KHÔNG tự gắn status:approved, KHÔNG merge/deploy.
 7. [x] Tests: `test-pure-logic.mjs` 101/101 PASS (C.1–C.14) + `test-integration-orchestrator.mjs` mới 52/52 PASS (I.1–I.14); full-verify chạy cả hai.
 8. [x] Đồng bộ docs/config: AGENT_HANDOFF_PROTOCOL.md viết lại REV-ISSUE-2; AGENTS.md; .clinerules/01 §13; PR template (+ section HEAD SHA); .agent/config.json + reviewer.config.json (label reviewing, policy file, finalReviewer/preReviewer); conventions-coder/reviewer.
 9. [x] Quality gates: pnpm test 101/101, pnpm test:integration 52/52, pnpm verify 39/39 — PASS (23/08/2026 01:05).
-10. [>] Commit, push, mở Draft PR liên kết Issue #2, gắn agent:gpt + status:review-requested, ghi HEAD SHA. DỪNG chờ GPT review.
+10. [x] Commit `cda2372`, push, Draft PR #3 (Ref #2), nhãn agent:gpt + status:review-requested, HEAD SHA cda23727fd4a68357010231ca229bb5cc68acda6. ĐÃ DỪNG chờ GPT/Bố review.
 
 ## Bước hiện tại
 Bàn giao PR 1 — chờ GPT review (không tự merge). Sau đó mới làm PR 2 (QLDA_DTXD).
@@ -47,6 +47,11 @@ Bàn giao PR 1 — chờ GPT review (không tự merge). Sau đó mới làm PR 
 - [ ] Sau khi PR2 (QLDA_DTXD) thêm policy, target repo hết CI_UNKNOWN fail-closed.
 - [ ] reviewer-agent/ inert giữ nguyên theo Decision Gate 21/08.
 - [ ] requiredChecks="verify" cần đối chiếu tên check-run thực tế trên GitHub khi PR CI chạy.
+- [ ] Telegram notify FAIL exit 2 (thiếu token/config tại `~/.ai-pr-reviewer/tg.json`) khi báo tổng kết PR1
+      23/08/2026 01:10 — NHẮC BỐ: cung cấp token/config hoặc xác nhận bỏ kênh Telegram cho repo này.
+      Evidence: `FAILED` (exit 2), event file tạm đã xóa; KHÔNG coi là "đã thông báo".
 
 ## Bước tiếp theo
-Commit + push + Draft PR (Ref #2), gắn nhãn agent:gpt + status:review-requested, dừng chờ GPT.
+ĐÃ DỪNG theo yêu cầu: PR 1 = https://github.com/duongpdddic-droid/AI_PR_REVIEWER/pull/3
+(HEAD cda23727fd4a68357010231ca229bb5cc68acda6, draft, agent:gpt + status:review-requested).
+Chờ Bố/GPT review. PR2 (QLDA_DTXD thêm policy) chỉ làm sau PR1 được duyệt.
