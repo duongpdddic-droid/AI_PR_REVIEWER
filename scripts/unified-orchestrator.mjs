@@ -3,8 +3,10 @@
 //
 // Quét PR `status:review-requested` trên targetRepos trong `.agent/config.json`
 // (loại repo của chính reviewer) và route kết quả CI cho Cline dự án:
-//   - CI PASS    → giữ status:review-requested, thêm agent:gpt (KHÔNG tự approve).
-//   - CI FAIL    → status:changes-requested + agent:cline trên PR, đồng thời tạo issue
+//   - CI PASS    → status:approved trên PR (gỡ status:review-requested) + comment tổng kết.
+//                  Quyền merge vẫn thuộc người dùng.
+//   - CI FAIL    → status:changes-requested + agent:cline trên PR, đăng comment chứa finding
+//                  chuẩn [LOCAL-REV-NNN] (1 finding/check fail), đồng thời tạo issue
 //                  `[review-fix]` (agent:cline + status:ready-for-cline) trong target repo
 //                  để Cline dự án nhận việc qua github-task-intake. Còn issue [review-fix]
 //                  mở → không tạo trùng. Vượt maxReviewRounds vòng → status:blocked.
@@ -26,6 +28,10 @@ import {
   AGENTS,
   planRouting,
   nextFixRound,
+  parseChecksJson,
+  parseChecksOutput,
+  classifyParsedChecks,
+  findingsFromFailedChecks,
 } from './autonomous-core.mjs';
 
 const ROOT = process.cwd();
@@ -83,9 +89,21 @@ function listReviewPRs(repo, label) {
   }
 }
 
-function checksStatus(repo, prNumber) {
-  const r = runQuiet(['pr', 'checks', String(prNumber), '--repo', repo]);
-  return classifyChecks({ ok: r.ok, status: r.status });
+// Đọc trạng thái CI checks của 1 PR kèm danh sách tên check theo trạng thái.
+// Ưu tiên `gh pr checks --json name,state` (gh ≥ v2.31); gh cũ không hỗ trợ → fallback parser text.
+function checksDetail(repo, prNumber) {
+  const rj = runQuiet(['pr', 'checks', String(prNumber), '--repo', repo, '--json', 'name,state']);
+  if (rj.ok) {
+    const p = parseChecksJson(rj.out);
+    if (p) return { state: classifyParsedChecks(p), ...p };
+  }
+  const rt = runQuiet(['pr', 'checks', String(prNumber), '--repo', repo]);
+  const t = parseChecksOutput(rt.out);
+  if (t.fail.length) return { state: 'fail', ...t };
+  if (t.pass.length && !t.pending.length && rt.ok) return { state: 'pass', ...t };
+  if (t.pending.length && !t.fail.length) return { state: 'pending', ...t };
+  // Output rỗng/không đọc được → phân loại theo mã thoát (0=pass, PENDING_STATES=pending, còn lại=fail).
+  return { state: classifyChecks({ ok: rt.ok, status: rt.status }), ...t };
 }
 
 // Các issue [review-fix] đã tồn tại cho 1 PR (mọi trạng thái) — dùng để đếm vòng + idempotent.
@@ -130,14 +148,16 @@ function labelFlags(flag, labels) {
   return (labels || []).flatMap((l) => [flag, l]);
 }
 
-function applyHandoff(repo, prNumber, plan) {
+// Gắn nhãn / gỡ nhãn / đăng comment tổng kết lên PR (idempotent: bỏ qua nhãn đã đúng trạng thái).
+// commentOverride: nội dung comment thay thế plan.comment (dùng khi cần đính finding [LOCAL-REV-NNN]).
+function applyHandoff(repo, prNumber, plan, commentOverride = null) {
   if (plan.removeLabels.length) {
     runGH(['pr', 'edit', String(prNumber), '--repo', repo, ...labelFlags('--remove-label', plan.removeLabels)]);
   }
   if (plan.addLabels.length) {
     runGH(['pr', 'edit', String(prNumber), '--repo', repo, ...labelFlags('--add-label', plan.addLabels)]);
   }
-  runGH(['pr', 'comment', String(prNumber), '--repo', repo, '--body', plan.comment]);
+  runGH(['pr', 'comment', String(prNumber), '--repo', repo, '--body', commentOverride ?? plan.comment]);
 }
 
 // ---------------------------------------------------------------- vòng xử lý
@@ -186,7 +206,8 @@ function processOneCycle({ dryRun = true } = {}) {
         continue;
       }
 
-      const state = checksStatus(repo, pr.number);
+      const detail = checksDetail(repo, pr.number);
+      const state = detail.state;
       if (state === 'pending') {
         console.log(`[unified] ⏳ ${repo}#${pr.number}: CI đang chạy — chờ chu kỳ sau.`);
         continue;
@@ -207,7 +228,10 @@ function processOneCycle({ dryRun = true } = {}) {
         hasOpenFixIssue: openFix,
       });
 
-      applyHandoff(repo, pr.number, plan);
+      // FAIL → sinh finding chuẩn [LOCAL-REV-NNN] (1 finding/check fail) đính kèm comment PR.
+      const findings = state === 'fail' ? findingsFromFailedChecks(detail.fail, pr.number) : [];
+      const fullComment = findings.length ? [plan.comment, '', ...findings].join('\n\n') : plan.comment;
+      applyHandoff(repo, pr.number, plan, fullComment);
       mutated += 1;
       console.log(`[unified] ✅ ${repo}#${pr.number}: ${plan.action}.`);
 

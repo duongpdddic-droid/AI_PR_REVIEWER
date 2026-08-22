@@ -130,6 +130,72 @@ export function reviewRoundLimit(config) {
   return Number.isInteger(n) && n > 0 ? n : MAX_FIX_ROUNDS;
 }
 
+// ---------------------------------------------------------------- phân tích CI checks (đa repo)
+
+// Parse JSON output của `gh pr checks --json name,state` (gh ≥ v2.31)
+// → { pass[], fail[], pending[] } hoặc null nếu không phải JSON hợp lệ (fallback parser text).
+export function parseChecksJson(stdout) {
+  let arr;
+  try { arr = JSON.parse(String(stdout || '')); } catch { return null; }
+  if (!Array.isArray(arr)) return null;
+  const FAIL_STATES = new Set(['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT']);
+  const PASS_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPING']);
+  const res = { pass: [], fail: [], pending: [] };
+  for (const c of arr) {
+    const name = String((c && c.name) || '').trim();
+    if (!name) continue;
+    const st = String((c && c.state) || '').toUpperCase();
+    if (PASS_STATES.has(st)) res.pass.push(name);
+    else if (FAIL_STATES.has(st)) res.fail.push(name);
+    else res.pending.push(name);
+  }
+  return res;
+}
+
+// Phân loại tổng từ kết quả parse: fail > pending > pass.
+// Danh sách trống (PR không có check nào cấu hình) → 'pass' (không gì fail).
+export function classifyParsedChecks(parsed) {
+  if (!parsed) return 'unknown';
+  if (parsed.fail.length) return 'fail';
+  if (parsed.pending.length) return 'pending';
+  return 'pass';
+}
+
+// Parse stdout text của `gh pr checks` (các trường cách nhau bằng tab, trạng thái
+// thể hiện bằng emoji đầu dòng ✅/❌/⏳) → { pass[], fail[], pending[] }.
+// Dòng không nhận diện được → coi pending (an toàn: không báo fail giả, chỉ hoãn).
+export function parseChecksOutput(stdout) {
+  const res = { pass: [], fail: [], pending: [] };
+  for (const line of String(stdout || '').split('\n')) {
+    const s = line.replace(/\r/g, '').trim();
+    if (!s || s.startsWith('-')) continue;
+    const name = (s.split('\t')[0] || '').replace(/^[^A-Za-z0-9_-]+/, '').trim();
+    if (!name) continue;
+    if (/^✅|^✔|^✓|\bpass\b/i.test(s)) res.pass.push(name);
+    else if (/^❌|^✗|^✘|\bfail/i.test(s)) res.fail.push(name);
+    else res.pending.push(name);
+  }
+  return res;
+}
+
+// Sinh finding chuẩn [LOCAL-REV-NNN] từ danh sách tên check FAIL (1 finding/check)
+// theo finding-schema (Severity/Status/File-Symbol/Evidence/Risk/Required fix/Acceptance criteria).
+export function findingsFromFailedChecks(failedNames, prNumber) {
+  return (Array.isArray(failedNames) ? failedNames : []).map((name, i) => {
+    const id = String(i + 1).padStart(3, '0');
+    return [
+      `[LOCAL-REV-${id}]`,
+      'Severity: high',
+      'Status: open',
+      `File/Symbol: CI check "${name}" — PR #${prNumber}`,
+      `Evidence: check "${name}" FAIL trên GitHub Actions.`,
+      'Risk: quality gate không đạt — diff chưa đủ điều kiện merge.',
+      `Required fix: mở log CI của check "${name}", sửa lỗi đến khi check PASS.`,
+      `Acceptance criteria: check "${name}" PASS trên commit mới của PR.`,
+    ].join('\n');
+  });
+}
+
 // ---------------------------------------------------------------- routing reviewer ↔ coder (đa repo)
 
 // Nhãn đánh dấu issue công việc "[review-fix]" do orchestrator sinh ra cho Cline dự án.
@@ -161,16 +227,16 @@ export function fixIssueBody({ repo, prNumber, round, maxRounds = MAX_FIX_ROUNDS
     ``,
     `- Đọc review comments trên PR: https://github.com/${repo}/pull/${prNumber}`,
     `- Push commit sửa lên **branch của PR** (KHÔNG tạo PR mới).`,
-    `- Khi xong: chạy quality gate, gắn lại \`status:review-requested\` + \`agent:gpt\` lên PR để quay lại vòng review.`,
+    `- Khi xong: chạy quality gate, đổi nhãn PR — bỏ \`status:changes-requested\` + \`agent:cline\`, gắn lại \`status:review-requested\` để quay lại vòng review.`,
     ``,
     `> Issue tự sinh bởi unified-orchestrator (AI_PR_REVIEWER). Bỏ qua nếu đã xử lý.`,
   ].join('\n');
 }
 
 // Quyết định routing sau khi phân loại CI cho 1 PR theo AGENT_HANDOFF_PROTOCOL:
-//   pending → chờ; pass → bàn giao GPT; fail còn budget → trả Cline (+issue [review-fix]);
+//   pending → chờ; pass → approve kỹ thuật (status:approved — quyền MERGE vẫn thuộc người dùng);
+//   fail còn budget → trả Cline (+issue [review-fix]);
 //   fail hết budget (nextRound > maxRounds) → block, cần người dùng quyết định.
-// KHÔNG bao giờ trả label approved (người dùng mới quyết định merge/approve).
 export function planRouting({
   checks,
   repo = '',
@@ -184,10 +250,10 @@ export function planRouting({
   }
   if (checks === 'pass') {
     return {
-      action: 'handoff-gpt',
-      addLabels: [AGENTS.gpt],
-      removeLabels: [],
-      comment: `✅ CI PASS — bàn giao GPT review (${repo}#${prNumber}).`,
+      action: 'approve',
+      addLabels: [LABELS.approved],
+      removeLabels: [LABELS.reviewRequested],
+      comment: `✅ Verification PASS 100% — đạt yêu cầu kỹ thuật (${repo}#${prNumber}). Quyền merge thuộc người dùng.`,
     };
   }
   if (nextRound <= maxRounds) {

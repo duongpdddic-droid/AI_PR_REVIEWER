@@ -8,6 +8,13 @@
     "duongpdddic-droid/QLDA_DTXD"
   ],
   "maxReviewRounds": 3,
+  "notifyTelegram": true,
+  "labels": {
+    "review_requested": "status:review-requested",
+    "changes_requested": "status:changes-requested",
+    "approved": "status:approved",
+    "blocked": "status:blocked"
+  },
   "worktree": "reviewer-agent-worktree/",
   "apiKey": "YOUR_OPENAI_API_KEY",
   "telegramChat": null,

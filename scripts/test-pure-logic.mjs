@@ -91,7 +91,17 @@ eq('summarizeVerify pass', summarizeVerify('...\nTổng: 18/18 PASS\n'), 'Tổng
 eq('summarizeVerify fallback', summarizeVerify('dòng cuối'), 'dòng cuối');
 
 // --- routing reviewer ↔ coder ---
-import { fixIssueTitle, nextFixRound, planRouting, FIX_ISSUE_LABEL } from './autonomous-core.mjs';
+import {
+  fixIssueTitle,
+  fixIssueBody,
+  nextFixRound,
+  planRouting,
+  FIX_ISSUE_LABEL,
+  parseChecksJson,
+  parseChecksOutput,
+  classifyParsedChecks,
+  findingsFromFailedChecks,
+} from './autonomous-core.mjs';
 
 eq('fixIssueTitle', fixIssueTitle(12, 2), '[review-fix] PR #12 — vòng r2');
 
@@ -107,12 +117,13 @@ eq('nextFixRound max nhiều vòng', nextFixRound(['[review-fix] PR #12 — vòn
   eq('planRouting wait', p.action, 'wait');
   eq('planRouting wait no labels', p.addLabels.length, 0);
 }
-// pass → handoff GPT, KHÔNG bao giờ tự approve.
+// pass → approve: status:approved + gỡ status:review-requested (quyền merge vẫn thuộc người dùng).
 {
   const p = planRouting({ checks: 'pass', repo: 'o/r', prNumber: 7 });
-  eq('planRouting gpt action', p.action, 'handoff-gpt');
-  eq('planRouting gpt label', p.addLabels.join(','), 'agent:gpt');
-  tru('planRouting không tự approved', !p.addLabels.includes('status:approved'));
+  eq('planRouting approve action', p.action, 'approve');
+  eq('planRouting approve label', p.addLabels.join(','), 'status:approved');
+  tru('planRouting approve gỡ review-requested', p.removeLabels.includes('status:review-requested'));
+  tru('planRouting không thêm agent:gpt', !p.addLabels.includes('agent:gpt'));
 }
 // fail còn budget → request-fix + tạo issue [review-fix] đúng nhãn giao thức.
 {
@@ -134,6 +145,46 @@ eq('planRouting không trùng issue', planRouting({ checks: 'fail', repo: 'o/r',
 }
 // maxRounds cấu hình được (vd 2): r3 đã vượt.
 eq('planRouting maxRounds tuỳ chỉnh', planRouting({ checks: 'fail', prNumber: 1, nextRound: 3, maxRounds: 2 }).action, 'block');
+
+// --- phân tích CI checks ---
+// parseChecksJson: JSON `gh pr checks --json name,state` → pass/fail/pending.
+{
+  const p = parseChecksJson('[{"name":"verify","state":"SUCCESS"},{"name":"test","state":"FAILURE"},{"name":"lint","state":"IN_PROGRESS"}]');
+  eq('parseChecksJson pass', p.pass.join(','), 'verify');
+  eq('parseChecksJson fail', p.fail.join(','), 'test');
+  eq('parseChecksJson pending', p.pending.join(','), 'lint');
+  eq('classifyParsedChecks fail', classifyParsedChecks(p), 'fail');
+}
+eq('parseChecksJson invalid', parseChecksJson('gh: unknown flag'), null);
+eq('parseChecksJson rỗng = pass', classifyParsedChecks(parseChecksJson('[]')), 'pass');
+eq('classifyParsedChecks null', classifyParsedChecks(null), 'unknown');
+
+// parseChecksOutput: fallback text (emoji đầu dòng + tab).
+{
+  const t = parseChecksOutput('✅ verify\tVerify CI\thttps://x\n❌ test\tTest\thttps://y\n⏳ lint\tLint\thttps://z\n');
+  eq('checksText pass', t.pass.join(','), 'verify');
+  eq('checksText fail', t.fail.join(','), 'test');
+  eq('checksText pending', t.pending.join(','), 'lint');
+}
+eq('checksText rỗng', parseChecksOutput('').pass.length + parseChecksOutput('').fail.length, 0);
+
+// findingsFromFailedChecks: 1 finding/check, đúng schema [LOCAL-REV-NNN].
+{
+  const fs2 = findingsFromFailedChecks(['test', 'lint'], 9);
+  eq('findings count', fs2.length, 2);
+  tru('findings id 001', fs2[0].startsWith('[LOCAL-REV-001]'));
+  tru('findings id 002', fs2[1].startsWith('[LOCAL-REV-002]'));
+  tru('findings schema đủ', fs2[0].includes('Severity: high') && fs2[0].includes('"test"') && fs2[0].includes('#9') && fs2[0].includes('Required fix:'));
+  eq('findings rỗng', findingsFromFailedChecks([], 9).length, 0);
+}
+
+// fixIssueBody: vòng lặp nhãn đúng — KHÔNG bảo coder thêm agent:gpt (orchestrator sẽ skip PR vĩnh viễn).
+{
+  const body = fixIssueBody({ repo: 'o/r', prNumber: 9, round: 1 });
+  tru('fixIssueBody gắn lại review-requested', body.includes('status:review-requested'));
+  tru('fixIssueBody bỏ changes-requested', body.includes('status:changes-requested'));
+  tru('fixIssueBody KHÔNG thêm agent:gpt', !body.includes('agent:gpt'));
+}
 
 
 let fail = 0;
