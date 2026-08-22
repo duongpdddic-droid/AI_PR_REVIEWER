@@ -19,6 +19,12 @@ Tự hành (act).
 ## Bước hiện tại
 Hoàn tất E2E — chờ người dùng push 3 commit local (`efb20ec`, `ed6eb79`, `8e0f954`).
 
+## 22/08/2026 12:20 (ACT) — Tiếp nhận `mcp-task-server` vào AI_PR_REVIEWER (chuyển từ QLDA_DTXD)
+- **Lý do**: `mcp-task-server` là công cụ điều phối Coder ↔ Reviewer đa repo (không phụ thuộc repo nào — repo truyền qua tham số `repo` / env `MCP_TASK_REPOS`), nên thuộc nhóm hạ tầng orchestration của AI_PR_REVIEWER chứ không neo vào repo nghiệp vụ QLDA_DTXD.
+- **Thay đổi**: copy `mcp-task-server/` + `.mcp.json` từ `C:\Users\Admin\.cline\QLDA_DTXD` → AI_PR_REVIEWER; thêm script `test:mcp` vào `package.json`.
+- **Settings toàn cục**: `cline_mcp_settings.json` `args[0]` trỏ `C:\Users\Admin\.cline\AI_PR_REVIEWER\mcp-task-server\server.mjs` (đã sửa, trước là `QLDA_DTXD\mcp-task-server\server.mjs`).
+- **Verify**: `node mcp-task-server/test-server.mjs` 34/34 PASS tại vị trí mới.
+
 ## Bằng chứng thực thi (22/08/2026 09:50)
 - E2E PASS path: PR draft #33 (nhãn `status:review-requested`) → CI pass 24s → `--execute` log `✅ approve` → nhãn PR còn đúng 1 `status:approved`; comment "✅ Verification PASS 100% — đạt yêu cầu kỹ thuật… Quyền merge thuộc người dùng."; rerun idempotent ("không có PR chờ review").
 - E2E FAIL path: push commit phá cú pháp `Backend/Code.js` → CI fail → gắn lại `status:review-requested` (giả lập coder bàn giao) → `--execute` log `request-fix` + issue `[review-fix] PR #33 — vòng r1` (#34); nhãn PR thành `agent:cline` + `status:changes-requested`; comment chứa finding `[LOCAL-REV-001]` đủ schema (Severity/Evidence/Risk/Required fix/Acceptance criteria); body issue hướng dẫn loop-breaker mới (gỡ changes-requested+agent:cline, gắn lại review-requested).
