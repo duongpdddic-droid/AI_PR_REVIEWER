@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mcp-task-server": {
+      "command": "node",
+      "args": ["mcp-task-server/server.mjs"],
+      "env": {
+        "MCP_TASK_REPOS": "duongpdddic-droid/QLDA_DTXD"
+      }
+    }
+  }
+}

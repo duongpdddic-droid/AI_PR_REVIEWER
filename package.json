@@ -7,6 +7,7 @@
     "test": "node scripts/test-pure-logic.mjs",
     "verify": "node scripts/full-verify.mjs",
     "test:baseline": "node scripts/extract-behavior-map.mjs && cp scripts/behavior-map-current.json scripts/behavior-map-baseline.json",
+    "test:mcp": "node mcp-task-server/test-server.mjs",
     "map": "node scripts/extract-behavior-map.mjs",
     "intake": "node scripts/github-task-intake.mjs",
     "orchestrate": "node scripts/unified-orchestrator.mjs",
