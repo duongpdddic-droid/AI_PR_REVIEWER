@@ -1,5 +1,12 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 09:05 — Vòng fix [GPT-REV-039] trên PR #4 — COMPLETED (chờ GPT re-review)
+
+- [x] GPT re-review #4 tại `c1fe477` phát 039 Important: policy khai báo steady-state tự kích hoạt khi hai PR merge, runtime wiring chưa tồn tại, tests chỉ check khóa JSON.
+- [x] Chọn phương án (2): PR #4 giữ là contract trung gian; steady-state chỉ kích hoạt sau PR wiring thứ ba được GPT duyệt + merge (acceptance criterion bắt buộc Issue #2).
+- [x] Commit `f2abe470609f67612fb93295e7f55772de13440f`: policy `.4` (`runtimeWiringPrRequired`, `appliesAfter`, `activationRequires`), protocol §1a, test P6 → 33/33; verify 47/47; test 126/126; CI PASS.
+- [x] Đồng bộ QLDA_DTXD#42 `64fa3db`; comment `[CLINE-FIX-039]` + labels agent:gpt/review-requested cả hai PR; notify SENT exit 0.
+- Trạng thái: chờ GPT re-review #4 (`f2abe47`) + QLDA#42 (`64fa3db`). Sau approval + merge: PR wiring runtime (thứ ba) — điều kiện đóng Issue #2.
 ## 23/08/2026 07:59 — Vòng fix [GPT-REV-036..038]: contract + discovery + reconcile — COMPLETED (chờ GPT re-review 2 PR)
 
 - [x] GPT re-review PR #42 tại `7e9f251`: 035 CLOSED; 036 (reviewer-coder contract), 037 (minimal prompt + task discovery fail-closed), 038 (policy drift 2 repo + thiếu đường reconcile) — Important blocking.
