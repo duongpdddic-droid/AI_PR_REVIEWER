@@ -1,5 +1,14 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 07:59 — Vòng fix [GPT-REV-036..038]: contract + discovery + reconcile — COMPLETED (chờ GPT re-review 2 PR)
+
+- [x] GPT re-review PR #42 tại `7e9f251`: 035 CLOSED; 036 (reviewer-coder contract), 037 (minimal prompt + task discovery fail-closed), 038 (policy drift 2 repo + thiếu đường reconcile) — Important blocking.
+- [x] QLDA_DTXD commit `da4aa82`: policy `2026-08-23.3` + `reviewerCoderContract` + `minimalCommandDiscovery`; protocol §6/§6a; AGENTS/clinerules; test P4/P5 → 29/29 PASS; verify 14/14; test 59; test:data PASS. Comment `[CLINE-FIX-036..038]`; labels agent:gpt + review-requested.
+- [x] Reconcile: **AI_PR_REVIEWER#4** (`chore/policy-sync-reviewer-phases`, `c1fe477`) — policy `.3` đồng bộ (requiredChecks `"verify"`), protocol §1a/§6/§6a, test mirror 29/29, full-verify 47/47, pnpm test 126/126; ready + agent:gpt + status:review-requested.
+- [x] Cross-repo evidence: cùng policyVersion `.3` + cùng 3 khối contract; khác duy nhất requiredChecks theo CI từng repo (scope note cho phép).
+- Trạng thái: chờ GPT re-review #42 (`da4aa82`) + #4 (`c1fe477`). Sau merge: wiring orchestrator steady-state approval (PR thứ ba Issue #2) rồi mới đóng Issue.
+
+
 ## 23/08/2026 06:27 — Issue #2 phần B: fix [GPT-REV-035] trên PR QLDA_DTXD#42 — COMPLETED (chờ GPT re-review)
 
 - [x] GPT review PR #42 phát [GPT-REV-035] (blocking): contract khóa GPT final reviewer vĩnh viễn, trái [USER-DECISION] hai giai đoạn sau Issue #2.
