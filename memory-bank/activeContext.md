@@ -45,15 +45,17 @@ Cline executor; KHÔNG tự gắn status:approved, KHÔNG merge/deploy.
 10. [x] Kênh Telegram notify repo này đã hoạt động (copy `~/.qldadtxd/tg.json` → `~/.ai-pr-reviewer/tg.json`).
 
 ## Bước hiện tại
-**Vòng fix [GPT-REV-035] trên PR QLDA_DTXD#42 HOÀN TẤT (23/08/2026 06:27)**: commit
-`7e9f251f403dd6912c58d6540cfec75bd3bda202` đã push; thêm `reviewerPhases` vào policy
-(`2026-08-23.2`: transition/steadyState + 6 approvalRequiresAllGates + 5 escalateToGptWhen +
-invariantsAllPhases); đồng bộ protocol/AGENTS/clinerules/templates; test mới
-`test-review-phases.mjs` 17/17 PASS cắm vào full-verify. Gates: pnpm verify 14/14, pnpm test
-59 assertions, test:data PASS, diff --check sạch; CI "Verify code and data" PASS tại `7e9f251f`.
-Comment `[CLINE-FIX-035]` đã đăng; labels `agent:gpt` + `status:review-requested`.
-Telegram: `--event-file` SENT (exit 0, eventKey `...PR#42@7e9f251...::done::ready-for-gpt-review`).
-Dừng chờ GPT re-review. Local QLDA_DTXD đang ở branch PR (chưa trả main).
+**Vòng fix [GPT-REV-036..038] HOÀN TẤT (23/08/2026 07:5x)**:
+- PR QLDA_DTXD#42: commit `da4aa8260731551ff81606c10bb682ebe68d8726` — policy bump `2026-08-23.3`
+  thêm `reviewerCoderContract` (036) + `minimalCommandDiscovery` (037); protocol §6 viết lại + §6a mới;
+  AGENTS/clinerules tham chiếu ngắn; test P4/P5 → 29/29 PASS; verify 14/14; test 59; test:data PASS.
+  Comment `[CLINE-FIX-036..038]` (issuecomment-5383475255); labels `agent:gpt` +
+  `status:review-requested`; PR body HEAD `da4aa82`.
+- PR reconcile AI_PR_REVIEWER#4 (038): branch `chore/policy-sync-reviewer-phases`, commit
+  `c1fe477` — policy `.3` đồng bộ (requiredChecks `"verify"`), protocol §1a/§6/§6a, test mirror
+  29/29 PASS, full-verify 47/47, pnpm test 126/126. Draft→ready; labels `agent:gpt` +
+  `status:review-requested`. Link: https://github.com/duongpdddic-droid/AI_PR_REVIEWER/pull/4
+Dừng chờ GPT re-review cả hai PR. Local QLDA_DTXD đang ở branch PR; local repo này ở branch PR #4.
 
 ## Quyết định
 - Policy dùng JSON thay YAML (vòng 1); vòng 2 bump policyVersion `2026-08-23.1` (taxonomy + decisionId).
