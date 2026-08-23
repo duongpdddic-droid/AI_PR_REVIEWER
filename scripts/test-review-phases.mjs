@@ -133,5 +133,19 @@ check('scope.appliesTo chứa cả 2 repo (QLDA + AI_PR_REVIEWER) để cross-re
   (policy.scope.appliesTo || []).includes('duongpdddic-droid/AI_PR_REVIEWER')
   && (policy.scope.appliesTo || []).includes('duongpdddic-droid/QLDA_DTXD'));
 
+// ---------------- [GPT-REV-039] Steady-state không tự kích hoạt khi hai PR merge ----------------
+console.log('P6 — [GPT-REV-039] steady-state chỉ kích hoạt sau PR runtime wiring được GPT duyệt + merge');
+check('transition.runtimeWiringPrRequired = true', transition.runtimeWiringPrRequired === true);
+check('steadyState.appliesAfter đặt điều kiện PR runtime wiring được GPT duyệt và merge',
+  /runtime wiring/i.test(steady.appliesAfter || '')
+  && /GPT/i.test(steady.appliesAfter || '')
+  && /merge/i.test(steady.appliesAfter || ''));
+check('appliesAfter không còn tuyên bố "ca hai PR trien khai da merge" là điều kiện đủ',
+  !/ca hai PR trien khai da merge/.test(
+    (steady.appliesAfter || '').replace(/khong tu kich hoat[\s\S]*$/i, '')));
+check('steadyState.activationRequires gồm runtimeWiringPrGptApproved + runtimeWiringPrMerged',
+  (steady.activationRequires || []).includes('runtimeWiringPrGptApproved')
+  && (steady.activationRequires || []).includes('runtimeWiringPrMerged'));
+
 console.log(`\ntest-review-phases: ${pass}/${total} PASS`);
 process.exit(pass === total ? 0 : 1);

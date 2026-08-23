@@ -19,19 +19,20 @@ GitHub là kênh trao đổi chính thức giữa các tác nhân:
 
 ## 1a. Mô hình reviewer hai giai đoạn ([USER-DECISION] sau Issue #2)
 
-Canonical: `reviewerPhases` trong `.github/ai-review-policy.json` (policyVersion `2026-08-23.3`,
+Canonical: `reviewerPhases` trong `.github/ai-review-policy.json` (policyVersion `2026-08-23.4`,
 đồng bộ giữa hai repo). Diễn giải:
 
 ### Giai đoạn chuyển tiếp — `transition`
 
-- Hiệu lực khi Issue `duongpdddic-droid/AI_PR_REVIEWER#2` chưa hoàn thành (chưa cả hai PR
-  triển khai được merge).
+- Hiệu lực khi Issue `duongpdddic-droid/AI_PR_REVIEWER#2` chưa hoàn thành: runtime wiring
+  (`unified-orchestrator.mjs` / `review-contract.mjs` / `gpt-approval.mjs`) chưa được triển khai
+  qua PR riêng được GPT duyệt và merge (`transition.runtimeWiringPrRequired = true`).
 - GPT (`agent:gpt`) là reviewer cuối cho hai PR triển khai Issue #2; approval chỉ do GPT phát,
   relay bởi người dùng qua `scripts/gpt-approval.mjs`.
 - `localReviewerCanApprove: false` — AI_PR_REVIEWER không tự chứng nhận thay đổi kiến trúc
   reviewer của chính nó.
 
-### Trạng thái vận hành — `steadyState` (hiệu lực khi Issue #2 hoàn thành)
+### Trạng thái vận hành — `steadyState` (chỉ hiệu lực sau khi PR runtime wiring được GPT duyệt + merge)
 
 - Reviewer mặc định là `reviewer:local`; được phép approve khi đủ TOÀN BỘ
   `approvalRequiresAllGates` (6 gate: CI pass đủ required checks, semantic review thật,
@@ -40,6 +41,11 @@ Canonical: `reviewerPhases` trong `.github/ai-review-policy.json` (policyVersion
 - GPT không re-review từng PR; chỉ escalation theo `escalateToGptWhen`
   (5 trường hợp) hoặc hậu kiểm/chọn mẫu.
 - Bất kỳ thiếu bằng chứng/xung đột/nghi ngờ → fail-closed: chuyển GPT hoặc `status:blocked`.
+- **Steady-state KHÔNG tự kích hoạt** khi hai PR triển khai Issue #2 được merge
+  (`steadyState.activationRequires = [runtimeWiringPrGptApproved, runtimeWiringPrMerged]`,
+  `transition.runtimeWiringPrRequired = true`): cần PR thứ ba wiring runtime
+  (`unified-orchestrator.mjs` / `review-contract.mjs` / `gpt-approval.mjs`) được GPT duyệt đúng
+  HEAD SHA và người dùng merge — acceptance criterion bắt buộc để đóng Issue #2.
 
 Bất biến mọi pha (`invariantsAllPhases`): CI PASS không approve; checks rỗng fail-closed;
 approval khóa full HEAD SHA + policyVersion; HEAD đổi → vô hiệu; finding Critical/Important

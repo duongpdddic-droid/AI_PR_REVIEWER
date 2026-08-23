@@ -37,13 +37,15 @@
     "currentPhase": "transition",
     "phases": {
       "transition": {
-        "appliesWhile": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 chua hoan thanh (chua ca hai PR trien khai duoc merge)",
+        "appliesWhile": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 chua hoan thanh: runtime wiring (unified-orchestrator.mjs / review-contract.mjs / gpt-approval.mjs) chua duoc trien khai qua PR rieng duoc GPT duyet va merge",
         "finalReviewer": "agent:gpt",
         "localReviewerCanApprove": false,
-        "rationale": "AI_PR_REVIEWER khong tu chung nhan ban thay doi kien truc reviewer cua chinh no; local chi pre-review/ho tro. Hai PR chi duoc merge sau khi GPT duet dung HEAD SHA va nguoi dung cho phep."
+        "runtimeWiringPrRequired": true,
+        "rationale": "AI_PR_REVIEWER khong tu chung nhan ban thay doi kien truc reviewer cua chinh no; local chi pre-review/ho tro. Hai PR contract/fix chi duoc merge sau khi GPT duet dung HEAD SHA va nguoi dung cho phep; viec merge hai PR nay KHONG tu kich hoat steady-state."
       },
       "steadyState": {
-        "appliesAfter": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 hoan thanh: ca hai PR trien khai da merge",
+        "appliesAfter": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 hoan thanh: PR runtime wiring thu ba da duoc GPT duyet dung full HEAD SHA va nguoi dung merge (khong tu kich hoat khi hai PR contract/fix merge)",
+        "activationRequires": ["runtimeWiringPrGptApproved", "runtimeWiringPrMerged"],
         "defaultReviewer": "reviewer:local",
         "localReviewerCanApprove": true,
         "gptReReviewsEveryPr": false,
