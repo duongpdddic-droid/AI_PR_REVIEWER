@@ -38,6 +38,8 @@
       "stateMachine",
       "rules"
     ],
+    "canonicalRepo": "duongpdddic-droid/AI_PR_REVIEWER",
+    "canonicalPath": ".github/ai-review-policy.json",
     "failClosed": {
       "BLOCKED_CANONICAL_UNAVAILABLE": "Canonical policy khong doc duoc (missing/unreachable/unparseable) -> BLOCKED, khong approve, khong dung ban local cu.",
       "BLOCKED_CANONICAL_INVALID": "Canonical policy khong pass validatePolicy -> BLOCKED.",

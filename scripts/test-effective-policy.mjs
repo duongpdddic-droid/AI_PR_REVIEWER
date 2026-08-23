@@ -178,4 +178,81 @@ const projectConfigQldA = {
   ok('AI_PR_REVIEWER tự review → canonical nội bộ tại head ref');
 }
 
+// --- [GPT-REV-044] Canonical identity enforcement ---
+{
+  // Project config cung cấp repo khác → BLOCKED
+  const cfg = JSON.parse(JSON.stringify(projectConfigQldA));
+  cfg.policySource.repo = 'evil/attacker-policy';
+  assert.throws(() => resolveEffectivePolicy(canonical, cfg), (e) =>
+    e instanceof PolicyResolutionError && e.code === 'BLOCKED_CANONICAL_INVALID' && e.message.includes('policySource.repo'));
+  ok('project config repo khác canonical identity → BLOCKED_CANONICAL_INVALID');
+}
+{
+  // Project config cung cấp path khác → BLOCKED
+  const cfg = JSON.parse(JSON.stringify(projectConfigQldA));
+  cfg.policySource.path = '.github/fake-policy.json';
+  assert.throws(() => resolveEffectivePolicy(canonical, cfg), (e) =>
+    e instanceof PolicyResolutionError && e.code === 'BLOCKED_CANONICAL_INVALID' && e.message.includes('policySource.path'));
+  ok('project config path khác canonical identity → BLOCKED_CANONICAL_INVALID');
+}
+{
+  // Canonical contract thiếu canonicalRepo/canonicalPath → BLOCKED
+  const broken = { ...canonical, projectPolicyContract: { ...canonical.projectPolicyContract } };
+  delete broken.projectPolicyContract.canonicalRepo;
+  delete broken.projectPolicyContract.canonicalPath;
+  assert.throws(() => resolveEffectivePolicy(broken, projectConfigQldA), (e) =>
+    e instanceof PolicyResolutionError && e.code === 'BLOCKED_CANONICAL_INVALID' && e.message.includes('canonicalRepo/canonicalPath'));
+  ok('canonical contract thiếu canonicalRepo/canonicalPath → BLOCKED_CANONICAL_INVALID');
+}
+{
+  // resolvePolicyForRepo: project config repo khác → BLOCKED (identity enforce ở resolveEffectivePolicy)
+  const cfg = JSON.parse(JSON.stringify(projectConfigQldA));
+  cfg.policySource.repo = 'evil/attacker-policy';
+  assert.throws(
+    () => resolvePolicyForRepo({
+      repo: 'duongpdddic-droid/QLDA_DTXD', ref: 'g'.repeat(40),
+      fetchContent: (r, p, rr) => {
+        if (p === PROJECT_CONFIG_FILE) return JSON.stringify(cfg);
+        return JSON.stringify(canonical);
+      },
+    }),
+    (e) => e.code === 'BLOCKED_CANONICAL_INVALID' && e.message.includes('policySource.repo'),
+  );
+  ok('resolvePolicyForRepo: project config repo khác identity → BLOCKED_CANONICAL_INVALID');
+}
+{
+  // resolvePolicyForRepo: canonical contract thiếu identity → BLOCKED (self-review)
+  const brokenCanon = { ...canonical, projectPolicyContract: { ...canonical.projectPolicyContract } };
+  delete brokenCanon.projectPolicyContract.canonicalRepo;
+  delete brokenCanon.projectPolicyContract.canonicalPath;
+  assert.throws(
+    () => resolvePolicyForRepo({
+      repo: CANONICAL_REPO, ref: 'h'.repeat(40),
+      fetchContent: () => JSON.stringify(brokenCanon),
+    }),
+    (e) => e.code === 'BLOCKED_CANONICAL_INVALID' && e.message.includes('canonicalRepo/canonicalPath'),
+  );
+  ok('resolvePolicyForRepo self-review: canonical contract thiếu identity → BLOCKED_CANONICAL_INVALID');
+}
+{
+  // Happy path: project config KHÔNG cung cấp repo/path (chỉ pin + ref + overrides) → PASS
+  const cfg = JSON.parse(JSON.stringify(projectConfigQldA));
+  delete cfg.policySource.repo;
+  delete cfg.policySource.path;
+  const { policy, meta } = resolveEffectivePolicy(canonical, cfg);
+  assert.deepEqual(policy.requiredChecks, ['Verify code and data']);
+  assert.equal(meta.pinnedVersion, canonical.policyVersion);
+  ok('project config không có repo/path (chỉ pin+ref) → PASS, dùng default canonical');
+}
+{
+  // Happy path: project config cung cấp repo/path TRÙNG khớp identity → PASS
+  const cfg = JSON.parse(JSON.stringify(projectConfigQldA));
+  cfg.policySource.repo = canonical.projectPolicyContract.canonicalRepo;
+  cfg.policySource.path = canonical.projectPolicyContract.canonicalPath;
+  const { policy: p2, meta: m2 } = resolveEffectivePolicy(canonical, cfg);
+  assert.deepEqual(p2.requiredChecks, ['Verify code and data']);
+  assert.equal(m2.pinnedVersion, canonical.policyVersion);
+  ok('project config repo/path trùng khớp identity → PASS');
+}
+
 console.log(`test-effective-policy: ${passed} asserts PASS`);

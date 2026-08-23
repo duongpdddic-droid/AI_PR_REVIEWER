@@ -50,6 +50,14 @@ export function resolveEffectivePolicy(canonicalPolicy, projectConfig) {
   if (!v.ok) throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical policy sai shape: ${v.error}`);
   const contract = requireContract(canonicalPolicy);
 
+  // --- [GPT-REV-044] Enforce canonical identity from contract ---
+  const canonIdentity = contract.canonicalRepo && contract.canonicalPath
+    ? { repo: contract.canonicalRepo, path: contract.canonicalPath }
+    : null;
+  if (!canonIdentity) {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', 'canonical policy thiếu projectPolicyContract.canonicalRepo/canonicalPath');
+  }
+
   // Repo không khai báo project config (vd AI_PR_REVIEWER tự review) → effective = canonical.
   if (!projectConfig || typeof projectConfig !== 'object') {
     return { policy: canonicalPolicy, meta: { canonicalVersion: canonicalPolicy.policyVersion, pinnedVersion: null, appliedOverrides: [] } };
@@ -63,6 +71,15 @@ export function resolveEffectivePolicy(canonicalPolicy, projectConfig) {
   if (String(src.pinnedVersion) !== String(canonicalPolicy.policyVersion)) {
     throw new PolicyResolutionError('BLOCKED_VERSION_MISMATCH',
       `pin ${src.pinnedVersion} != canonical ${canonicalPolicy.policyVersion}`);
+  }
+  // [GPT-REV-044] Nếu project config cung cấp repo/path, PHẢI trùng khớp canonical identity.
+  if (src.repo && src.repo !== canonIdentity.repo) {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID',
+      `policySource.repo "${src.repo}" != canonical identity "${canonIdentity.repo}"`);
+  }
+  if (src.path && src.path !== canonIdentity.path) {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID',
+      `policySource.path "${src.path}" != canonical identity "${canonIdentity.path}"`);
   }
 
   const overrides = projectConfig.projectOverrides || {};
@@ -118,12 +135,14 @@ export function loadCanonicalPolicyLocal(projectRoot) {
 }
 
 /**
- * Pure: chọn nguồn canonical theo Issue #5 + [GPT-REV-042].
+ * Pure: chọn nguồn canonical theo Issue #5 + [GPT-REV-042] + [GPT-REV-044].
  * - Repo canonical tự review → canonical nội bộ tại `ref` (head SHA của PR canonical).
  * - Project repo → BẮT BUỘC project config; canonical chỉ được tải từ đúng
  *   `policySource.repo + policySource.ref (full 40-hex SHA) + policySource.path`.
  *   KHÔNG BAO GIỜ đọc `.github/ai-review-policy.json` trên target repo
  *   (legacy mirror đã bỏ — stale mirror không được dùng làm nguồn policy).
+ * - [GPT-REV-044] canonical identity (repo/path) được khóa bởi projectPolicyContract.
+ *   project config KHÔNG được override canonical identity.
  * - Mọi lệch shape/ref/thiếu nguồn → PolicyResolutionError fail-closed.
  * @param {{repo: string, ref: string, fetchContent: (repo:string,path:string,ref:string)=>string}} p
  * @returns {{policy: object, meta?: object}} meta có mặt khi đi qua project config.
@@ -141,6 +160,11 @@ export function resolvePolicyForRepo({ repo, ref, fetchContent }) {
     catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai JSON: ${String((e && e.message) || e).slice(0, 160)}`); }
     const v = validatePolicy(parsed);
     if (!v.ok) throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai shape: ${v.error}`);
+    // [GPT-REV-044] canonical tự review cũng phải có identity hợp lệ trong contract.
+    const contract = requireContract(parsed);
+    if (!contract.canonicalRepo || !contract.canonicalPath) {
+      throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', 'canonical policy thiếu projectPolicyContract.canonicalRepo/canonicalPath');
+    }
     return { policy: parsed };
   }
 
@@ -157,8 +181,9 @@ export function resolvePolicyForRepo({ repo, ref, fetchContent }) {
     throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', 'project config thiếu policySource.ref');
   }
   assertFullSha(src.ref);
-  const cRepo = src.repo || CANONICAL_REPO;
-  const cPath = src.path || CANONICAL_PATH;
+  // [GPT-REV-044] canonical repo/path: dùng default từ hằng số (không lấy từ project config để không cho override).
+  const cRepo = CANONICAL_REPO;
+  const cPath = CANONICAL_PATH;
   let canonical;
   try { canonical = JSON.parse(fetchContent(cRepo, cPath, src.ref)); }
   catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE',
