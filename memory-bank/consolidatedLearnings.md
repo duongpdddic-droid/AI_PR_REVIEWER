@@ -93,6 +93,13 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
   2. Trước khi WriteAllText có điều kiện, assert `$t.Contains($old)` và chỉ ghi khi match; log kết quả replace.
   3. Sau đợt sửa hàng loạt, chạy `git status --porcelain` cả hai workspace để phát hiện file lạ.
 
+## L-018 (23/08/2026) — Đường dẫn policy `reviewerPhases.phases.steadyState`, không phải `reviewerPhases.steadyState`
+- **Triệu chứng**: test runtime fail `Cannot read properties of undefined (reading 'activationEvidence')` khi đọc `canonical.reviewerPhases.steadyState.activationEvidence` sau khi viết code mới.
+- **Nguyên nhân gốc**: schema policy lồng 2 cấp — `reviewerPhases.phases.{transition|steadyState}`; `reviewerPhases.steadyState` không tồn tại. Code mới (orchestrator + test) suy diễn đường dẫn ngắn.
+- **Tránh lặp lại**:
+  1. Trước khi truy cập key policy mới, mở `.github/ai-review-policy.json` xem đúng cấp lồng (đọc đoạn JSON thật, không nhớ theo tên finding).
+  2. Test integration đọc policy THẬT từ file sẽ lộ sai path ngay ở lần chạy đầu — chạy `pnpm test:integration` trước khi kết luận xong.
+
 ## L-017 (23/08/2026) — Pin cross-repo policy theo branch/ref di động gây CI fail khi hai PR lệch merge
 - **Triệu chứng**: CI QLDA fail `BLOCKED_VERSION_MISMATCH`/không tìm thấy resolver sau migration Issue #5: workflow checkout canonical `ref: main`, nhưng policy `.5` + `effective-policy.mjs` còn nằm trên PR AI_PR_REVIEWER#4 chưa merge.
 - **Nguyên nhân gốc**: "Pin" trỏ `main` là tham chiếu DI ĐỘNG — không đảm bảo version khớp `pinnedVersion`; fail-closed hoạt động đúng nhưng chặn CI hợp lệ.

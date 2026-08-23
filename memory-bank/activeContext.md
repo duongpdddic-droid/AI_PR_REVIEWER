@@ -1,4 +1,53 @@
-## 23/08/2026 10:40 (ACT) — [GPT-REV-039]+[GPT-REV-040] + Issue #5 canonical SSOT ✅ BÀN GIAO LẠI GPT
+## 23/08/2026 21:10 (ACT) — Fix [GPT-REV-046] activation authority ✅ BÀN GIAO LẠI GPT
+- **Finding**: [GPT-REV-046] Critical — activation marker chưa xác thực authority: `getPhaseActivationText` chỉ nối body comment (mất author/id), `parseActivationComment` không kiểm tra author được ủy quyền, wiringPr đúng phạm vi policy, PR merged thật, merge SHA khớp GitHub, GPT approval hợp lệ khóa head đã merge; `recordedBy` tự khai báo; test không đối chiếu dữ liệu GitHub thật.
+- **PR AI_PR_REVIEWER#4 — policy bump `2026-08-23.7`**, trên `chore/policy-sync-reviewer-phases`:
+  - Policy `activationEvidence` thêm `allowedRecorders: ["duongpdddic-droid"]` + `expectedWiringPr: {repo, number: 4}`; note mô tả xác minh authority đầy đủ.
+  - `defaultIo`: bỏ `getPhaseActivationText`; thêm `getIssueComments(repo,num)` (metadata id/author/created_at, body base64 qua jq) + `getPullState(repo,num)` (REST pulls: state/merged/merge_commit_sha/head.sha).
+  - `review-contract.mjs`: thêm pure `collectActivationRecords(comments)` (marker + metadata) và `planPhaseActivation({records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion})` — fail-closed toàn bộ: author∉allowed → inactive; wiringPr sai phạm vi → inactive; wiringState null/error/chưa merged → inactive; wiringMergedSha≠merge_commit_sha → inactive; gptApprovedHeadSha≠head đã merge → inactive; không có GPT approval hợp lệ (isApprovalValid: agent:gpt + head đã merge + policyVersion hiện tại + 0 blocking) → inactive; nhiều marker mâu thuẫn → inactive (duplicate giống hệt nhau vẫn OK).
+  - `unified-orchestrator.mjs`: `resolvePhaseActivation(io, policy)` tổng hợp bằng chứng; `processPr` gọi trong try/catch — mọi sai lệch/lỗi IO → giữ transition + log reason, tuyệt đối không local approve.
+  - Tests: pure C.22 (+21 asserts: authority matrix); runtime R.1–R.14 (mock io authority-based: fake marker, sai author, sai wiringPr, chưa merge, sai merge SHA, sai head, thiếu/stale approval, marker mâu thuẫn, API lỗi — đều KHÔNG kích hoạt; chỉ GitHub state + GPT approval hợp lệ → steady-state).
+- **Gates**: verify **53/53**; test **169/169** (pure C.22 +21); integration approval-gate 50/50 + orchestrator + runtime 20 asserts R.1–R.14; policy 40/40; mcp 51.
+- **Bàn giao**: `[CLINE-FIX-046]` comment PR #4; nhãn `agent:gpt` + `status:review-requested`; PR body HEAD cập nhật.
+- **Hệ lụy #42**: canonical `.7` làm pin `.6` của QLDA_DTXD#42 thành `BLOCKED_VERSION_MISMATCH` — #42 phải bump pin lên `.7` + SHA mới sau khi #4 merge (đã đúng luồng: #42 chờ canonical trên main).
+- Trạng thái: chờ GPT re-review #4. Không merge/deploy tự động.
+
+## 23/08/2026 15:27 (ACT) — Fix [GPT-REV-045] steady-state runtime wiring ✅ BÀN GIAO LẠI GPT
+- **Finding**: [GPT-REV-045] Important — hard-code `runtimeWiringMerged:false`; helper pha/gates chưa điều khiển processPr; `resolveRebuttalOutcome` thiếu `expectedOutcome`; duplicate JSON keys `canonicalRepo/canonicalPath`.
+- **PR AI_PR_REVIEWER#4 — commit `8a20180`** (8 files, +472/−21) trên `chore/policy-sync-reviewer-phases`, policy bump `2026-08-23.6`:
+  - Activation máy đọc được: policy thêm `steadyState.activationEvidence` (issue-comment marker trên Issue #2); `parseActivationComment()` pure fail-closed (thiếu prefix/JSON hỏng/sai shape/SHA ngắn → inactive); `defaultIo.getPhaseActivationText(policy)` đọc theo khai báo policy, lỗi io → null.
+  - `processPr`: bỏ hard-code; route `planEscalationForPhase` — block→blocked; escalate-gpt giữ handoff/request-fix/decision-gate; local-accept-candidate chỉ approve khi `evaluateSteadyApprovalGates().ok` (pre-check trước ghi + gate `readAfterWriteSucceeded` verify bằng read-back THẬT sau postComment); marker khóa HEAD+policyVersion reviewer `reviewer:local`; read-back FAIL → escalate-gpt.
+  - `planApprovalDrift` nhận local approval hợp lệ qua `steadyLocalApproval()` mới (không drift sai); GPT vẫn duyệt duy nhất ở transition.
+  - `resolveRebuttalOutcome`: REQUIRED đủ 5 trường (+`expectedOutcome`) → thiếu = malformed.
+  - Duplicate keys: xóa cặp khai lặp; `scanDuplicateObjectKeys()` pure tokenizer; wired 3 đường load canonical → `BLOCKED_POLICY_DUPLICATE_KEYS`.
+  - Tests mới: pure C.17–C.21 (+23), effective-policy 18→21 (dup-key BLOCKED), runtime 6→11 (R.1–R.5 qua processPr mock io); I.17 cập nhật "add approved duy nhất sau guard gates".
+- **Gates**: verify **53/53**; test **149/149**; integration orchestrator 73/73; CI dispatch run **32628272515 SUCCESS** tại `8a20180`.
+- **Bàn giao**: `[CLINE-FIX-045]` comment PR #4 (issuecomment-5385126577); nhãn `agent:gpt` + `status:review-requested`; PR body HEAD SHA `8a20180`.
+- **PR QLDA_DTXD#42**: commit `2854dec` pin canonical → `8a20180`/`2026-08-23.6` (`.github/project-review-policy.json` ref+pinnedVersion + `verify.yml` checkout SHA); verify 14/14 PASS; CI run **32629851965 SUCCESS**; comment bàn giao (issuecomment-5385212521) ĐÃ ĐĂNG.
+- **BLOCKER (Mức 3) — nhãn #42 bị orchestrator reset**: mọi edit nhãn thủ công (`agent:gpt`+`status:review-requested`) bị override tức thì về `agent:cline`+`status:changes-requested`. Nguyên nhân: #42 pin canonical `8a20180` nằm trên PR #4 (AI_PR_REVIEWER) **CHƯA MERGE** → orchestrator pre-review #42 không resolve được policy canonical → fail-closed duy trì `changes-requested`. **Cần Bố merge PR #4 (AI_PR_REVIEWER) trước**, sau đó #42 mới pre-review được và tự bàn giao GPT.
+
+
+## 23/08/2026 14:35 (ACT) — GitHub task intake: Issue #1 echo marker ✅ BÀN GIAO PR #7
+- **Nguồn**: `github-task-intake.mjs` tìm đúng 1 Issue `agent:cline + status:ready-for-cline` (#1 "[TEST] Dry-run orchestrator đóng vòng"); claim PASS qua preflight (`CLAIMED`, main @ `42906da`, clean tree).
+- **Chướng ngại đã xử lý**: checkout main bị chặn bởi memory-bank dirty lệch branch → backup 2 file ra `%TEMP%\mb-backup-20260823-142950`, restore, checkout main, khôi phục nội dung (không stash/reset tự ý).
+- **Thực thi**: nhánh `chore/issue-1-echo-marker-test`; tạo `scripts/test-echo-marker.mjs` (3 dòng, in `AUTONOMOUS_TEST_OK`, exit 0); commit `762df51` push.
+- **Gates**: node script trực tiếp PASS exit 0; pnpm verify 46/46; pnpm test 126/126; CI check `verify` PASS tại HEAD.
+- **Bàn giao**: Draft PR #7 → ready for review, body tick Ready; Issue #1 label → `status:review-requested`. Orchestrator tự pre-review → GPT.
+- **Telegram**: lệnh `[NEW]#558` "Không ngủ đông" → đã reply xác nhận + `watchdog-hibernate.mjs --cancel` + `--heartbeat` (watchdog hủy theo chỉ thị Bố).
+
+## 23/08/2026 11:52 (ACT) — Fix [GPT-REV-044] canonical identity enforcement ✅ BÀN GIAO LẠI GPT
+- **Finding**: [GPT-REV-044] project config có thể đổi `policySource.repo/path` sang repo/path khác, bypass SSOT.
+- **PR AI_PR_REVIEWER#4 — commit `14533bb`** (3 files, +107/−3) trên `chore/policy-sync-reviewer-phases`:
+  - `.github/ai-review-policy.json`: thêm `canonicalRepo: "duongpdddic-droid/AI_PR_REVIEWER"`, `canonicalPath: ".github/ai-review-policy.json"` trong `projectPolicyContract`.
+  - `scripts/effective-policy.mjs`:
+    - `resolveEffectivePolicy`: validate identity từ contract; project config `repo`/`path` (nếu có) **bắt buộc trùng khớp** identity; khác → `BLOCKED_CANONICAL_INVALID`; contract thiếu identity → `BLOCKED_CANONICAL_INVALID`.
+    - `resolvePolicyForRepo`: self-review enforce identity; project repo dùng hằng số `CANONICAL_REPO`/`CANONICAL_PATH` (không lấy từ project config).
+  - Tests: +7 asserts identity enforcement → **18/18 PASS**.
+  - Verify: verify 53/53; test 126/126; integration 73/73 + 50/50 + 6; CI verify PASS (run tại HEAD 14533bb).
+  - Bàn giao: `[CLINE-FIX-044]` (issuecomment-5384294303).
+- **PR QLDA_DTXD#42** (commit `ea841f1`): đã đóng [GPT-REV-043]; đợi #4 đóng [GPT-REV-044] → cập nhật pin nếu cần → CI → bàn giao cùng.
+- **Trạng thái**: chờ orchestrator pre-review → GPT review cuối cả hai PR. Sau approval: Bố quyết merge.
+
+## 23/08/2026 11:39 (ACT) — Fix [GPT-REV-042]+[GPT-REV-043] canonical-SSOT blocker ✅ BÀN GIAO LẠI GPT
 - **Findings**: [GPT-REV-039] (runtime wiring) còn hiệu lực; [GPT-REV-040] mới — mirror policy hai repo trái kiến trúc; **Issue #5** thay thế phần copy policy/protocol của Issue #2: AI_PR_REVIEWER = SSOT, QLDA chỉ project config + pin.
 - **Commit `565f33a`** (11 files) trên `chore/policy-sync-reviewer-phases`:
   - Policy `.5`: bỏ mirror note; thêm **projectPolicyContract** (allowedProjectOverrides whitelist, invariantLockedKeys, 5 mã fail-closed).

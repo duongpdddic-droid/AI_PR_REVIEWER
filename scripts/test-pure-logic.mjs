@@ -18,6 +18,7 @@ import {
   normalizeStatusLabels, validatePolicy, evaluateChecks, planCiRouting,
   planPreReviewOutcome, buildApprovalMarker, parseApprovalMarkers, isApprovalValid,
   effectiveApproval, planApprovalDrift, isStaleEvent, canMutatePr, mutationKey,
+  collectActivationRecords, planPhaseActivation,
   countReviewRounds, gateOpenFindings, scanDiffForSecrets, evaluateDiffLimits,
   validateApprovalPayload,
   LOCAL_APPROVAL_REQUIRED_FIELDS, parseActivationComment, scanDuplicateObjectKeys,
@@ -371,6 +372,62 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
     resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: { ...base4, expectedOutcome: 'ok' }, evidencePresent: true }).findingClosed === true);
   tru('C.21 expectedOutcome rỗng → malformed',
     resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: { ...base4, expectedOutcome: '' } }).malformedFinding === true);
+}
+
+// --- C.22 [GPT-REV-046] activation CÓ AUTHORITY: metadata + GitHub state + GPT approval ---
+{
+  const PV = '2026-08-23.7';
+  const MERGE_SHA = 'c'.repeat(40);
+  const MERGED_HEAD = 'd'.repeat(40);
+  const WPR = 'duongpdddic-droid/AI_PR_REVIEWER#4';
+  const marker = (o = {}) => `<!-- ai-review-phase-activation:${JSON.stringify({
+    phase: 'steady-state', wiringPr: WPR, wiringMergedSha: MERGE_SHA,
+    gptApprovedHeadSha: MERGED_HEAD, recordedBy: 'duongpdddic-droid',
+    recordedAt: '2026-08-23T01:00:00Z', ...o,
+  })} -->`;
+  const comment = (body, login = 'duongpdddic-droid') => ({ id: '1', user: { login }, created_at: '2026-08-23T01:00:00Z', body });
+  const gptApproval = buildApprovalMarker({
+    repository: 'duongpdddic-droid/AI_PR_REVIEWER', prNumber: 4, reviewer: RA.gpt,
+    headSha: MERGED_HEAD, policyVersion: PV, decisionId: 'gpt-wiring-001',
+    ciEvidence: null, openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z',
+  });
+  const wiringState = { state: 'closed', merged: true, mergeCommitSha: MERGE_SHA, headSha: MERGED_HEAD };
+  const recs = (body, login) => collectActivationRecords([comment(body, login)]);
+  const plan = (over = {}) => planPhaseActivation({
+    records: recs(marker()), allowedRecorders: ['duongpdddic-droid'],
+    expectedWiringPr: { repo: 'duongpdddic-droid/AI_PR_REVIEWER', number: 4 },
+    wiringState, wiringApprovalRecords: [gptApproval], policyVersion: PV, ...over,
+  });
+  tru('C.22 collect bóc tách metadata author/id', (() => {
+    const r = collectActivationRecords([comment(marker(), 'duongpdddic-droid')]);
+    return r.length === 1 && r[0].authorLogin === 'duongpdddic-droid' && r[0].commentId === '1';
+  })());
+  tru('C.22 collect bỏ qua comment không có marker', collectActivationRecords([comment('plain text')]).length === 0);
+  tru('C.22 collect bỏ qua entry null/rỗng/string', collectActivationRecords([null, 'x', {}]).length === 0);
+  tru('C.22 đủ authority (author+merge+SHA+GPT approval) → active', plan().active === true);
+  tru('C.22 không có marker → inactive', plan({ records: [] }).active === false);
+  tru('C.22 hai marker mâu thuẫn → inactive', plan({ records: [...recs(marker()), ...recs(marker({ wiringMergedSha: 'e'.repeat(40) }))] }).active === false);
+  tru('C.22 marker trùng nội dung (duplicate) vẫn active', plan({ records: [...recs(marker()), ...recs(marker())] }).active === true);
+  tru('C.22 author không thuộc allowedRecorders → inactive', plan({ records: recs(marker(), 'some-bot') }).active === false);
+  tru('C.22 author rỗng → inactive', plan({ records: recs(marker(), '') }).active === false);
+  tru('C.22 wiringPr sai PR → inactive', plan({ records: recs(marker({ wiringPr: 'duongpdddic-droid/AI_PR_REVIEWER#5' })) }).active === false);
+  tru('C.22 wiringPr sai repo → inactive', plan({ records: recs(marker({ wiringPr: 'other/repo#4' })) }).active === false);
+  tru('C.22 policy thiếu expectedWiringPr → inactive', plan({ expectedWiringPr: null }).active === false);
+  tru('C.22 wiringState null → inactive', plan({ wiringState: null }).active === false);
+  tru('C.22 wiringState.error → inactive', plan({ wiringState: { error: 'gh FAIL' } }).active === false);
+  tru('C.22 PR chưa merge → inactive', plan({ wiringState: { ...wiringState, merged: false, state: 'open' } }).active === false);
+  tru('C.22 mergeCommitSha lệch → inactive', plan({ wiringState: { ...wiringState, mergeCommitSha: 'e'.repeat(40) } }).active === false);
+  tru('C.22 gptApprovedHeadSha lệch head thật → inactive', plan({ wiringState: { ...wiringState, headSha: 'e'.repeat(40) } }).active === false);
+  tru('C.22 không có GPT approval trên wiring PR → inactive', plan({ wiringApprovalRecords: [] }).active === false);
+  tru('C.22 approval stale (sai policyVersion) → inactive', plan({ policyVersion: '2026-08-22.9' }).active === false);
+  tru('C.22 approval reviewer:local không được tính → inactive', (() => {
+    const localMark = buildApprovalMarker({
+      repository: 'duongpdddic-droid/AI_PR_REVIEWER', prNumber: 4, reviewer: REVIEWER_LOCAL,
+      headSha: MERGED_HEAD, policyVersion: PV, decisionId: 'steady-local-x',
+      ciEvidence: null, openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z',
+    });
+    return plan({ wiringApprovalRecords: [localMark] }).active === false;
+  })());
 }
 
 let fail = 0;

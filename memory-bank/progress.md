@@ -1,6 +1,39 @@
 # Progress (AI_PR_REVIEWER)
 
-## 23/08/2026 10:28 — Vòng [GPT-REV-039]+[GPT-REV-040] + Issue #5 canonical SSOT — COMPLETED (chờ GPT re-review)
+## 23/08/2026 21:10 — Vòng fix [GPT-REV-046] activation authority — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-046] PR AI_PR_REVIEWER#4, policy bump `2026-08-23.7`: activation steady-state chỉ kích hoạt từ dữ liệu CÓ AUTHORITY — `getIssueComments` (author/id metadata) + `getPullState` (merged/merge_commit_sha/head.sha từ GitHub REST); pure `collectActivationRecords` + `planPhaseActivation` fail-closed (author∈allowedRecorders, wiringPr=expectedWiringPr, PR merged thật, 2 SHA khớp GitHub, GPT approval hợp lệ khóa head đã merge + policyVersion hiện tại, không mâu thuẫn marker); `resolvePhaseActivation` trong `processPr` — mọi sai lệch/lỗi IO → giữ transition.
+- [x] Gates: verify **53/53**; test **169/169** (C.22 +21); integration approval-gate 50/50 + orchestrator + runtime 20 asserts (R.1–R.14); policy 40/40; mcp 51.
+- [x] Bàn giao `[CLINE-FIX-046]` comment PR #4; nhãn `agent:gpt` + `status:review-requested`; PR body HEAD cập nhật.
+- [!] Hệ lụy: canonical `.7` → pin `.6` của QLDA#42 thành VERSION_MISMATCH; #42 chờ #4 merge rồi bump pin (đúng luồng chờ canonical).
+- Trạng thái: chờ GPT re-review #4. Không merge/deploy tự động.
+
+## 23/08/2026 15:27 — Vòng fix [GPT-REV-045] steady-state runtime wiring — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-045] PR AI_PR_REVIEWER#4 commit `8a20180` (8 files +472/−21), policy bump `2026-08-23.6`: activation source máy đọc được (`steadyState.activationEvidence` issue-comment marker + `parseActivationComment` fail-closed); `processPr` route `planEscalationForPhase`, local approval chỉ khi đủ `evaluateSteadyApprovalGates` + read-after-write THẬT; `planApprovalDrift` nhận local approval hợp lệ (`steadyLocalApproval`); `resolveRebuttalOutcome` đủ 5 trường (+`expectedOutcome`); xóa duplicate keys + scanner `scanDuplicateObjectKeys` → `BLOCKED_POLICY_DUPLICATE_KEYS`.
+- [x] Gates #4: verify **53/53**; test **149/149** (pure C.17–C.21 +23; effective-policy 21; runtime 11 asserts R.1–R.5); integration orchestrator 73/73 (I.17 cập nhật); CI dispatch run **32628272515 SUCCESS** tại `8a20180`.
+- [x] Bàn giao `[CLINE-FIX-045]` comment PR #4 (issuecomment-5385126577); nhãn `agent:gpt` + `status:review-requested`; PR body HEAD SHA `8a20180`.
+- [x] **QLDA_DTXD#42 pin sync hoàn tất**: commit `2854dec` cập nhật `.github/project-review-policy.json` (ref+pinnedVersion `8a20180`/`2026-08-23.6`) + `verify.yml` checkout SHA; verify 14/14 PASS; CI run **32629851965 SUCCESS**; comment (issuecomment-5385212521) ĐÃ ĐĂNG.
+- [!] **BLOCKER (Mức 3)**: nhãn #42 bị orchestrator override về `agent:cline`+`status:changes-requested` (pin `8a20180` trên PR #4 chưa merge → orchestrator fail-closed). Cần Bố **merge PR #4 (AI_PR_REVIEWER) trước** rồi #42 mới pre-review + bàn giao GPT.
+- Trạng thái: code+CI CẢ HAI PR xong; chờ Bố merge #4 để #42 thoát blocker.
+
+## 23/08/2026 14:35 — GitHub task intake Issue #1 (echo marker) — COMPLETED (chờ pre-review + GPT)
+
+- [x] Claim #1 qua `--claim` sau preflight PASS (`CLAIMED`, main @ `42906da`); chướng ngại checkout main do memory-bank lệch branch đã xử lý bằng backup/restore/khôi phục (backup: `%TEMP%\mb-backup-20260823-142950`).
+- [x] `scripts/test-echo-marker.mjs` mới (in `AUTONOMOUS_TEST_OK`, exit 0) trên nhánh `chore/issue-1-echo-marker-test`, commit `762df51`.
+- [x] Gates: script trực tiếp exit 0; pnpm verify 46/46; pnpm test 126/126; CI `verify` PASS tại HEAD.
+- [x] PR #7 ready for review (`Closes #1`); Issue #1 → `status:review-requested`; orchestrator tự pre-review → GPT approval cuối.
+- [x] Telegram `[NEW]#558` "Không ngủ đông": reply xác nhận + watchdog cancel/heartbeat theo chỉ thị Bố.
+
+## 23/08/2026 11:52 — Vòng fix [GPT-REV-044] canonical identity enforcement — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-044] PR AI_PR_REVIEWER#4 commit `14533bb` (3 files +107/−3): `.github/ai-review-policy.json` thêm `canonicalRepo`/`canonicalPath` trong `projectPolicyContract`; `resolveEffectivePolicy` + `resolvePolicyForRepo` enforce identity — project config repo/path (nếu cung cấp) bắt buộc trùng khớp canonical identity; khác → `BLOCKED_CANONICAL_INVALID`; contract thiếu identity → `BLOCKED_CANONICAL_INVALID`; self-review cũng enforce.
+- [x] Gates #4: test-effective-policy **18/18 PASS** (+7 asserts identity enforcement); verify 53/53; test 126/126; integration 73/73 + 50/50 + 6; CI verify PASS tại HEAD 14533bb.
+- [x] Bàn giao `[CLINE-FIX-044]` issuecomment-5384294303.
+- [x] [GPT-REV-042] commit `cc426b6` + [GPT-REV-043] commit `ea841f1` đã đóng; PR #42 đợi #4 đóng #44 → cập nhật pin nếu cần.
+- Trạng thái: chờ orchestrator pre-review → GPT review cuối cả hai PR. Sau approval: Bố quyết merge.
+
+## 23/08/2026 11:39 — Vòng fix [GPT-REV-042]+[GPT-REV-043] canonical-SSOT blocker — COMPLETED (chờ GPT re-review)
 
 - [x] Xử lý [GPT-REV-040] (mirror policy trái kiến trúc) theo **Issue #5**: AI_PR_REVIEWER là SSOT duy nhất; QLDA chỉ giữ project config + pin; bỏ hợp đồng "mỗi repo giữ bản sao".
 - [x] Commit `565f33a737edd4a066c7ad86e28629147c3837ba` (11 files): policy `.5` thêm `projectPolicyContract`; resolver `scripts/effective-policy.mjs` fail-closed (5 mã BLOCKED_*); orchestrator/gpt-approval đọc effective policy qua resolver; runtime helpers phase/escalation/6-gate/rebuttal/discovery (`resolveReviewPhase`, `planEscalationForPhase`, `evaluateSteadyApprovalGates`, `resolveRebuttalOutcome`, `planDiscoveryBehavior`) cắm vào `processPr` (policy/phase hỏng → status:blocked).

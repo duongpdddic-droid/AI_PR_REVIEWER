@@ -470,6 +470,78 @@ export function parseActivationComment(rawText) {
 }
 
 /**
+ * Pure [GPT-REV-046]: trích activation records KÈM METADATA (author login + comment id +
+ * created_at) từ danh sách comment object GitHub API ({id, user:{login}, created_at, body}).
+ * Chỉ nhận record có cú pháp hợp lệ qua parseActivationComment; marker hỏng → bỏ qua (fail-closed).
+ */
+export function collectActivationRecords(comments) {
+  const out = [];
+  for (const c of Array.isArray(comments) ? comments : []) {
+    if (!c || typeof c !== 'object') continue;
+    const parsed = parseActivationComment(c.body);
+    if (!parsed.active) continue;
+    out.push({
+      record: parsed.record,
+      authorLogin: String((c.user && c.user.login) || ''),
+      commentId: c.id != null ? String(c.id) : '',
+      createdAt: String(c.created_at || ''),
+    });
+  }
+  return out;
+}
+
+/**
+ * Pure [GPT-REV-046]: xác minh activation steady-state CHỈ từ dữ liệu CÓ AUTHORITY —
+ * không tin các trường tự khai báo trong body marker:
+ *   1. author comment phải thuộc allowedRecorders do policy khai báo;
+ *   2. wiringPr phải đúng repo/PR policy chỉ định (expectedWiringPr);
+ *   3. wiring PR phải MERGED thật (wiringState đọc từ GitHub REST);
+ *   4. wiringMergedSha phải khớp merge_commit_sha thực tế;
+ *   5. gptApprovedHeadSha phải là head ĐÃ MERGE của wiring PR;
+ *   6. trên wiring PR phải có GPT approval marker hợp lệ (isApprovalValid: reviewer agent:gpt,
+ *      khóa đúng head đã merge + policyVersion hiện tại, không còn finding blocking).
+ * Nhiều marker CHỈ chấp nhận khi nội dung record giống hệt nhau (duplicate); khác nhau → mâu thuẫn.
+ * Fail-closed: bất kỳ điều kiện thiếu/sai/mâu thuẫn/lỗi IO (wiringState null) → { active:false }.
+ */
+export function planPhaseActivation({
+  records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion,
+} = {}) {
+  const inactive = (reason) => ({ active: false, reason });
+  if (!Array.isArray(records) || records.length === 0) return inactive('không có marker kích hoạt');
+  const canon = (e) => JSON.stringify(e.record);
+  if (new Set(records.map(canon)).size > 1) {
+    return inactive(`có ${records.length} marker activation mâu thuẫn nhau`);
+  }
+  const entry = records[0];
+  const rec = entry.record;
+  const allowed = (Array.isArray(allowedRecorders) ? allowedRecorders : []).map((a) => String(a));
+  if (!entry.authorLogin || !allowed.includes(entry.authorLogin)) {
+    return inactive(`author "${entry.authorLogin || '(rỗng)'}" không thuộc allowedRecorders của policy`);
+  }
+  const ev = expectedWiringPr || {};
+  if (!ev.repo || !ev.number) return inactive('policy thiếu expectedWiringPr (không thể xác minh phạm vi wiring PR)');
+  const expected = `${ev.repo}#${ev.number}`.toLowerCase();
+  if (String(rec.wiringPr || '').trim().toLowerCase() !== expected) {
+    return inactive(`wiringPr "${rec.wiringPr}" không đúng PR policy chỉ định (${ev.repo}#${ev.number})`);
+  }
+  if (!wiringState || wiringState.error) return inactive('không đọc được trạng thái wiring PR từ GitHub (fail-closed)');
+  if (wiringState.merged !== true) return inactive(`wiring PR chưa merge (state=${String(wiringState.state || '?')})`);
+  if (String(rec.wiringMergedSha).toLowerCase() !== String(wiringState.mergeCommitSha || '').toLowerCase()) {
+    return inactive('wiringMergedSha không khớp merge commit thực tế của wiring PR trên GitHub');
+  }
+  if (String(rec.gptApprovedHeadSha).toLowerCase() !== String(wiringState.headSha || '').toLowerCase()) {
+    return inactive('gptApprovedHeadSha không phải head đã merge của wiring PR');
+  }
+  const approval = effectiveApproval(wiringApprovalRecords, {
+    repository: ev.repo, prNumber: ev.number, headSha: rec.gptApprovedHeadSha, policyVersion,
+  });
+  if (!approval) {
+    return inactive('không có GPT approval hợp lệ khóa đúng head đã merge + policyVersion hiện tại trên wiring PR');
+  }
+  return { active: true, reason: 'activation hợp lệ: authority + merge + SHA + GPT approval đều khớp', approval };
+}
+
+/**
  * Pure: quét raw JSON text phát hiện duplicate key TRONG CÙNG MỘT object
  * (JSON.parse âm thầm giữ key cuối → schema mơ hồ theo GPT-REV-045).
  * Trả { duplicates: [{ key, path }] }; mảng rỗng = sạch.

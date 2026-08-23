@@ -26,10 +26,11 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, REVIEWER_LOCAL,
-  canMutatePr, countReviewRounds, evaluateChecks, evaluateDiffLimits,
+  canMutatePr, collectActivationRecords, countReviewRounds, evaluateChecks, evaluateDiffLimits,
   evaluateSteadyApprovalGates, gateOpenFindings, isStaleEvent, mutationKey,
-  normalizeStatusLabels, parseActivationComment, planEscalationForPhase,
-  planApprovalDrift, planCiRouting, planPreReviewOutcome, resolveReviewPhase, scanDiffForSecrets,
+  normalizeStatusLabels, planEscalationForPhase,
+  planApprovalDrift, planCiRouting, planPhaseActivation, planPreReviewOutcome,
+  resolveReviewPhase, scanDiffForSecrets,
 } from './review-contract.mjs';
 import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
 
@@ -86,19 +87,27 @@ function defaultIo() {
         return { policy: null, error: `${code}: ${String((e && e.message) || e).slice(0, 200)}` };
       }
     },
-    // [GPT-REV-045] Nguồn kích hoạt steady-state máy đọc được: comment marker trên Issue
-    // được policy.reviewerPhases.steadyState.activationEvidence khai báo. Fail-closed:
-    // lỗi io / thiếu khai báo / sai shape → trả null (chưa kích hoạt → transition).
-    getPhaseActivationText(policy) {
-      try {
-        const ev = policy && policy.reviewerPhases && policy.reviewerPhases.steadyState
-          && policy.reviewerPhases.steadyState.activationEvidence;
-        if (!ev || ev.type !== 'issue-comment-marker' || !ev.repo || !ev.issue) return null;
-        return String(this.gh(['api', `repos/${ev.repo}/issues/${ev.issue}/comments`, '--paginate',
-          '--jq', '[.[].body] | join("\\u0000")']) || '');
-      } catch {
-        return null;
-      }
+    // [GPT-REV-045][GPT-REV-046] Đọc comments Issue KÈM METADATA (id/author/created_at) để
+    // xác thực authority của activation marker — không còn nối body thuần. Body encode base64
+    // qua jq để an toàn newline/tab khi gh trả text.
+    getIssueComments(repo, number) {
+      const out = this.gh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate',
+        '--jq', `[.[] | ((.id // "")|tostring) + " " + ((.user.login) // "") + " " + ((.created_at) // "-") + " " + ((.body // "") | @base64)] | join("\\n")`]);
+      return String(out || '').split('\n').filter(Boolean).map((line) => {
+        const parts = line.split(' ');
+        return {
+          id: parts[0] || '',
+          user: { login: parts[1] || '' },
+          created_at: parts[2] || '',
+          body: Buffer.from(parts.slice(3).join(' '), 'base64').toString('utf8'),
+        };
+      });
+    },
+    // [GPT-REV-046] Trạng thái THẬT của một PR từ GitHub REST: merged + merge_commit_sha +
+    // head sha. Ném Error khi gh fail — caller xử lý fail-closed (giữ transition), KHÔNG nuốt.
+    getPullState(repo, number) {
+      return JSON.parse(this.gh(['api', `repos/${repo}/pulls/${number}`,
+        '--jq', '{state:(.state//""),merged:(.merged//false),mergeCommitSha:(.merge_commit_sha//""),headSha:((.head.sha)//"")}']));
     },
     getChecks(repo, number) {
       try {
@@ -223,6 +232,39 @@ function formatFindingsComment(findings, round) {
   return `${lines.join('\n\n---\n\n')}\n\nVòng fix hiện tại: ${round}. Sửa xong push thẳng lên nhánh PR (KHÔNG tạo issue [review-fix]) — orchestrator sẽ tự pre-review lại.`;
 }
 
+// ---------------------------------------------------------------- activation có authority (GPT-REV-046)
+
+// Tổng hợp bằng chứng activation steady-state từ nguồn CÓ AUTHORITY theo policy khai báo
+// (reviewerPhases.steadyState.activationEvidence):
+//   - comments Issue (kèm author/id) → collectActivationRecords;
+//   - trạng thái thật của wiring PR (merged + merge commit SHA + head SHA) qua GitHub REST;
+//   - approval markers trên wiring PR (bodies) để verify GPT approval khóa head đã merge.
+// Bất kỳ lỗi IO nào (gh fail, thiếu method) → NÉM cho caller xử lý fail-closed (giữ transition).
+export function resolvePhaseActivation(io, policy) {
+  const ev = policy && policy.reviewerPhases && policy.reviewerPhases.phases
+    && policy.reviewerPhases.phases.steadyState
+    && policy.reviewerPhases.phases.steadyState.activationEvidence;
+  if (!ev || ev.type !== 'issue-comment-marker' || !ev.repo || !ev.issue) {
+    return { active: false, reason: 'policy thiếu khai báo activationEvidence' };
+  }
+  const records = collectActivationRecords(io.getIssueComments(ev.repo, ev.issue));
+  let wiringState = null;
+  let wiringApprovalRecords = [];
+  const wp = ev.expectedWiringPr;
+  if (wp && wp.repo && wp.number) {
+    wiringState = io.getPullState(wp.repo, wp.number);
+    wiringApprovalRecords = io.getIssueComments(wp.repo, wp.number).map((c) => String(c.body || ''));
+  }
+  return planPhaseActivation({
+    records,
+    allowedRecorders: ev.allowedRecorders,
+    expectedWiringPr: wp,
+    wiringState,
+    wiringApprovalRecords,
+    policyVersion: policy.policyVersion,
+  });
+}
+
 // ---------------------------------------------------------------- vòng xử lý 1 PR
 
 export async function processPr(io, repo, number, { dryRun } = {}) {
@@ -345,13 +387,17 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     maxRounds: policy ? policy.maxReviewRounds : 3,
     decisionGate: pre.decisionGate,
   });
-  // [GPT-REV-045] Activation state máy đọc được từ nguồn policy khai báo (issue-comment marker);
-  // fail-closed: thiếu/không đọc được/sai shape → chưa kích hoạt → transition (GPT duyệt mọi PR).
+  // [GPT-REV-045][GPT-REV-046] Activation state máy đọc được VÀ có authority: marker phải do
+  // actor được policy cho phép đăng, wiring PR đúng phạm vi policy chỉ định, merged THẬT với
+  // merge SHA khớp GitHub, GPT approval hợp lệ khóa đúng head đã merge + policyVersion hiện tại.
+  // Fail-closed: mọi sai lệch/lỗi IO/mâu thuẫn → giữ transition (GPT duyệt mọi PR), không approve.
   let runtimeWiringMerged = false;
   try {
-    const evText = io.getPhaseActivationText ? io.getPhaseActivationText(policy) : null;
-    runtimeWiringMerged = parseActivationComment(evText).active === true;
-  } catch {
+    const act = resolvePhaseActivation(io, policy);
+    runtimeWiringMerged = act.active === true;
+    if (!act.active && act.reason) io.log('warn', `[activation] giữ transition: ${act.reason}`);
+  } catch (e) {
+    io.log('warn', `[activation] lỗi bằng chứng → transition fail-closed: ${String((e && e.message) || e).slice(0, 200)}`);
     runtimeWiringMerged = false;
   }
   const phaseInfo = resolveReviewPhase(policy || {}, { runtimeWiringMerged });
