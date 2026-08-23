@@ -1,5 +1,13 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 22:46 — Align approval pipeline to rich comment objects (GPT-REV-048) — COMPLETED (verify xanh)
+
+- [x] Toàn bộ pipeline approval nhận RICH comment object `{id, user:{login}, created_at, body}`; fail-closed: marker body thuần không provenance bị từ chối.
+- [x] Sửa `gpt-approval.mjs` duplicate-detection (spread `r.marker`); `unified-orchestrator.mjs` `hasMarkerFor` + `countReviewRounds` trích `.body`; `planPhaseActivation` xác thực GPT approval qua rich `wiringApprovalRecords`.
+- [x] Tests cập nhật sang rich comments (C.4/C.5/C.19/C.20/C.22, approval-gate A.1–A.9, orchestrator I.7).
+- [x] Gates: full-verify **53/53**; pure-logic **169/169**; approval-gate **50/50**; orchestrator **73/73**; runtime **20 asserts**; review-phases **40/40**; effective-policy **21 asserts** — TẤT CẢ PASS.
+- [!] CHƯA commit/push (người dùng chưa yêu cầu). Tiếp tục chờ GPT re-review PR #4 ([CLINE-FIX-046] đã bàn giao).
+
 ## 23/08/2026 21:10 — Vòng fix [GPT-REV-046] activation authority — COMPLETED (chờ GPT re-review)
 
 - [x] [GPT-REV-046] PR AI_PR_REVIEWER#4, policy bump `2026-08-23.7`: activation steady-state chỉ kích hoạt từ dữ liệu CÓ AUTHORITY — `getIssueComments` (author/id metadata) + `getPullState` (merged/merge_commit_sha/head.sha từ GitHub REST); pure `collectActivationRecords` + `planPhaseActivation` fail-closed (author∈allowedRecorders, wiringPr=expectedWiringPr, PR merged thật, 2 SHA khớp GitHub, GPT approval hợp lệ khóa head đã merge + policyVersion hiện tại, không mâu thuẫn marker); `resolvePhaseActivation` trong `processPr` — mọi sai lệch/lỗi IO → giữ transition.

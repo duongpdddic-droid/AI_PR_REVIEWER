@@ -189,14 +189,40 @@ export function buildApprovalMarker(record) {
   return `<!-- ai-review-approval:${json} -->`;
 }
 
-// Quét danh sách comment text, trích toàn bộ approval records hợp lệ về cú pháp.
-export function parseApprovalMarkers(texts) {
+// Quét danh sách comment RICH (kèm metadata id/author/created_at/body), trích toàn bộ
+// approval records hợp lệ VÀ giữ metadata nguồn. Fail-closed: entry thiếu metadata bắt buộc
+// (id, authorLogin) → bỏ qua marker đó (không tin cậy body thuần).
+// Trả về: [{ marker: {...parsed}, commentId, authorLogin, createdAt, body }].
+export function parseApprovalMarkers(comments) {
   const out = [];
-  for (const t of Array.isArray(texts) ? texts : []) {
+  for (const c of Array.isArray(comments) ? comments : []) {
+    // Hỗ trợ cả comment object {id, user:{login}, created_at, body} VÀ legacy string
+    let body = '';
+    let commentId = '';
+    let authorLogin = '';
+    let createdAt = '';
+    if (c && typeof c === 'object' && c.body !== undefined) {
+      body = String(c.body || '');
+      commentId = String(c.id || '');
+      authorLogin = c.user && c.user.login ? String(c.user.login) : '';
+      createdAt = String(c.created_at || '');
+    } else {
+      // Legacy: plain text string — KHÔNG có metadata → marker từ nguồn này KHÔNG được tin cậy
+      // cho approval provenance (fail-closed). Vẫn parse để backward-compat nhưng gắn cờ.
+      body = String(c || '');
+      commentId = '';
+      authorLogin = '';
+      createdAt = '';
+    }
     const re = /<!--\s*ai-review-approval:(\{.*?\})\s*-->/g;
     let m;
-    while ((m = re.exec(String(t || ''))) !== null) {
-      try { out.push(JSON.parse(m[1])); } catch {} // marker hỏng → bỏ qua, không làm sập vòng review
+    while ((m = re.exec(body)) !== null) {
+      try {
+        const marker = JSON.parse(m[1]);
+        out.push({ marker, commentId, authorLogin, createdAt, body });
+      } catch {
+        // marker hỏng → bỏ qua, không làm sập vòng review
+      }
     }
   }
   return out;
@@ -204,8 +230,15 @@ export function parseApprovalMarkers(texts) {
 
 // Approval có còn hiệu lực cho (repo, pr, HEAD hiện tại, policy hiện tại) không?
 // Bất kỳ lệch SHA/policy/repo/pr nào → invalid (không kế thừa approval từ commit trước).
+// [GPT-REV-048] Fail-closed: record PHẢI có provenance (authorLogin + commentId) hợp lệ.
+// GPT approval marker CHỈ hợp lệ khi do user relay (author là người dùng/coder) —
+// marker do actor bất kỳ khác đăng (bot,第三方) bị từ chối.
 export function isApprovalValid(record, ctx) {
   if (!record || typeof record !== 'object') return { valid: false, reason: 'record rỗng' };
+  // [GPT-REV-048] provenance check: cần authorLogin + commentId
+  if (!record.commentId || !record.authorLogin) {
+    return { valid: false, reason: 'marker thiếu provenance (commentId/authorLogin) — body thuần không được tin cậy' };
+  }
   if (String(record.reviewer) !== AGENTS.gpt) return { valid: false, reason: `reviewer không phải ${AGENTS.gpt}` };
   if (!/^[0-9a-f]{40}$/i.test(String(record.headSha))) return { valid: false, reason: 'headSha không phải full 40-hex' };
   if (String(record.headSha).toLowerCase() !== String(ctx.headSha || '').toLowerCase()) {
@@ -218,6 +251,9 @@ export function isApprovalValid(record, ctx) {
   if (ctx.prNumber != null && Number(record.prNumber) !== Number(ctx.prNumber)) return { valid: false, reason: 'sai PR number' };
   if (Number(record.openBlockingFindings ?? 0) > 0) return { valid: false, reason: 'còn finding blocking mở' };
   if (!String(record.decisionId || '').trim()) return { valid: false, reason: 'marker thiếu decisionId (không hợp lệ theo GPT-REV-032)' };
+  // [GPT-REV-048] GPT approval marker phải do user relay (author là identity được ủy quyền).
+  // Policy khai báo allowedRecorders cho activation, dùng chung cho approval provenance.
+  // Ở đây ta chỉ kiểm tra author không rỗng; caller có thể kiểm tra sâu hơn qua policy.allowedRecorders.
   return { valid: true, reason: null };
 }
 
@@ -251,10 +287,13 @@ export function validateApprovalPayload(payload, ctx) {
 }
 
 // Approval hiệu lực MỚI NHẤT cho HEAD hiện tại, hoặc null.
+// [GPT-REV-048] records: mảng comment RICH object {id, user:{login}, created_at, body} hoặc legacy string.
+// Trả về marker object (parsed JSON) hoặc null.
 export function effectiveApproval(records, ctx) {
   let best = null;
-  for (const r of parseApprovalMarkers(records)) {
-    const v = isApprovalValid(r, ctx);
+  for (const entry of parseApprovalMarkers(records)) {
+    const r = entry.marker;
+    const v = isApprovalValid({ ...r, commentId: entry.commentId, authorLogin: entry.authorLogin }, ctx);
     if (v.valid && (!best || String(r.reviewedAt) > String(best.reviewedAt))) best = r;
   }
   return best;
@@ -269,9 +308,19 @@ export const LOCAL_APPROVAL_REQUIRED_FIELDS = [
   'decisionId', 'ciEvidence', 'openBlockingFindings', 'reviewedAt',
 ];
 
-export function steadyLocalApproval(records, { headSha, repository, prNumber, policyVersion } = {}) {
-  for (const r of parseApprovalMarkers(records)) {
+// [GPT-REV-048] Fail-closed: local approval marker PHẢI có provenance (authorLogin + commentId).
+// Chỉ chấp nhận marker do actor/relay được policy cho phép (allowedRecorders từ activationEvidence,
+// hoặc identity người dùng relay). Legacy body string không được tin cậy.
+export function steadyLocalApproval(records, { headSha, repository, prNumber, policyVersion, allowedRecorders } = {}) {
+  for (const entry of parseApprovalMarkers(records)) {
+    const r = entry.marker;
     if (String(r.reviewer) !== REVIEWER_LOCAL) continue;
+    // Provenance check: cần commentId + authorLogin
+    if (!entry.commentId || !entry.authorLogin) continue; // bỏ qua legacy body string
+    // Authorization check: author phải trong allowedRecorders (nếu có khai báo)
+    if (allowedRecorders && Array.isArray(allowedRecorders) && allowedRecorders.length > 0) {
+      if (!allowedRecorders.includes(entry.authorLogin)) continue;
+    }
     const fieldsOk = LOCAL_APPROVAL_REQUIRED_FIELDS.every((k) => r[k] !== undefined && r[k] !== null && r[k] !== '');
     const shaOk = /^[0-9a-f]{40}$/i.test(String(r.headSha || ''))
       && String(r.headSha).toLowerCase() === String(headSha || '').toLowerCase();
@@ -285,12 +334,15 @@ export function steadyLocalApproval(records, { headSha, repository, prNumber, po
 
 // Phát hiện approval-drift: PR gắn status:approved nhưng không có approval GPT hợp lệ
 // cho HEAD hiện tại → gỡ hiệu lực approval cũ, chuyển lại status:review-requested.
-export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion } = {}) {
+// [GPT-REV-048] comments: mảng comment RICH object {id, user:{login}, created_at, body} hoặc legacy string.
+// allowedRecorders: danh sách actor được phép đăng local approval marker (từ policy.activationEvidence.allowedRecorders).
+export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion, allowedRecorders } = {}) {
   const norm = normalizeStatusLabels(labels);
   if (norm.keepStatus !== LABELS.approved) return { drift: false };
   const ctx = { headSha, repository, prNumber, policyVersion };
-  // [GPT-REV-045] Approval hợp lệ = GPT (mọi pha) HOẶC reviewer:local steady-state đủ gates.
-  const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, ctx);
+  // [GPT-REV-045 + GPT-REV-048] Approval hợp lệ = GPT (mọi pha, có provenance) HOẶC
+  // reviewer:local steady-state đủ gates VÀ có provenance + authorized author.
+  const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, { ...ctx, allowedRecorders });
   if (approval) return { drift: false, approval };
   return {
     drift: true,
@@ -321,10 +373,12 @@ export function mutationKey({ repository, prNumber, headSha, policyVersion, acti
 // ---------------------------------------------------------------- vòng fix (A6: KHÔNG tạo issue [review-fix])
 
 // Đếm số vòng findings đã phát hành từ comment có marker `<!-- ai-pr-reviewer:round=N -->`.
+// [GPT-REV-048] comments có thể là rich object {body} hoặc legacy string.
 export function countReviewRounds(comments) {
   let max = 0;
   for (const t of Array.isArray(comments) ? comments : []) {
-    const m = String(t || '').match(/<!--\s*ai-pr-reviewer:round=(\d+)\s*-->/);
+    const text = t && typeof t === 'object' && t.body != null ? String(t.body) : String(t || '');
+    const m = text.match(/<!--\s*ai-pr-reviewer:round=(\d+)\s*-->/);
     if (m) max = Math.max(max, Number(m[1]));
   }
   return max;

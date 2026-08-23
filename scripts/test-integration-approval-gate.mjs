@@ -43,9 +43,14 @@ function makeGateIo(opts = {}) {
       if (opts.checksFail) throw new Error('gh checks FAIL');
       return { checks: [{ name: 'verify', state: opts.ciState ?? 'SUCCESS' }] };
     },
+    // [GPT-REV-048] Trả về rich comment objects {id, user:{login}, created_at, body} để đồng bộ
+    // với io thật (unified-orchestrator.listPrComments). pr.comments lưu body thuần.
     listPrComments() {
-      let out = [...pr.comments];
-      if (opts.readbackHidesMarker) out = out.filter((c) => !c.includes('ai-review-approval:'));
+      let out = [...pr.comments].map((c, i) => ({
+        id: `c${i}`, user: { login: 'user' }, created_at: '-',
+        body: typeof c === 'string' ? c : String(c && c.body != null ? c.body : c),
+      }));
+      if (opts.readbackHidesMarker) out = out.filter((c) => !c.body.includes('ai-review-approval:'));
       return out;
     },
     postComment(_r, _n, body) {

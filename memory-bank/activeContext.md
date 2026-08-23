@@ -1,3 +1,15 @@
+## 23/08/2026 22:46 (ACT) — Align approval pipeline to rich comment objects (GPT-REV-048) ✅ ALL GREEN
+
+- **Mục tiêu**: toàn bộ pipeline approval (parse/validate/effective/drift/local/steady-state) nhận comment RICH object `{id, user:{login}, created_at, body}` thay vì legacy string; fail-closed: marker từ body thuần (không provenance) KHÔNG được tin cậy cho approval.
+- **Thay đổi**:
+  - `review-contract.mjs`: `parseApprovalMarkers` đã trích xuất `commentId`/`authorLogin`/`createdAt` từ rich object (legacy string → provenance rỗng); `effectiveApproval`/`steadyLocalApproval`/`planApprovalDrift`/`isApprovalValid`/`countReviewRounds` xử lý đúng body rich object; `isApprovalValid` bắt buộc `commentId` + `authorLogin` (provenance).
+  - `gpt-approval.mjs`: `performApproval` sửa duplicate-detection spread `r.marker` (không pass raw `{marker,...}`); passMarker check đọc `.body`.
+  - `unified-orchestrator.mjs`: `hasMarkerFor` + `countReviewRounds` trích xuất `.body`.
+  - `planPhaseActivation`: nhận `wiringApprovalRecords` rich object → `effectiveApproval` xác thực GPT approval hợp lệ khóa head đã merge + policyVersion.
+- **Tests cập nhật sang rich comments**: C.4, C.5, C.19, C.20, C.22 (wiringApprovalRecords), approval-gate A.1–A.9 (`listPrComments` trả rich objects), orchestrator I.7 (approval hợp lệ phải có provenance).
+- **Gates**: full-verify **53/53**; test-pure-logic **169/169**; approval-gate **50/50**; orchestrator **73/73**; runtime **20 asserts**; review-phases **40/40**; effective-policy **21 asserts** — TẤT CẢ PASS.
+- Trạng thái: code hoàn tất + verify xanh. CHƯA commit/push (người dùng chưa yêu cầu). Tiếp tục chờ GPT re-review PR #4 (đã bàn giao [CLINE-FIX-046]).
+
 ## 23/08/2026 21:10 (ACT) — Fix [GPT-REV-046] activation authority ✅ BÀN GIAO LẠI GPT
 - **Finding**: [GPT-REV-046] Critical — activation marker chưa xác thực authority: `getPhaseActivationText` chỉ nối body comment (mất author/id), `parseActivationComment` không kiểm tra author được ủy quyền, wiringPr đúng phạm vi policy, PR merged thật, merge SHA khớp GitHub, GPT approval hợp lệ khóa head đã merge; `recordedBy` tự khai báo; test không đối chiếu dữ liệu GitHub thật.
 - **PR AI_PR_REVIEWER#4 — policy bump `2026-08-23.7`**, trên `chore/policy-sync-reviewer-phases`:

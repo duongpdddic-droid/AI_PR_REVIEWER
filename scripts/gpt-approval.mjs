@@ -132,13 +132,16 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
 
   const bodies = io.listPrComments(repo, pr);
   const passMarker = `<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headSha} -->`;
-  if (!bodies.some((b) => String(b).includes(passMarker))) {
+  // [GPT-REV-048] bodies có thể là rich comment object {body} hoặc legacy string.
+  if (!bodies.some((b) => String(b && b.body != null ? b.body : b).includes(passMarker))) {
     throw new Error(`TỪ CHỐI: chưa có ${REVIEWER_LOCAL} PRE_REVIEW_PASS cho HEAD ${headSha.slice(0, 12)} — chạy orchestrator pre-review trước.`);
   }
 
   // Idempotent: approval trùng HEAD/repo/pr đã hợp lệ → không ghi lần 2.
+  // [GPT-REV-048] r là kết quả parseApprovalMarkers {marker, commentId, authorLogin}; cần spread marker.
   const existing = parseApprovalMarkers(bodies).filter((r) =>
-    isApprovalValid(r, { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion }).valid);
+    isApprovalValid({ ...r.marker, commentId: r.commentId, authorLogin: r.authorLogin },
+      { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion }).valid);
   if (existing.length) {
     return { mutated: false, skipped: 'duplicate', headSha, message: `BỎ QUA: approval ${AGENTS.gpt} cho HEAD ${headSha.slice(0, 12)} đã tồn tại (${existing.length} marker) — không ghi trùng.` };
   }

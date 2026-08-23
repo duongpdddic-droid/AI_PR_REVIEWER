@@ -179,7 +179,8 @@ function makeIo(opts = {}) {
   tru('I.7 về review-requested + gpt', pr.labels.includes(LABELS.reviewRequested) && pr.labels.includes(AGENTS.gpt));
   // Approval hợp lệ cho HEAD → không drift, PR bị skip (chờ người dùng merge).
   const marker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: AGENTS.gpt, headSha: SHA, policyVersion: POLICY.policyVersion, decisionId: 'dec-i7', openBlockingFindings: 0, reviewedAt: '2026-08-22T01:00:00Z' });
-  const t2 = makeIo({ labels: [LABELS.approved], comments: [`approval ${marker}`] });
+  // [GPT-REV-048] approval hợp lệ phải có provenance (commentId + authorLogin = rich comment object).
+  const t2 = makeIo({ labels: [LABELS.approved], comments: [{ id: 'm1', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-22T01:00:00Z', body: `approval ${marker}` }] });
   const cycle2 = await processOneCycle(t2.io, { dryRun: false, repos: ['o/r'] });
   eq('I.7 approval hợp lệ → được quét', cycle2.results.length, 1);
   tru('I.7 skip chờ merge', String(cycle2.results[0].skipped || '').includes('approved'));

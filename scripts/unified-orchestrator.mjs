@@ -65,10 +65,20 @@ function defaultIo() {
         'state,headRefOid,labels,number,url,title,isDraft']));
       return { ...v, labels: (v.labels || []).map((l) => l.name), comments: [] };
     },
-    listPrComments(repo, number) {
+        listPrComments(repo, number) {
+      // Trả về comment RICH objects {id, user:{login}, created_at, body} để giữ metadata
+      // cho approval provenance (GPT-REV-048).
       const out = this.gh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate',
-        '--jq', '[.[].body] | join("\\u0000")']);
-      return String(out || '').split('\u0000');
+        '--jq', `[.[] | ((.id // "") | tostring) + " " + ((.user.login) // "") + " " + ((.created_at) // "-") + " " + ((.body // "") | @base64)] | join("\\n")`]);
+      return String(out || '').split('\n').filter(Boolean).map((line) => {
+        const parts = line.split(' ');
+        return {
+          id: parts[0] || '',
+          user: { login: parts[1] || '' },
+          created_at: parts[2] || '',
+          body: Buffer.from(parts.slice(3).join(' '), 'base64').toString('utf8'),
+        };
+      });
     },
     getPolicy(repo, ref) {
       // [GPT-REV-042] Không còn legacy mirror: project repo bắt buộc project config +
@@ -166,9 +176,13 @@ export function applyHandoff(io, repo, prNumber, plan) {
 }
 
 // Idempotency: action đã phát hành cho đúng khóa (repo::pr::sha::policy::action) thì bỏ qua.
+// [GPT-REV-048] comments có thể là rich object {body} hoặc legacy string.
 export function hasMarkerFor(comments, key) {
   const needle = `<!-- ai-pr-reviewer:key=${key} -->`;
-  for (const t of comments || []) if (String(t).includes(needle)) return true;
+  for (const t of comments || []) {
+    const body = t && typeof t === 'object' && t.body != null ? String(t.body) : String(t);
+    if (body.includes(needle)) return true;
+  }
   return false;
 }
 
@@ -253,7 +267,8 @@ export function resolvePhaseActivation(io, policy) {
   const wp = ev.expectedWiringPr;
   if (wp && wp.repo && wp.number) {
     wiringState = io.getPullState(wp.repo, wp.number);
-    wiringApprovalRecords = io.getIssueComments(wp.repo, wp.number).map((c) => String(c.body || ''));
+    // [GPT-REV-048] Giữ comment RICH objects (metadata id/author) thay vì chỉ body string.
+    wiringApprovalRecords = io.getIssueComments(wp.repo, wp.number);
   }
   return planPhaseActivation({
     records,
@@ -284,6 +299,11 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     labels: view.labels, comments, headSha,
     repository: repo, prNumber: number,
     policyVersion: policyNow.policy ? policyNow.policy.policyVersion : undefined,
+    allowedRecorders: policyNow.policy && policyNow.policy.reviewerPhases
+      && policyNow.policy.reviewerPhases.phases.steadyState
+      && policyNow.policy.reviewerPhases.phases.steadyState.activationEvidence
+      ? policyNow.policy.reviewerPhases.phases.steadyState.activationEvidence.allowedRecorders
+      : undefined,
   });
   if (drift.drift) {
     const key = mutationKey({ repository: repo, prNumber: number, headSha, policyVersion: 'drift-check', action: 'invalidate-approval' });
