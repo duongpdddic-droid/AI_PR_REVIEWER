@@ -7,7 +7,7 @@
   - `unified-orchestrator.mjs`: `resolvePhaseActivation(io, policy)` tổng hợp bằng chứng; `processPr` gọi trong try/catch — mọi sai lệch/lỗi IO → giữ transition + log reason, tuyệt đối không local approve.
   - Tests: pure C.22 (+21 asserts: authority matrix); runtime R.1–R.14 (mock io authority-based: fake marker, sai author, sai wiringPr, chưa merge, sai merge SHA, sai head, thiếu/stale approval, marker mâu thuẫn, API lỗi — đều KHÔNG kích hoạt; chỉ GitHub state + GPT approval hợp lệ → steady-state).
 - **Gates**: verify **53/53**; test **169/169** (pure C.22 +21); integration approval-gate 50/50 + orchestrator + runtime 20 asserts R.1–R.14; policy 40/40; mcp 51.
-- **Bàn giao**: `[CLINE-FIX-046]` comment PR #4; nhãn `agent:gpt` + `status:review-requested`; PR body HEAD cập nhật.
+- **Bàn giao**: `[CLINE-FIX-046]` comment PR #4 (issuecomment-5386457959); nhãn `agent:gpt` + `status:review-requested` (read-back PASS); PR body HEAD `41c130e7f0757b8e103d624682accf30bf4e852a`; CI run `32644741965` SUCCESS.
 - **Hệ lụy #42**: canonical `.7` làm pin `.6` của QLDA_DTXD#42 thành `BLOCKED_VERSION_MISMATCH` — #42 phải bump pin lên `.7` + SHA mới sau khi #4 merge (đã đúng luồng: #42 chờ canonical trên main).
 - Trạng thái: chờ GPT re-review #4. Không merge/deploy tự động.
 
