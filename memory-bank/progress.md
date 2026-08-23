@@ -1,5 +1,15 @@
 # Progress (AI_PR_REVIEWER)
 
+## 23/08/2026 10:28 — Vòng [GPT-REV-039]+[GPT-REV-040] + Issue #5 canonical SSOT — COMPLETED (chờ GPT re-review)
+
+- [x] Xử lý [GPT-REV-040] (mirror policy trái kiến trúc) theo **Issue #5**: AI_PR_REVIEWER là SSOT duy nhất; QLDA chỉ giữ project config + pin; bỏ hợp đồng "mỗi repo giữ bản sao".
+- [x] Commit `565f33a737edd4a066c7ad86e28629147c3837ba` (11 files): policy `.5` thêm `projectPolicyContract`; resolver `scripts/effective-policy.mjs` fail-closed (5 mã BLOCKED_*); orchestrator/gpt-approval đọc effective policy qua resolver; runtime helpers phase/escalation/6-gate/rebuttal/discovery (`resolveReviewPhase`, `planEscalationForPhase`, `evaluateSteadyApprovalGates`, `resolveRebuttalOutcome`, `planDiscoveryBehavior`) cắm vào `processPr` (policy/phase hỏng → status:blocked).
+- [x] Tests mới: test-effective-policy.mjs (7), test-integration-review-runtime.mjs (6, gồm processPr fail-closed với mock io), P7 test-review-phases → 40/40.
+- [x] Gates: verify 53/53; test 126/126; integration orchestrator 73/73 + approval-gate 50/50 + runtime 6. CI: workflow_dispatch run 32614761014 SUCCESS (check-run verify=success) tại HEAD `02290badac298903f394c6368159738c705cc199` (push không tự trigger pull_request run → đã thêm workflow_dispatch, commit `02290ba`).
+- [x] QLDA_DTXD#42 đồng bộ tới `a82558c38f8d14072f688a6846fe5d8220ac95d0`: xóa mirror policy/protocol/test, project config pin full SHA `565f33a…`, stub protocol, CI checkout `_canonical`, test-project-policy 7 asserts; CI run 32614439094 PASS.
+- [x] Bàn giao: comment `[CLINE-FIX-040]`+`[CLINE-FIX-039] cập nhật` (issuecomment-5383840754) + cập nhật HEAD (issuecomment-5383966816); PR body HEAD `02290ba`/`a82558c`; labels read-back agent:gpt + review-requested cả hai PR; Issue #5 claim → review-requested (comment issuecomment-5383885252).
+- Trạng thái: chờ GPT re-review #4 + #42. Sau approval: Bố quyết merge.
+
 ## 23/08/2026 09:05 — Vòng fix [GPT-REV-039] trên PR #4 — COMPLETED (chờ GPT re-review)
 
 - [x] GPT re-review #4 tại `c1fe477` phát 039 Important: policy khai báo steady-state tự kích hoạt khi hai PR merge, runtime wiring chưa tồn tại, tests chỉ check khóa JSON.

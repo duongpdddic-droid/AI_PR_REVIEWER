@@ -1,4 +1,16 @@
-## 23/08/2026 09:05 (ACT) — [GPT-REV-039]: steady-state không tự kích hoạt ✅ BÀN GIAO LẠI GPT
+## 23/08/2026 10:40 (ACT) — [GPT-REV-039]+[GPT-REV-040] + Issue #5 canonical SSOT ✅ BÀN GIAO LẠI GPT
+- **Findings**: [GPT-REV-039] (runtime wiring) còn hiệu lực; [GPT-REV-040] mới — mirror policy hai repo trái kiến trúc; **Issue #5** thay thế phần copy policy/protocol của Issue #2: AI_PR_REVIEWER = SSOT, QLDA chỉ project config + pin.
+- **Commit `565f33a`** (11 files) trên `chore/policy-sync-reviewer-phases`:
+  - Policy `.5`: bỏ mirror note; thêm **projectPolicyContract** (allowedProjectOverrides whitelist, invariantLockedKeys, 5 mã fail-closed).
+  - **`scripts/effective-policy.mjs`**: resolver global+project fail-closed (BLOCKED_CANONICAL_UNAVAILABLE/INVALID, VERSION_MISMATCH, INVALID_OVERRIDE, INVARIANT_OVERRIDE); orchestrator + gpt-approval đọc qua resolver (mirror legacy = fallback backward-safe); `processPr` block fail-closed khi resolution lỗi.
+  - Runtime [039]: `resolveReviewPhase`/`planEscalationForPhase`/`evaluateSteadyApprovalGates`/`resolveRebuttalOutcome`/`planDiscoveryBehavior`; phase blocked → status:blocked.
+  - Tests: test-effective-policy.mjs (7), test-integration-review-runtime.mjs (6), P7 → 40/40.
+- **Commit `02290ba`**: verify.yml + workflow_dispatch (push không tự trigger pull_request run — đã chạy tay, check-run verify=success tại HEAD).
+- **Verify**: verify 53/53; test 126/126; integration orchestrator 73/73 + approval-gate 50/50 + runtime 6; CI SUCCESS dispatch run 32614761014 tại `02290ba`.
+- **Bàn giao**: `[CLINE-FIX-040]`+`[CLINE-FIX-039] cập nhật` (issuecomment-5383840754, cập nhật HEAD issuecomment-5383966816); PR body HEAD `02290ba`; labels read-back agent:gpt + review-requested. Phối hợp QLDA#42 `a82558c` CI PASS (run 32614439094). Issue #5: claim → in-progress → review-requested + comment (issuecomment-5383885252, đã patch SHA cuối).
+- **Trạng thái**: chờ GPT re-review #4 (`02290ba`) + #42 (`a82558c`). Sau approval: Bố quyết merge cả hai PR.
+
+## 23/08/2026 09:05 (ACT) — [GPT-REV-039]: steady-state không tự kích hoạt ✅ BÀN GIAO LẠI GPT (đã supersede bởi vòng 10:40)
 - **Finding**: GPT re-review AI_PR_REVIEWER#4 tại `c1fe477` — policy khai báo steady-state tự kích hoạt khi hai PR merge, trong khi runtime wiring chưa tồn tại; tests chỉ check khóa JSON.
 - **Chọn phương án (2) của GPT**: giữ PR #4 là contract trung gian; runtime wiring = acceptance criterion bắt buộc của Issue #2 (PR thứ ba riêng).
 - **Commit `f2abe47`** (3 files +29/−7): policy `.4` — `transition.runtimeWiringPrRequired: true`, `appliesWhile` viết lại theo điều kiện wiring; `steadyState.appliesAfter` = "PR wiring thứ ba được GPT duyệt đúng HEAD SHA và người dùng merge"; `activationRequires` = [runtimeWiringPrGptApproved, runtimeWiringPrMerged]. Protocol §1a + tiêu đề steadyState + bullet mới. Test P6 (+4 asserts) → 33/33.
