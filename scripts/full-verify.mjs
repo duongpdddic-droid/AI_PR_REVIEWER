@@ -111,6 +111,13 @@ try {
   } else {
     add('test-integration-approval-gate.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
   }
+  const phaseTest = path.join(ROOT, 'scripts', 'test-review-phases.mjs');
+  if (fs.existsSync(phaseTest)) {
+    const rp = spawnSync(node, [phaseTest], { encoding: 'utf8' });
+    add('test-review-phases.mjs', rp.status === 0, rp.status === 0 ? '' : (rp.stdout || rp.stderr || '').trim().split('\n').slice(-3).join(' | '));
+  } else {
+    add('test-review-phases.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
+  }
 
   // 5. behavior map: refresh + baseline compare (baseline thiếu -> skip, không fail)
   const extractMap = path.join(ROOT, 'scripts', 'extract-behavior-map.mjs');
