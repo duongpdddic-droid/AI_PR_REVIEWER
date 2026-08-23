@@ -277,6 +277,7 @@ export function resolvePhaseActivation(io, policy) {
     wiringState,
     wiringApprovalRecords,
     policyVersion: policy.policyVersion,
+    authorityApprovers: policy.authority && policy.authority.approvers,
   });
 }
 
@@ -303,6 +304,9 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
       && policyNow.policy.reviewerPhases.phases.steadyState
       && policyNow.policy.reviewerPhases.phases.steadyState.activationEvidence
       ? policyNow.policy.reviewerPhases.phases.steadyState.activationEvidence.allowedRecorders
+      : undefined,
+    approvers: policyNow.policy && policyNow.policy.authority
+      ? policyNow.policy.authority.approvers
       : undefined,
   });
   if (drift.drift) {

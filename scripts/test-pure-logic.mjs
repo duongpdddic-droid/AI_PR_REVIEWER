@@ -43,6 +43,7 @@ const policy = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
+  authority: { approvers: ['user', 'gpt-user'] },
 };
 
 // escapeHtml: escape & < > cho parse_mode=HTML, giữ tiếng Việt nguyên.
@@ -142,32 +143,39 @@ eq('C.3 validatePolicy thiếu version', validatePolicy({ requiredChecks: [], ma
   eq('C.4 parse 1 record', recs.length, 1);
   eq('C.4 parse sha', recs[0].marker.headSha, SHA);
   const rec0 = { ...recs[0].marker, commentId: recs[0].commentId, authorLogin: recs[0].authorLogin };
-  eq('C.4 valid cùng SHA', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion }).valid, true);
+  eq('C.4 valid cùng SHA', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion, approvers: ['user'] }).valid, true);
   eq('C.4 invalid khác SHA', isApprovalValid(rec0, { headSha: SHA2, repository: 'o/r', prNumber: 7 }).valid, false);
   tru('C.4 invalid nêu lý do HEAD', String(isApprovalValid(rec0, { headSha: SHA2 }).reason).includes('HEAD'));
   eq('C.4 invalid khác reviewer', isApprovalValid({ ...rec0, reviewer: 'agent:cline' }, { headSha: SHA }).valid, false);
   eq('C.4 invalid policy lệch', isApprovalValid(rec0, { headSha: SHA, policyVersion: 'khác' }).valid, false);
   eq('C.4 invalid còn blocking', isApprovalValid({ ...rec0, openBlockingFindings: 2 }, { headSha: SHA }).valid, false);
   eq('C.4 invalid thiếu decisionId', isApprovalValid({ ...rec0, decisionId: '' }, { headSha: SHA }).valid, false);
+  // [GPT-REV-049] allowlist fail-closed: actor không thuộc approvers bị từ chối.
+  eq('C.4 invalid actor không thuộc approvers', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7, approvers: ['someone-else'] }).valid, false);
+  tru('C.4 invalid nêu lý do UNAUTHORIZED_ACTOR', String(isApprovalValid(rec0, { headSha: SHA, approvers: ['someone-else'] }).reason).includes('UNAUTHORIZED_ACTOR'));
+  eq('C.4 invalid approvers rỗng/không truyền', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7 }).valid, false);
+  tru('C.4 invalid nêu lý do approvers thiếu', String(isApprovalValid(rec0, { headSha: SHA }).reason).includes('UNAUTHORIZED_ACTOR'));
   eq('C.4 marker hỏng bỏ qua', parseApprovalMarkers(['<!-- ai-review-approval:{hỏng -->']).length, 0);
   const old = buildApprovalMarker({ ...{ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-old', openBlockingFindings: 0 }, reviewedAt: '2026-08-21T00:00:00Z' });
   const oldC = { id: 'old1', user: { login: 'gpt-user' }, created_at: '2026-08-21T00:00:00Z', body: old };
   const newC = { id: 'new1', user: { login: 'gpt-user' }, created_at: '2026-08-22T00:00:00Z', body: marker };
   eq('C.4 effective chọn mới nhất',
-    effectiveApproval([oldC, newC], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion }).reviewedAt,
+    effectiveApproval([oldC, newC], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion, approvers: ['gpt-user'] }).reviewedAt,
     '2026-08-22T00:00:00Z');
 }
 
 // C.5 approval-drift.
 {
   const plain = { id: 'p1', user: { login: 'user' }, created_at: '-', body: 'comment thường' };
-  const d = planApprovalDrift({ labels: ['status:approved'], comments: [plain], headSha: SHA, repository: 'o/r', prNumber: 7 });
+  const d = planApprovalDrift({ labels: ['status:approved'], comments: [plain], headSha: SHA, repository: 'o/r', prNumber: 7, approvers: ['gpt-user'] });
   eq('C.5 drift phát hiện', d.drift, true);
   tru('C.5 drift gỡ approved', d.removeLabels.includes('status:approved'));
   tru('C.5 drift thêm review-requested + gpt', d.addLabels.includes('status:review-requested') && d.addLabels.includes('agent:gpt'));
   const marker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-c5', openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z' });
   const richMarker = { id: 'm1', user: { login: 'gpt-user' }, created_at: '2026-08-22T00:00:00Z', body: marker };
-  eq('C.5 approval hợp lệ → không drift', planApprovalDrift({ labels: ['status:approved'], comments: [richMarker], headSha: SHA, repository: 'o/r', prNumber: 7 }).drift, false);
+  eq('C.5 approval hợp lệ → không drift', planApprovalDrift({ labels: ['status:approved'], comments: [richMarker], headSha: SHA, repository: 'o/r', prNumber: 7, approvers: ['gpt-user'] }).drift, false);
+  // [GPT-REV-049] actor không thuộc approvers → approval KHÔNG hợp lệ → drift phát hiện.
+  eq('C.5 actor không thuộc approvers → drift', planApprovalDrift({ labels: ['status:approved'], comments: [richMarker], headSha: SHA, repository: 'o/r', prNumber: 7, approvers: ['someone-else'] }).drift, true);
   eq('C.5 không phải approved → bỏ qua', planApprovalDrift({ labels: ['status:reviewing'], comments: [], headSha: SHA }).drift, false);
 }
 
@@ -402,7 +410,7 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   const plan = (over = {}) => planPhaseActivation({
     records: recs(marker()), allowedRecorders: ['duongpdddic-droid'],
     expectedWiringPr: { repo: 'duongpdddic-droid/AI_PR_REVIEWER', number: 4 },
-    wiringState, wiringApprovalRecords: [{ id: 'w1', user: { login: 'gpt-user' }, created_at: '2026-08-23T00:00:00Z', body: gptApproval }], policyVersion: PV, ...over,
+    wiringState, wiringApprovalRecords: [{ id: 'w1', user: { login: 'gpt-user' }, created_at: '2026-08-23T00:00:00Z', body: gptApproval }], policyVersion: PV, authorityApprovers: ['gpt-user'], ...over,
   });
   tru('C.22 collect bóc tách metadata author/id', (() => {
     const r = collectActivationRecords([comment(marker(), 'duongpdddic-droid')]);
@@ -434,6 +442,7 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
     });
     return plan({ wiringApprovalRecords: [localMark] }).active === false;
   })());
+  tru('C.22 [GPT-REV-049] GPT approval author không thuộc approvers → inactive', plan({ authorityApprovers: ['someone-else'] }).active === false);
 }
 
 let fail = 0;

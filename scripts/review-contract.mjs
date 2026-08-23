@@ -74,6 +74,14 @@ export function validatePolicy(policy) {
   if (!Number.isInteger(policy.maxReviewRounds) || policy.maxReviewRounds < 1) {
     return { ok: false, error: 'maxReviewRounds phải là số nguyên >= 1' };
   }
+  // [GPT-REV-049] authority.approvers là allowlist danh tính được phép đăng GPT approval
+  // marker. Thiếu/rỗng → fail-closed (bất kỳ actor nào cũng có thể giả marker).
+  if (!policy.authority || typeof policy.authority !== 'object') {
+    return { ok: false, error: 'thiếu object authority' };
+  }
+  if (!Array.isArray(policy.authority.approvers) || policy.authority.approvers.length === 0) {
+    return { ok: false, error: 'authority.approvers phải là mảng không rỗng (allowlist người đăng GPT approval)' };
+  }
   return { ok: true, error: null };
 }
 
@@ -251,9 +259,16 @@ export function isApprovalValid(record, ctx) {
   if (ctx.prNumber != null && Number(record.prNumber) !== Number(ctx.prNumber)) return { valid: false, reason: 'sai PR number' };
   if (Number(record.openBlockingFindings ?? 0) > 0) return { valid: false, reason: 'còn finding blocking mở' };
   if (!String(record.decisionId || '').trim()) return { valid: false, reason: 'marker thiếu decisionId (không hợp lệ theo GPT-REV-032)' };
-  // [GPT-REV-048] GPT approval marker phải do user relay (author là identity được ủy quyền).
-  // Policy khai báo allowedRecorders cho activation, dùng chung cho approval provenance.
-  // Ở đây ta chỉ kiểm tra author không rỗng; caller có thể kiểm tra sâu hơn qua policy.allowedRecorders.
+  // [GPT-REV-049] Allowlist fail-closed: GPT approval marker CHỈ hợp lệ khi authorLogin
+  // thuộc policy.authority.approvers. Không cho phép actor bất kỳ (bot/third-party) giả
+  // marker reviewer:agent:gpt. Nếu caller không truyền approvers (policy thiếu) → fail-closed.
+  const approvers = Array.isArray(ctx.approvers) ? ctx.approvers.map((a) => String(a)) : [];
+  if (approvers.length === 0) {
+    return { valid: false, reason: 'UNAUTHORIZED_ACTOR: policy.authority.approvers rỗng/không được truyền — từ chối mọi GPT approval marker' };
+  }
+  if (!approvers.includes(String(record.authorLogin))) {
+    return { valid: false, reason: `UNAUTHORIZED_ACTOR: author "${String(record.authorLogin || '(rỗng)')}" không thuộc policy.authority.approvers` };
+  }
   return { valid: true, reason: null };
 }
 
@@ -336,10 +351,10 @@ export function steadyLocalApproval(records, { headSha, repository, prNumber, po
 // cho HEAD hiện tại → gỡ hiệu lực approval cũ, chuyển lại status:review-requested.
 // [GPT-REV-048] comments: mảng comment RICH object {id, user:{login}, created_at, body} hoặc legacy string.
 // allowedRecorders: danh sách actor được phép đăng local approval marker (từ policy.activationEvidence.allowedRecorders).
-export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion, allowedRecorders } = {}) {
+export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion, allowedRecorders, approvers } = {}) {
   const norm = normalizeStatusLabels(labels);
   if (norm.keepStatus !== LABELS.approved) return { drift: false };
-  const ctx = { headSha, repository, prNumber, policyVersion };
+  const ctx = { headSha, repository, prNumber, policyVersion, approvers };
   // [GPT-REV-045 + GPT-REV-048] Approval hợp lệ = GPT (mọi pha, có provenance) HOẶC
   // reviewer:local steady-state đủ gates VÀ có provenance + authorized author.
   const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, { ...ctx, allowedRecorders });
@@ -558,7 +573,7 @@ export function collectActivationRecords(comments) {
  * Fail-closed: bất kỳ điều kiện thiếu/sai/mâu thuẫn/lỗi IO (wiringState null) → { active:false }.
  */
 export function planPhaseActivation({
-  records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion,
+  records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion, authorityApprovers,
 } = {}) {
   const inactive = (reason) => ({ active: false, reason });
   if (!Array.isArray(records) || records.length === 0) return inactive('không có marker kích hoạt');
@@ -588,6 +603,7 @@ export function planPhaseActivation({
   }
   const approval = effectiveApproval(wiringApprovalRecords, {
     repository: ev.repo, prNumber: ev.number, headSha: rec.gptApprovedHeadSha, policyVersion,
+    approvers: authorityApprovers,
   });
   if (!approval) {
     return inactive('không có GPT approval hợp lệ khóa đúng head đã merge + policyVersion hiện tại trên wiring PR');

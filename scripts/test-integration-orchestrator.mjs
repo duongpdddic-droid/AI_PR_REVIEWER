@@ -15,6 +15,7 @@ const POLICY = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
+  authority: { approvers: ['duongpdddic-droid'] },
   // reviewerPhases shape tối thiểu như canonical — thiếu → phase resolution fail-closed (blocked).
   reviewerPhases: {
     phases: {

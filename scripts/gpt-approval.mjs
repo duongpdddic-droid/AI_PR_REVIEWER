@@ -141,7 +141,7 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
   // [GPT-REV-048] r là kết quả parseApprovalMarkers {marker, commentId, authorLogin}; cần spread marker.
   const existing = parseApprovalMarkers(bodies).filter((r) =>
     isApprovalValid({ ...r.marker, commentId: r.commentId, authorLogin: r.authorLogin },
-      { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion }).valid);
+      { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, approvers: policy.authority && policy.authority.approvers }).valid);
   if (existing.length) {
     return { mutated: false, skipped: 'duplicate', headSha, message: `BỎ QUA: approval ${AGENTS.gpt} cho HEAD ${headSha.slice(0, 12)} đã tồn tại (${existing.length} marker) — không ghi trùng.` };
   }
@@ -180,7 +180,7 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
   io.postComment(repo, pr, body); // lỗi → ném ra, CHƯA mutation nhãn nào
 
   const afterComments = io.listPrComments(repo, pr);
-  const recorded = effectiveApproval(afterComments, { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion });
+  const recorded = effectiveApproval(afterComments, { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, approvers: policy.authority && policy.authority.approvers });
   if (!recorded || String(recorded.decisionId || '') !== String(payload.decisionId)) {
     throw new Error('read-back FAIL: marker approval chưa ghi nhận được/không hợp lệ tại HEAD — giữ nguyên nhãn, KHÔNG gắn status:approved.');
   }

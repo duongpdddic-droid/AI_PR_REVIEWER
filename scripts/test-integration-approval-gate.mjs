@@ -14,6 +14,7 @@ const POLICY = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 1500 },
+  authority: { approvers: ['user'] },
 };
 const PASS_MARKER = `<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${SHA} -->`;
 const payload = () => ({ repository: 'o/r', prNumber: 7, headSha: SHA, policyVersion: POLICY.policyVersion, decisionId: 'gpt-dec-test-001' });
