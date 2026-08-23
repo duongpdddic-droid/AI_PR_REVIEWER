@@ -23,12 +23,12 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
-  AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, POLICY_PATH,
+  AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS,
   canMutatePr, countReviewRounds, evaluateChecks, evaluateDiffLimits,
   gateOpenFindings, isStaleEvent, mutationKey, normalizeStatusLabels,
   planApprovalDrift, planCiRouting, planPreReviewOutcome, resolveReviewPhase, scanDiffForSecrets,
 } from './review-contract.mjs';
-import { CANONICAL_PATH, CANONICAL_REPO, PROJECT_CONFIG_FILE, resolveEffectivePolicy } from './effective-policy.mjs';
+import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,17 +67,17 @@ function defaultIo() {
       return String(out || '').split('\u0000');
     },
     getPolicy(repo, ref) {
-      // 1) Canonical mirror legacy (.github/ai-review-policy.json trên target repo) — backward-safe migration.
+      // [GPT-REV-042] Không còn legacy mirror: project repo bắt buộc project config +
+      // canonical từ đúng policySource.repo+full SHA+path; canonical repo dùng nội bộ.
       try {
-        const b64 = this.gh(['api', `repos/${repo}/contents/${POLICY_PATH}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
-        return { policy: JSON.parse(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8')) };
-      } catch { /* 2) project config + resolver (Issue #5) */ }
-      try {
-        const cfgB64 = this.gh(['api', `repos/${repo}/contents/${PROJECT_CONFIG_FILE}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
-        const projectConfig = JSON.parse(Buffer.from(String(cfgB64).replace(/\s+/g, ''), 'base64').toString('utf8'));
-        const canB64 = this.gh(['api', `repos/${CANONICAL_REPO}/contents/${CANONICAL_PATH}?ref=main`, '--jq', '.content']);
-        const canonical = JSON.parse(Buffer.from(String(canB64).replace(/\s+/g, ''), 'base64').toString('utf8'));
-        return resolveEffectivePolicy(canonical, projectConfig); // ném PolicyResolutionError fail-closed
+        return resolvePolicyForRepo({
+          repo,
+          ref,
+          fetchContent: (r, p, rr) => {
+            const b64 = this.gh(['api', `repos/${r}/contents/${p}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
+            return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');
+          },
+        });
       } catch (e) {
         const code = (e && e.code) || 'BLOCKED_CANONICAL_UNAVAILABLE';
         return { policy: null, error: `${code}: ${String((e && e.message) || e).slice(0, 200)}` };

@@ -8,9 +8,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CANONICAL_REPO, PROJECT_CONFIG_FILE,
-  PolicyResolutionError, loadProjectReviewConfig, resolveEffectivePolicy,
+  CANONICAL_PATH, CANONICAL_REPO, PROJECT_CONFIG_FILE,
+  PolicyResolutionError, assertFullSha, loadProjectReviewConfig, resolveEffectivePolicy, resolvePolicyForRepo,
 } from './effective-policy.mjs';
+import { POLICY_PATH } from './review-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -21,7 +22,7 @@ function ok(name) { passed += 1; console.log(`  PASS ${name}`); }
 const canonical = JSON.parse(readFileSync(path.join(ROOT, '.github', 'ai-review-policy.json'), 'utf8'));
 const projectConfigQldA = {
   configVersion: canonical.policyVersion,
-  policySource: { repo: CANONICAL_REPO, ref: 'main', path: '.github/ai-review-policy.json', pinnedVersion: canonical.policyVersion },
+  policySource: { repo: CANONICAL_REPO, ref: 'a'.repeat(40), path: '.github/ai-review-policy.json', pinnedVersion: canonical.policyVersion },
   projectOverrides: {
     requiredChecks: ['Verify code and data'],
     additionalTestCommands: ['pnpm test:data'],
@@ -97,6 +98,84 @@ const projectConfigQldA = {
   const proto = readFileSync(path.join(ROOT, 'docs', 'AGENT_HANDOFF_PROTOCOL.md'), 'utf8');
   assert.ok(!/Moi repo giu ban sao/i.test(proto), 'protocol không được mô tả lại mô hình mirror');
   ok('canonical + protocol đã loại mô hình mirror (chống protocol drift)');
+}
+
+// --- [GPT-REV-042] resolvePolicyForRepo: stale mirror không bao giờ được dùng ---
+{
+  const calls = [];
+  const fetchContent = (repo, p, ref) => {
+    calls.push({ repo, path: p, ref });
+    if (p === POLICY_PATH && repo === 'duongpdddic-droid/QLDA_DTXD') {
+      // stale mirror CŨ trên target repo — phải bị bỏ qua, không bao giờ đọc.
+      return JSON.stringify({ ...canonical, policyVersion: '2000-01-01.0' });
+    }
+    if (p === PROJECT_CONFIG_FILE) return JSON.stringify(projectConfigQldA);
+    if (repo === CANONICAL_REPO && p === CANONICAL_PATH) return JSON.stringify(canonical);
+    throw new Error('404');
+  };
+  const { policy, meta } = resolvePolicyForRepo({ repo: 'duongpdddic-droid/QLDA_DTXD', ref: 'b'.repeat(40), fetchContent });
+  assert.equal(policy.requiredChecks[0], 'Verify code and data');
+  // Không một request nào đọc POLICY_PATH trên target repo (mirror stale).
+  assert.ok(!calls.some((c) => c.repo === 'duongpdddic-droid/QLDA_DTXD' && c.path === POLICY_PATH),
+    'stale mirror trên target repo không được đọc');
+  // Canonical chỉ được tải từ đúng pinned full SHA.
+  const canonCalls = calls.filter((c) => c.path === CANONICAL_PATH);
+  assert.equal(canonCalls.length, 1);
+  assert.equal(canonCalls[0].ref, projectConfigQldA.policySource.ref);
+  assert.ok(meta.pinnedVersion === canonical.policyVersion);
+  ok('project repo: bỏ qua stale mirror, canonical chỉ từ policySource full SHA');
+}
+
+// --- [GPT-REV-042] ref di động (main/branch) bị từ chối ---
+{
+  for (const badRef of ['main', 'develop', 'v1', String('c'.repeat(39))]) {
+    const cfg = JSON.parse(JSON.stringify(projectConfigQldA));
+    cfg.policySource.ref = badRef;
+    assert.throws(
+      () => resolvePolicyForRepo({
+        repo: 'duongpdddic-droid/QLDA_DTXD', ref: 'd'.repeat(40),
+        fetchContent: (_r, p) => (p === PROJECT_CONFIG_FILE ? JSON.stringify(cfg) : JSON.stringify(canonical)),
+      }),
+      (e) => e instanceof PolicyResolutionError && e.code === 'BLOCKED_CANONICAL_INVALID',
+      `ref "${badRef}" phải bị từ chối`,
+    );
+  }
+  assert.throws(() => assertFullSha('main'), (e) => e.code === 'BLOCKED_CANONICAL_INVALID');
+  ok('policySource.ref di động (main/branch/39-hex) → BLOCKED_CANONICAL_INVALID');
+}
+
+// --- [GPT-REV-042] thiếu project config / canonical lỗi nguồn → fail-closed ---
+{
+  assert.throws(
+    () => resolvePolicyForRepo({
+      repo: 'duongpdddic-droid/QLDA_DTXD', ref: 'e'.repeat(40),
+      fetchContent: () => { throw new Error('404'); },
+    }),
+    (e) => e.code === 'BLOCKED_CANONICAL_UNAVAILABLE',
+  );
+  assert.throws(
+    () => resolvePolicyForRepo({
+      repo: 'duongpdddic-droid/QLDA_DTXD', ref: 'f'.repeat(40),
+      fetchContent: (_r, p) => {
+        if (p === PROJECT_CONFIG_FILE) return JSON.stringify(projectConfigQldA);
+        throw new Error('canonical gone');
+      },
+    }),
+    (e) => e.code === 'BLOCKED_CANONICAL_UNAVAILABLE',
+  );
+  ok('thiếu project config hoặc canonical lỗi nguồn → BLOCKED_CANONICAL_UNAVAILABLE');
+}
+
+// --- [GPT-REV-042] canonical self-review dùng canonical nội bộ tại ref ---
+{
+  let saw;
+  const out = resolvePolicyForRepo({
+    repo: CANONICAL_REPO, ref: '1'.repeat(40),
+    fetchContent: (r, p, rr) => { saw = { r, p, rr }; return JSON.stringify(canonical); },
+  });
+  assert.equal(out.policy.policyVersion, canonical.policyVersion);
+  assert.deepEqual(saw, { r: CANONICAL_REPO, p: CANONICAL_PATH, rr: '1'.repeat(40) });
+  ok('AI_PR_REVIEWER tự review → canonical nội bộ tại head ref');
 }
 
 console.log(`test-effective-policy: ${passed} asserts PASS`);

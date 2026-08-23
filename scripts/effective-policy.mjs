@@ -118,9 +118,72 @@ export function loadCanonicalPolicyLocal(projectRoot) {
 }
 
 /**
- * IO: fetch canonical từ raw.githubusercontent (repo public). Trả {policy}|{policy:null,error}.
+ * Pure: chọn nguồn canonical theo Issue #5 + [GPT-REV-042].
+ * - Repo canonical tự review → canonical nội bộ tại `ref` (head SHA của PR canonical).
+ * - Project repo → BẮT BUỘC project config; canonical chỉ được tải từ đúng
+ *   `policySource.repo + policySource.ref (full 40-hex SHA) + policySource.path`.
+ *   KHÔNG BAO GIỜ đọc `.github/ai-review-policy.json` trên target repo
+ *   (legacy mirror đã bỏ — stale mirror không được dùng làm nguồn policy).
+ * - Mọi lệch shape/ref/thiếu nguồn → PolicyResolutionError fail-closed.
+ * @param {{repo: string, ref: string, fetchContent: (repo:string,path:string,ref:string)=>string}} p
+ * @returns {{policy: object, meta?: object}} meta có mặt khi đi qua project config.
  */
-export async function fetchCanonicalPolicyRaw({ repo = CANONICAL_REPO, ref = 'main' } = {}) {
+export function resolvePolicyForRepo({ repo, ref, fetchContent }) {
+  if (typeof fetchContent !== 'function') {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE', 'thiếu fetchContent IO');
+  }
+  if (repo === CANONICAL_REPO) {
+    let raw;
+    try { raw = fetchContent(CANONICAL_REPO, CANONICAL_PATH, ref); }
+    catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE', `canonical nội bộ không đọc được tại ${ref}: ${String((e && e.message) || e).slice(0, 160)}`); }
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai JSON: ${String((e && e.message) || e).slice(0, 160)}`); }
+    const v = validatePolicy(parsed);
+    if (!v.ok) throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai shape: ${v.error}`);
+    return { policy: parsed };
+  }
+
+  // Project repo: đọc project config trên target repo tại ref.
+  let projectConfig;
+  try {
+    projectConfig = JSON.parse(fetchContent(repo, PROJECT_CONFIG_FILE, ref));
+  } catch {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE',
+      `${repo} thiếu/không đọc được ${PROJECT_CONFIG_FILE} tại ${ref} — project repo bắt buộc khai báo policySource pin canonical`);
+  }
+  const src = projectConfig && projectConfig.policySource;
+  if (!src || typeof src !== 'object' || !src.ref) {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', 'project config thiếu policySource.ref');
+  }
+  assertFullSha(src.ref);
+  const cRepo = src.repo || CANONICAL_REPO;
+  const cPath = src.path || CANONICAL_PATH;
+  let canonical;
+  try { canonical = JSON.parse(fetchContent(cRepo, cPath, src.ref)); }
+  catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE',
+    `canonical không đọc được từ ${cRepo}@${src.ref}:${cPath} — ${String((e && e.message) || e).slice(0, 120)}`); }
+  return resolveEffectivePolicy(canonical, projectConfig);
+}
+
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+/** Ref di động (main/branch/tag ngắn) bị từ chối — pin phải là full commit SHA. */
+export function assertFullSha(ref) {
+  if (!FULL_SHA_RE.test(String(ref || ''))) {
+    throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID',
+      `policySource.ref phải là full 40-hex commit SHA, nhận: "${ref}"`);
+  }
+}
+
+/**
+ * IO: fetch canonical từ raw.githubusercontent (repo public). Trả {policy}|{policy:null,error}.
+ * ref BẮT BUỘC full 40-hex SHA — mặc định 'main' đã bỏ ([GPT-REV-042]).
+ */
+export async function fetchCanonicalPolicyRaw({ repo = CANONICAL_REPO, ref } = {}) {
+  if (!FULL_SHA_RE.test(String(ref || ''))) {
+    return { policy: null, error: `BLOCKED_CANONICAL_INVALID: ref phải là full 40-hex SHA, nhận: "${ref}"` };
+  }
   const url = `https://raw.githubusercontent.com/${repo}/${ref}/${CANONICAL_PATH}`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
