@@ -260,12 +260,37 @@ export function effectiveApproval(records, ctx) {
   return best;
 }
 
+// Approval cục bộ steady-state (GPT-REV-045): marker do reviewer:local ghi khi đủ toàn bộ
+// evaluateSteadyApprovalGates. KHÔNG thay thế GPT approval ở transition; chỉ được dùng để
+// chống approval-drift SAI khi PR đã được local approve đúng gates ở steady-state.
+// Trường bắt buộc khớp policy.approvalMarker.requiredFields (test assert đồng bộ với JSON).
+export const LOCAL_APPROVAL_REQUIRED_FIELDS = [
+  'repository', 'prNumber', 'reviewer', 'headSha', 'policyVersion',
+  'decisionId', 'ciEvidence', 'openBlockingFindings', 'reviewedAt',
+];
+
+export function steadyLocalApproval(records, { headSha, repository, prNumber, policyVersion } = {}) {
+  for (const r of parseApprovalMarkers(records)) {
+    if (String(r.reviewer) !== REVIEWER_LOCAL) continue;
+    const fieldsOk = LOCAL_APPROVAL_REQUIRED_FIELDS.every((k) => r[k] !== undefined && r[k] !== null && r[k] !== '');
+    const shaOk = /^[0-9a-f]{40}$/i.test(String(r.headSha || ''))
+      && String(r.headSha).toLowerCase() === String(headSha || '').toLowerCase();
+    const scopeOk = String(r.repository) === String(repository)
+      && Number(r.prNumber) === Number(prNumber)
+      && policyVersion != null && String(r.policyVersion) === String(policyVersion);
+    if (fieldsOk && shaOk && scopeOk && Number(r.openBlockingFindings ?? 0) === 0) return r;
+  }
+  return null;
+}
+
 // Phát hiện approval-drift: PR gắn status:approved nhưng không có approval GPT hợp lệ
 // cho HEAD hiện tại → gỡ hiệu lực approval cũ, chuyển lại status:review-requested.
 export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion } = {}) {
   const norm = normalizeStatusLabels(labels);
   if (norm.keepStatus !== LABELS.approved) return { drift: false };
-  const approval = effectiveApproval(comments, { headSha, repository, prNumber, policyVersion });
+  const ctx = { headSha, repository, prNumber, policyVersion };
+  // [GPT-REV-045] Approval hợp lệ = GPT (mọi pha) HOẶC reviewer:local steady-state đủ gates.
+  const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, ctx);
   if (approval) return { drift: false, approval };
   return {
     drift: true,
@@ -416,6 +441,98 @@ export function evaluateSteadyApprovalGates({ ciState, passMarkerPresent, headSh
   return { ok: gates.every(([, pass]) => pass), gates: gates.map(([gate, pass]) => ({ gate, pass })) };
 }
 
+// ---------------------------------------------------------------- activation & duplicate keys (GPT-REV-045)
+
+/**
+ * Pure: phân tích marker kích hoạt steady-state máy đọc được từ nguồn policy khai báo
+ * (reviewerPhases.steadyState.activationEvidence — issue-comment marker).
+ * Fail-closed: thiếu prefix / JSON hỏng / sai shape / SHA không full 40-hex → { active: false }.
+ */
+export function parseActivationComment(rawText) {
+  const PREFIX = '<!-- ai-review-phase-activation:';
+  const text = String(rawText || '');
+  const start = text.indexOf(PREFIX);
+  if (start === -1) return { active: false, reason: 'không có marker kích hoạt' };
+  const end = text.indexOf('-->', start);
+  if (end === -1) return { active: false, reason: 'marker không đóng -->' };
+  let rec;
+  try { rec = JSON.parse(text.slice(start + PREFIX.length, end).trim()); }
+  catch { return { active: false, reason: 'JSON trong marker không parse được' }; }
+  if (!rec || typeof rec !== 'object') return { active: false, reason: 'record không phải object' };
+  if (rec.phase !== 'steady-state') return { active: false, reason: `phase=${String(rec.phase)} không phải steady-state` };
+  for (const k of ['wiringPr', 'wiringMergedSha', 'gptApprovedHeadSha', 'recordedBy']) {
+    if (!String(rec[k] || '').trim()) return { active: false, reason: `thiếu ${k}` };
+  }
+  const shaOk = (s) => /^[0-9a-f]{40}$/i.test(String(s || ''));
+  if (!shaOk(rec.wiringMergedSha)) return { active: false, reason: 'wiringMergedSha không phải full 40-hex' };
+  if (!shaOk(rec.gptApprovedHeadSha)) return { active: false, reason: 'gptApprovedHeadSha không phải full 40-hex' };
+  return { active: true, record: rec };
+}
+
+/**
+ * Pure: quét raw JSON text phát hiện duplicate key TRONG CÙNG MỘT object
+ * (JSON.parse âm thầm giữ key cuối → schema mơ hồ theo GPT-REV-045).
+ * Trả { duplicates: [{ key, path }] }; mảng rỗng = sạch.
+ */
+export function scanDuplicateObjectKeys(text) {
+  const s = String(text || '');
+  const dups = [];
+  /** @type {Array<Set<string>|null>} null = level là array (không collect key) */
+  const stack = [new Set()];
+  const pathStack = [''];
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '"') {
+      // đọc string (tôn trọng escape)
+      let j = i + 1;
+      let str = '';
+      while (j < s.length) {
+        if (s[j] === '\\') { str += s[j] + s[j + 1]; j += 2; continue; }
+        if (s[j] === '"') break;
+        str += s[j];
+        j += 1;
+      }
+      // peek ký hiệu sau string
+      let k = j + 1;
+      while (k < s.length && /\s/.test(s[k])) k += 1;
+      const top = stack[stack.length - 1];
+      if (s[k] === ':' && top) {
+        if (top.has(str)) dups.push({ key: str, path: pathStack.join('.') });
+        else top.add(str);
+        i = k + 1; // nhảy qua ':'
+        continue;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === '{') {
+      stack.push(new Set());
+      // tên object hiện tại = chuỗi key gần nhất trong level cha
+      pathStack.push(lastKeyBefore(s, i));
+    } else if (ch === '[') {
+      stack.push(null);
+      pathStack.push(lastKeyBefore(s, i));
+    } else if (ch === '}' || ch === ']') {
+      stack.pop();
+      pathStack.pop();
+      if (!stack.length) break;
+    }
+    i += 1;
+  }
+  return { duplicates: dups };
+}
+
+// Tên key gần nhất trước vị trí idx (dùng làm path mô tả; không cần chính xác tuyệt đối).
+function lastKeyBefore(s, idx) {
+  const re = /"((?:[^"\\]|\\.)*)"\s*:/g;
+  let last = '';
+  let m;
+  const slice = s.slice(0, idx);
+  while ((m = re.exec(slice)) !== null) last = m[1];
+  return last;
+}
+
 // Giới hạn kích thước diff theo policy.diffLimits.maxLines (0/undefined = không giới hạn).
 // Metric canonical (GPT-REV-031): churn review = additions + deletions — cả hai phía diff
 // đều tốn công review, chỉ đếm additions đã đánh giá thấp quy mô thật của PR.
@@ -438,7 +555,9 @@ export function evaluateDiffLimits(policy, diffText) {
  * CẤM coder tự đóng thread/tự gắn approved.
  */
 export function resolveRebuttalOutcome({ coderVerdictKind, finding, reviewerVerdict = null, evidencePresent = false }) {
-  const REQUIRED = ['code', 'severity', 'evidence', 'risk'];
+  // [GPT-REV-045] Đủ 5 trường bắt buộc theo reviewerCoderContract.findingRequiredFields
+  // (thiếu expectedOutcome trước đây → finding malformed bị coi hợp lệ).
+  const REQUIRED = ['code', 'severity', 'evidence', 'risk', 'expectedOutcome'];
   const malformed = !finding || REQUIRED.some((k) => finding[k] === undefined || finding[k] === null || finding[k] === '');
   if (malformed) {
     return { findingClosed: false, nextAction: 'request-reviewer-verdict', malformedFinding: true };

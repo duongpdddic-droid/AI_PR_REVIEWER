@@ -318,8 +318,18 @@ function makeIo(opts = {}) {
   const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   tru('I.17 orchestrator không gọi gpt-approval trong code', !codeOnly.includes('gpt-approval'));
   tru('I.17 orchestrator không tự build approval marker', !src.includes('buildApprovalMarker'));
-  tru('I.17 không nhánh nào add status:approved trong orchestrator',
-    !src.match(/addLabels:\s*\[[^\]]*approved/));
+  // [GPT-REV-045] add status:approved CHỈ được phép DUY NHẤT trong nhánh steady-state,
+  // sau guard escalation local-accept-candidate + evaluateSteadyApprovalGates + !gates.ok fallback.
+  const approvedAddIdx = codeOnly.search(/addLabels:\s*\[[^\]]*LABELS\.approved/);
+  const secondApprovedAdd = approvedAddIdx === -1 ? -1
+    : codeOnly.slice(approvedAddIdx + 1).search(/addLabels:\s*\[[^\]]*LABELS\.approved/);
+  const guardIdx = codeOnly.indexOf("escalation.action === 'local-accept-candidate'");
+  const gatesIdx = codeOnly.indexOf('evaluateSteadyApprovalGates({');
+  const failGateIdx = codeOnly.indexOf('if (!gates.ok)');
+  tru('I.17 add status:approved duy nhất, nằm sau guard steady-state gates',
+    approvedAddIdx !== -1 && secondApprovedAdd === -1
+    && guardIdx !== -1 && gatesIdx !== -1 && failGateIdx !== -1
+    && guardIdx < approvedAddIdx && gatesIdx < approvedAddIdx && failGateIdx < approvedAddIdx);
   // Hành vi: chu kỳ đầy đủ trên PR sạch chỉ kết thúc ở review-requested + agent:gpt.
   const { io, pr } = makeIo({ labels: [LABELS.reviewing] });
   await processOneCycle(io, { dryRun: false, repos: ['o/r'] });

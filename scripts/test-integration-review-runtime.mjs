@@ -65,7 +65,7 @@ function ok(name) { passed += 1; console.log(`  PASS ${name}`); }
 
 // --- Rebuttal FIX/REBUT → reviewer ACCEPTED/REJECTED ---
 {
-  const finding = { code: 'LOCAL-REV-001', severity: 'important', evidence: 'e', risk: 'r' };
+  const finding = { code: 'LOCAL-REV-001', severity: 'important', evidence: 'e', risk: 'r', expectedOutcome: 'o' };
   assert.deepEqual(
     resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding, evidencePresent: true }),
     { findingClosed: true, nextAction: 'close-finding' });
@@ -128,6 +128,92 @@ function ok(name) { passed += 1; console.log(`  PASS ${name}`); }
     planDiscoveryBehavior({ validTasks: 1, conflicting: true }),
     { result: 'blocked-no-guessing', mutationAllowed: false });
   ok('discovery: zero→NO_TASK; one→claim; many/conflict→blocked-no-guessing');
+}
+
+// --- Integration [GPT-REV-045]: processPr route theo pha qua activation marker ---
+{
+  const SHA2 = 'c'.repeat(40);
+  const validActivation = `<!-- ai-review-phase-activation:${JSON.stringify({
+    phase: 'steady-state', wiringPr: 'duongpdddic-droid/AI_PR_REVIEWER#9',
+    wiringMergedSha: SHA2, gptApprovedHeadSha: SHA2,
+    recordedBy: 'user', recordedAt: '2026-08-23T00:00:00Z',
+  })} -->`;
+
+  function makeRuntimeIo({ labels = ['status:review-requested'], diff = '+const a = 1;\n', activation = '', readBackFail = false } = {}) {
+    const st = { labels: [...labels], comments: [] };
+    return {
+      st,
+      getPrView() { return { state: 'open', headRefOid: SHA2, labels: [...st.labels] }; },
+      listPrComments() {
+        if (readBackFail && st.comments.length) return []; // mô phỏng read-after-write FAIL
+        return [...st.comments];
+      },
+      getPolicy() { return { policy: JSON.parse(JSON.stringify(canonical)) }; },
+      getChecks() { return { checks: [{ name: canonical.requiredChecks[0], state: 'SUCCESS' }] }; },
+      getPrDiff() { return diff; },
+      getPhaseActivationText() { return activation; },
+      addLabels(_r, _n, ls) { for (const l of ls) if (!st.labels.includes(l)) st.labels.push(l); },
+      removeLabels(_r, _n, ls) { st.labels = st.labels.filter((l) => !ls.includes(l)); },
+      postComment(_r, _n, body) { st.comments.push(body); return '#c'; },
+      notify() { return { ok: true, attempts: 1, evidence: 'SENT', detail: '' }; },
+      log() {},
+    };
+  }
+
+  // R.1 transition (không activation) + PASS sạch → bàn giao GPT, KHÔNG approved.
+  {
+    const t = makeRuntimeIo();
+    const res = await processPr(t, 'o/r', 7, { dryRun: false });
+    assert.equal(res.preReview.outcome, 'handoff-gpt');
+    assert.ok(t.st.labels.includes(LABELS.reviewRequested));
+    assert.ok(t.st.labels.includes('agent:gpt'));
+    assert.ok(!t.st.labels.includes(LABELS.approved));
+    ok('processPr transition + PASS sạch → handoff-gpt, KHÔNG tự approve');
+  }
+
+  // R.2 marker hợp lệ + PASS sạch → local approval marker khóa HEAD/policy + status:approved.
+  {
+    const t = makeRuntimeIo({ activation: validActivation });
+    const res = await processPr(t, 'o/r', 7, { dryRun: false });
+    assert.equal(res.preReview.outcome, 'local-approved');
+    assert.ok(Array.isArray(res.preReview.gates) && res.preReview.gates.every((g) => g.pass));
+    assert.ok(t.st.labels.includes(LABELS.approved), 'phải có status:approved');
+    const joined = t.st.comments.join('\n');
+    assert.match(joined, /ai-review-approval:\{[^]*"reviewer":"reviewer:local"/);
+    assert.ok(joined.includes(`"headSha":"${SHA2}"`), 'approval phải khóa đúng HEAD');
+    assert.ok(joined.includes(`"policyVersion":"${canonical.policyVersion}"`), 'approval phải khóa policyVersion');
+    ok('processPr steady-state đủ gate → local approval + status:approved (read-back PASS)');
+  }
+
+  // R.3 marker hợp lệ nhưng decision-gate (diff-limit) → blocked, KHÔNG approved.
+  {
+    const bigDiff = Array.from({ length: 1501 }, (_, i) => `+line${i}`).join('\n');
+    const t = makeRuntimeIo({ labels: ['status:reviewing'], activation: validActivation, diff: bigDiff });
+    const res = await processPr(t, 'o/r', 7, { dryRun: false });
+    assert.equal(res.preReview.outcome, 'block-decision-gate');
+    assert.ok(t.st.labels.includes(LABELS.blocked));
+    assert.ok(!t.st.labels.includes(LABELS.approved));
+    ok('processPr steady-state + decision-gate → blocked, KHÔNG approve');
+  }
+
+  // R.4 read-after-write FAIL → không approve, fail-closed escalate GPT.
+  {
+    const t = makeRuntimeIo({ activation: validActivation, readBackFail: true });
+    const res = await processPr(t, 'o/r', 7, { dryRun: false });
+    assert.notEqual(res.preReview && res.preReview.outcome, 'local-approved');
+    assert.ok(!t.st.labels.includes(LABELS.approved), 'read-back FAIL phải chặn approved');
+    assert.ok(t.st.labels.includes('agent:gpt'), 'fail-closed phải bàn giao GPT');
+    ok('processPr steady-state read-back FAIL → fail-closed escalate-gpt, KHÔNG approve');
+  }
+
+  // R.5 marker sai SHA shape → inactive → transition (GPT duyệt).
+  {
+    const t = makeRuntimeIo({ activation: validActivation.replace(SHA2, 'shortsha') });
+    const res = await processPr(t, 'o/r', 7, { dryRun: false });
+    assert.equal(res.preReview.outcome, 'handoff-gpt');
+    assert.ok(!t.st.labels.includes(LABELS.approved));
+    ok('processPr activation marker sai SHA → transition fail-closed');
+  }
 }
 
 console.log(`test-integration-review-runtime: ${passed} asserts PASS`);

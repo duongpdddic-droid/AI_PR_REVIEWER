@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { POLICY_PATH, validatePolicy } from './review-contract.mjs';
+import { POLICY_PATH, validatePolicy, scanDuplicateObjectKeys } from './review-contract.mjs';
 
 export const CANONICAL_REPO = 'duongpdddic-droid/AI_PR_REVIEWER';
 export const CANONICAL_PATH = POLICY_PATH;
@@ -24,6 +24,20 @@ export class PolicyResolutionError extends Error {
   constructor(code, message) {
     super(`[${code}] ${message}`);
     this.code = code;
+  }
+}
+
+// [GPT-REV-045] Duplicate JSON keys trong canonical (vd khai lại canonicalRepo) làm schema mơ hồ
+// (JSON.parse âm thầm giữ giá trị cuối) → fail-closed BLOCKED_POLICY_DUPLICATE_KEYS.
+function assertNoDuplicateKeys(raw, where) {
+  const { duplicates } = scanDuplicateObjectKeys(raw);
+  if (duplicates.length) {
+    const d = duplicates[0];
+    throw new PolicyResolutionError(
+      'BLOCKED_POLICY_DUPLICATE_KEYS',
+      `${where}: duplicate JSON key "${d.key}"${d.path ? ` tại object ${d.path}` : ''}` +
+      (duplicates.length > 1 ? ` (+${duplicates.length - 1} chỗ khác)` : ''),
+    );
   }
 }
 
@@ -158,6 +172,7 @@ export function resolvePolicyForRepo({ repo, ref, fetchContent }) {
     let parsed;
     try { parsed = JSON.parse(raw); }
     catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai JSON: ${String((e && e.message) || e).slice(0, 160)}`); }
+    assertNoDuplicateKeys(raw, 'canonical nội bộ');
     const v = validatePolicy(parsed);
     if (!v.ok) throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai shape: ${v.error}`);
     // [GPT-REV-044] canonical tự review cũng phải có identity hợp lệ trong contract.
@@ -184,10 +199,12 @@ export function resolvePolicyForRepo({ repo, ref, fetchContent }) {
   // [GPT-REV-044] canonical repo/path: dùng default từ hằng số (không lấy từ project config để không cho override).
   const cRepo = CANONICAL_REPO;
   const cPath = CANONICAL_PATH;
-  let canonical;
-  try { canonical = JSON.parse(fetchContent(cRepo, cPath, src.ref)); }
+  let canonicalRaw;
+  try { canonicalRaw = String(fetchContent(cRepo, cPath, src.ref)); }
   catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE',
     `canonical không đọc được từ ${cRepo}@${src.ref}:${cPath} — ${String((e && e.message) || e).slice(0, 120)}`); }
+  assertNoDuplicateKeys(canonicalRaw, `canonical ${cRepo}@${String(src.ref).slice(0, 12)}:${cPath}`);
+  const canonical = JSON.parse(canonicalRaw);
   return resolveEffectivePolicy(canonical, projectConfig);
 }
 
@@ -213,7 +230,10 @@ export async function fetchCanonicalPolicyRaw({ repo = CANONICAL_REPO, ref } = {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
     if (!res.ok) return { policy: null, error: `BLOCKED_CANONICAL_UNAVAILABLE: HTTP ${res.status} từ ${url}` };
-    const parsed = JSON.parse(await res.text());
+    const raw = await res.text();
+    try { assertNoDuplicateKeys(raw, url); }
+    catch (e) { return { policy: null, error: String(e.message || e) }; }
+    const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return { policy: null, error: 'BLOCKED_CANONICAL_UNAVAILABLE: nội dung không phải object' };
     return { policy: parsed, path: url };
   } catch (e) {

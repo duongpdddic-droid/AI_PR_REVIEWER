@@ -1,5 +1,5 @@
 {
-  "policyVersion": "2026-08-23.5",
+  "policyVersion": "2026-08-23.6",
   "description": "Policy CANONICAL DUY NHAT cho quy trinh AI PR Review (AI_PR_REVIEWER Issue #2 + Issue #5). Repo du an khong giu ban sao; tham chieu + pin version qua projectPolicyContract. Mo hinh reviewer hai giai doan (transition/steadyState) theo [USER-DECISION] tren Issue duongpdddic-droid/AI_PR_REVIEWER#2 (comment id 5381416494); contract reviewer-coder va discovery task fail-closed theo [GPT-REV-036]/[GPT-REV-037].",
   "scope": {
     "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD"],
@@ -38,11 +38,10 @@
       "stateMachine",
       "rules"
     ],
-    "canonicalRepo": "duongpdddic-droid/AI_PR_REVIEWER",
-    "canonicalPath": ".github/ai-review-policy.json",
     "failClosed": {
       "BLOCKED_CANONICAL_UNAVAILABLE": "Canonical policy khong doc duoc (missing/unreachable/unparseable) -> BLOCKED, khong approve, khong dung ban local cu.",
       "BLOCKED_CANONICAL_INVALID": "Canonical policy khong pass validatePolicy -> BLOCKED.",
+      "BLOCKED_POLICY_DUPLICATE_KEYS": "Canonical policy co duplicate JSON keys (vd khai lai canonicalRepo) -> schema mo ho -> BLOCKED. [GPT-REV-045]",
       "BLOCKED_VERSION_MISMATCH": "projectConfig.policySource.pinnedVersion != canonical.policyVersion -> BLOCKED, phai bump pin cung canonical.",
       "BLOCKED_INVALID_OVERRIDE": "Override khoa khong thuoc allowedProjectOverrides -> BLOCKED.",
       "BLOCKED_INVARIANT_OVERRIDE": "Override cham vao invariantLockedKeys -> BLOCKED."
@@ -89,6 +88,13 @@
       "steadyState": {
         "appliesAfter": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 hoan thanh: PR runtime wiring thu ba da duoc GPT duyet dung full HEAD SHA va nguoi dung merge (khong tu kich hoat khi hai PR contract/fix merge)",
         "activationRequires": ["runtimeWiringPrGptApproved", "runtimeWiringPrMerged"],
+        "activationEvidence": {
+          "type": "issue-comment-marker",
+          "repo": "duongpdddic-droid/AI_PR_REVIEWER",
+          "issue": 2,
+          "prefix": "<!-- ai-review-phase-activation:",
+          "note": "[GPT-REV-045] Nguon kich hoat may doc duoc, fail-closed: MOT comment tren Issue nay chua marker prefix + JSON {phase:'steady-state', wiringPr, wiringMergedSha (full 40-hex), gptApprovedHeadSha (full 40-hex), recordedBy, recordedAt}. Chi ghi SAU khi PR runtime wiring thu ba duoc GPT duyet dung full HEAD SHA va nguoi dung merge. Thieu/sai bat ky truong nao -> chua kich hoat (giu transition)."
+        },
         "defaultReviewer": "reviewer:local",
         "localReviewerCanApprove": true,
         "gptReReviewsEveryPr": false,

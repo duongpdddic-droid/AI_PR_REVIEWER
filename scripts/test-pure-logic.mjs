@@ -20,9 +20,14 @@ import {
   effectiveApproval, planApprovalDrift, isStaleEvent, canMutatePr, mutationKey,
   countReviewRounds, gateOpenFindings, scanDiffForSecrets, evaluateDiffLimits,
   validateApprovalPayload,
+  LOCAL_APPROVAL_REQUIRED_FIELDS, parseActivationComment, scanDuplicateObjectKeys,
+  resolveRebuttalOutcome, steadyLocalApproval,
 } from './review-contract.mjs';
 import { runSemanticPreReview } from './unified-orchestrator.mjs';
 import { withRetry } from './tg-notify-core.mjs';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const checks = [];
 const eq = (name, got, want) => checks.push({ name, ok: got === want, got, want });
@@ -294,6 +299,78 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   tru('C.16 sai policyVersion → chặn', !validateApprovalPayload({ ...base, policyVersion: '2026-08-22.1' }, ctx).ok);
   tru('C.16 decisionId trống/khoảng trắng → chặn', !validateApprovalPayload({ ...base, decisionId: '  ' }, ctx).ok);
   tru('C.16 payload null → chặn', !validateApprovalPayload(null, ctx).ok);
+}
+
+// --- C.17 [GPT-REV-045] parseActivationComment — nguồn kích hoạt máy đọc được, fail-closed ---
+{
+  const rec = {
+    phase: 'steady-state', wiringPr: 'duongpdddic-droid/AI_PR_REVIEWER#9',
+    wiringMergedSha: SHA, gptApprovedHeadSha: 'b'.repeat(40),
+    recordedBy: 'user', recordedAt: '2026-08-23T00:00:00Z',
+  };
+  const marker = (r) => `<!-- ai-review-phase-activation:${JSON.stringify(r)} -->`;
+  tru('C.17 marker hợp lệ → active', parseActivationComment(`text\n${marker(rec)}\n`).active === true);
+  tru('C.17 thiếu marker → inactive', parseActivationComment('không có gì').active === false);
+  tru('C.17 marker không đóng → inactive', parseActivationComment('<!-- ai-review-phase-activation:{}').active === false);
+  tru('C.17 JSON hỏng → inactive', parseActivationComment('<!-- ai-review-phase-activation:{bad} -->').active === false);
+  tru('C.17 phase sai → inactive', parseActivationComment(marker({ ...rec, phase: 'transition' })).active === false);
+  tru('C.17 thiếu recordedBy → inactive', parseActivationComment(marker({ ...rec, recordedBy: '' })).active === false);
+  tru('C.17 wiringMergedSha ngắn → inactive', parseActivationComment(marker({ ...rec, wiringMergedSha: 'abc' })).active === false);
+  tru('C.17 gptApprovedHeadSha thiếu → inactive', parseActivationComment(marker({ ...rec, gptApprovedHeadSha: null })).active === false);
+}
+
+// --- C.18 [GPT-REV-045] scanDuplicateObjectKeys — chống duplicate JSON keys ---
+{
+  const dup = '{"a":1,"projectPolicyContract":{"x":1,"x":2},"arr":[{"k":1},{"k":2}]}';
+  const d = scanDuplicateObjectKeys(dup).duplicates;
+  tru('C.18 phát hiện duplicate trong cùng object', d.length === 1 && d[0].key === 'x');
+  tru('C.18 khác object trùng tên key KHÔNG phải dup',
+    scanDuplicateObjectKeys('{"a":{"b":1},"c":{"b":2}}').duplicates.length === 0);
+  tru('C.18 chuỗi giá trị chứa ":" không gây nhiễu',
+    scanDuplicateObjectKeys('{"url":"http://x","a":1}').duplicates.length === 0);
+  // Canonical THẬT phải sạch duplicate keys.
+  const raw = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', POLICY_PATH), 'utf8');
+  tru('C.18 canonical policy thật không có duplicate keys',
+    scanDuplicateObjectKeys(raw).duplicates.length === 0);
+  // LOCAL_APPROVAL_REQUIRED_FIELDS khớp policy.approvalMarker.requiredFields (cả hai chiều).
+  const policyObj = JSON.parse(raw);
+  const pf = policyObj.approvalMarker.requiredFields;
+  tru('C.18 LOCAL_APPROVAL_REQUIRED_FIELDS đồng bộ policy.approvalMarker.requiredFields',
+    LOCAL_APPROVAL_REQUIRED_FIELDS.length === pf.length
+    && LOCAL_APPROVAL_REQUIRED_FIELDS.every((f) => pf.includes(f)));
+}
+
+// --- C.19/C.20 [GPT-REV-045] steadyLocalApproval + drift fallback ---
+{
+  const payload = {
+    repository: 'o/r', prNumber: 7, reviewer: REVIEWER_LOCAL, headSha: SHA,
+    policyVersion: 'v1', decisionId: 'steady-local-x', ciEvidence: { state: 'pass' },
+    openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z',
+  };
+  const comment = `✅ ok\n<!-- ai-review-approval:${JSON.stringify(payload)} -->`;
+  const ctx = { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1' };
+  tru('C.19 local approval hợp lệ được nhận diện', Boolean(steadyLocalApproval([comment], ctx)));
+  tru('C.19 sai HEAD → không nhận diện', !steadyLocalApproval([comment], { ...ctx, headSha: 'b'.repeat(40) }));
+  tru('C.19 sai policyVersion → không nhận diện', !steadyLocalApproval([comment], { ...ctx, policyVersion: 'v2' }));
+  tru('C.19 reviewer:gpt marker KHÔNG bị coi là local approval',
+    !steadyLocalApproval([`<!-- ai-review-approval:${JSON.stringify({ ...payload, reviewer: RA.gpt })} -->`], ctx));
+  tru('C.20 planApprovalDrift: approved + local marker hợp lệ → KHÔNG drift',
+    planApprovalDrift({ labels: [RL.approved], comments: [comment], ...ctx }).drift === false);
+  tru('C.20 planApprovalDrift: approved + local marker lệch SHA → drift',
+    planApprovalDrift({ labels: [RL.approved], comments: [comment], ...ctx, headSha: 'b'.repeat(40) }).drift === true);
+  tru('C.20 planApprovalDrift: approved + không marker nào → drift (như cũ)',
+    planApprovalDrift({ labels: [RL.approved], comments: [], ...ctx }).drift === true);
+}
+
+// --- C.21 [GPT-REV-045] resolveRebuttalOutcome đủ 5 trường bắt buộc ---
+{
+  const base4 = { code: 'LOCAL-REV-001', severity: 'important', evidence: 'e', risk: 'r' };
+  tru('C.21 finding thiếu expectedOutcome → malformed',
+    resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: base4, evidencePresent: true }).malformedFinding === true);
+  tru('C.21 đủ 5 trường + evidence → đóng finding',
+    resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: { ...base4, expectedOutcome: 'ok' }, evidencePresent: true }).findingClosed === true);
+  tru('C.21 expectedOutcome rỗng → malformed',
+    resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: { ...base4, expectedOutcome: '' } }).malformedFinding === true);
 }
 
 let fail = 0;

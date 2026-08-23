@@ -11,7 +11,7 @@ import {
   CANONICAL_PATH, CANONICAL_REPO, PROJECT_CONFIG_FILE,
   PolicyResolutionError, assertFullSha, loadProjectReviewConfig, resolveEffectivePolicy, resolvePolicyForRepo,
 } from './effective-policy.mjs';
-import { POLICY_PATH } from './review-contract.mjs';
+import { POLICY_PATH, scanDuplicateObjectKeys } from './review-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -253,6 +253,39 @@ const projectConfigQldA = {
   assert.deepEqual(p2.requiredChecks, ['Verify code and data']);
   assert.equal(m2.pinnedVersion, canonical.policyVersion);
   ok('project config repo/path trùng khớp identity → PASS');
+}
+
+// --- [GPT-REV-045] Duplicate JSON keys trong canonical → BLOCKED_POLICY_DUPLICATE_KEYS ---
+{
+  const raw = readFileSync(path.join(ROOT, '.github', 'ai-review-policy.json'), 'utf8');
+  // Canonical thật phải sạch duplicate keys (scan toàn văn).
+  const dupScan = scanDuplicateObjectKeys(raw).duplicates.length;
+  assert.equal(dupScan, 0);
+  ok('canonical policy thật không có duplicate JSON keys');
+
+  // Fixture duplicate key top-level → resolver fail-closed.
+  const minified = JSON.stringify(JSON.parse(raw));
+  const dupRaw = minified.replace('"finalReviewer":"agent:gpt"', '"finalReviewer":"agent:gpt","finalReviewer":"agent:gpt"');
+  let threw = null;
+  try {
+    resolvePolicyForRepo({
+      repo: CANONICAL_REPO,
+      ref: 'b'.repeat(40),
+      fetchContent: (_r, p) => (p === CANONICAL_PATH ? dupRaw : '{}'),
+    });
+  } catch (e) { threw = e; }
+  assert.ok(threw instanceof PolicyResolutionError, 'phải ném PolicyResolutionError');
+  assert.equal(threw.code, 'BLOCKED_POLICY_DUPLICATE_KEYS');
+  ok('canonical duplicate JSON keys → BLOCKED_POLICY_DUPLICATE_KEYS fail-closed');
+
+  // Canonical sạch → resolve bình thường qua cùng đường IO.
+  const okRes = resolvePolicyForRepo({
+    repo: CANONICAL_REPO,
+    ref: 'b'.repeat(40),
+    fetchContent: (_r, p) => (p === CANONICAL_PATH ? raw : '{}'),
+  });
+  assert.equal(okRes.policy.policyVersion, canonical.policyVersion);
+  ok('canonical sạch → resolve bình thường');
 }
 
 console.log(`test-effective-policy: ${passed} asserts PASS`);
