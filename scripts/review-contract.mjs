@@ -354,6 +354,68 @@ export function scanDiffForSecrets(diffText) {
   return findings;
 }
 
+// ---------------------------------------------------------------- reviewer phases (runtime, GPT-REV-039)
+
+// Resolve pha review hiện tại từ dữ liệu policy (fail-closed):
+//   - policy thiếu/mất shape reviewerPhases → phase 'blocked' (BLOCKED_PHASE_UNRESOLVED),
+//     luôn escalate GPT, không bao giờ cho local approve.
+//   - transition.runtimeWiringPrRequired === true và wiring chưa merge → 'transition'
+//     (GPT duyệt mọi PR, local KHÔNG tự approve).
+//   - steady-state CHỈ khi activationRequires đủ [runtimeWiringPrGptApproved,
+//     runtimeWiringPrMerged] VÀ caller xác nhận wiring đã được GPT duyệt + merge
+//     (tham số runtimeWiringMerged — marker máy đọc được do người dùng/orchestrator ghi).
+export function resolveReviewPhase(policy, { runtimeWiringMerged = false } = {}) {
+  const rp = policy && policy.reviewerPhases;
+  const phases = rp && rp.phases;
+  if (!rp || !phases || !phases.transition || !phases.steadyState) {
+    return { phase: 'blocked', code: 'BLOCKED_PHASE_UNRESOLVED', escalateToGpt: true, localReviewerCanApprove: false };
+  }
+  const tr = phases.transition;
+  const ss = phases.steadyState;
+  const req = Array.isArray(ss.activationRequires) ? ss.activationRequires : [];
+  const activationComplete =
+    runtimeWiringMerged === true &&
+    req.includes('runtimeWiringPrGptApproved') &&
+    req.includes('runtimeWiringPrMerged');
+  if (!activationComplete) {
+    return { phase: 'transition', escalateToGpt: true, localReviewerCanApprove: tr.localReviewerCanApprove === true };
+  }
+  return { phase: 'steady-state', localReviewerCanApprove: ss.localReviewerCanApprove === true };
+}
+
+// Escalation theo pha (pure). Transition: MỌI PR sau pre-review đều bàn giao GPT.
+// Steady-state: chỉ escalate GPT khi có blocking findings / decision gate / verdict không xác định;
+// PASS sạch mới xét đường local-accept (vẫn phải qua evaluateSteadyApprovalGates trước khi ghi approval).
+export function planEscalationForPhase(phaseInfo, { verdict, decisionGate = null, openBlockingCount = 0 } = {}) {
+  if (!phaseInfo || phaseInfo.phase === 'blocked') {
+    return { action: 'block', reason: (phaseInfo && phaseInfo.code) || 'BLOCKED_PHASE_UNRESOLVED',
+      addLabels: [LABELS.blocked], removeLabels: [LABELS.reviewing] };
+  }
+  if (phaseInfo.phase === 'transition') {
+    return { action: 'escalate-gpt', reason: 'transition-phase-final-reviewer-gpt' };
+  }
+  // steady-state:
+  if (verdict !== 'PRE_REVIEW_PASS' || decisionGate || openBlockingCount > 0) {
+    return { action: 'escalate-gpt', reason: 'blocking-findings-or-decision-gate' };
+  }
+  return { action: 'local-accept-candidate', reason: 'clean-pass-steady-state' };
+}
+
+// 6 gate approvalRequiresAllGates của steady-state (pure, fail-closed):
+// trả { ok, gates: [{gate, pass}] } — thiếu bất kỳ bằng chứng nào → ok=false.
+export function evaluateSteadyApprovalGates({ ciState, passMarkerPresent, headSha, policyValid, policyVersionMatch, openBlockingCount, readAfterWriteOk }) {
+  const gates = [
+    ['requiredChecksAllPassed', ciState === 'pass'],
+    ['realSemanticReviewCompleted', passMarkerPresent === true],
+    ['approvalLockedToHeadShaAndPolicyVersion', Boolean(headSha) && /^[0-9a-f]{40}$/i.test(String(headSha))],
+    ['noOpenBlockingFindings', Number(openBlockingCount) === 0],
+    ['policyValid', policyValid === true],
+    ['readAfterWriteSucceeded', readAfterWriteOk === true],
+    ['policyVersionMatchesCurrent', policyVersionMatch === true], // ràng buộc bổ sung, fail-closed thêm
+  ];
+  return { ok: gates.every(([, pass]) => pass), gates: gates.map(([gate, pass]) => ({ gate, pass })) };
+}
+
 // Giới hạn kích thước diff theo policy.diffLimits.maxLines (0/undefined = không giới hạn).
 // Metric canonical (GPT-REV-031): churn review = additions + deletions — cả hai phía diff
 // đều tốn công review, chỉ đếm additions đã đánh giá thấp quy mô thật của PR.
@@ -365,3 +427,44 @@ export function evaluateDiffLimits(policy, diffText) {
   const churn = added + removed;
   return { over: limit > 0 && churn > limit, lines: churn, added, removed, limit };
 }
+
+// ---------------------------------------------------------------- reviewer↔coder rebuttal (GPT-REV-036 runtime)
+
+/**
+ * Pure: xử lý phản hồi coder trên một finding.
+ * Quy tắc: finding thiếu trường bắt buộc = malformed → reviewer phải xác nhận/cập nhật trước khi
+ * đem lại làm blocking; FIX không có evidence → finding vẫn mở; REBUT im lặng (không verdict) =
+ * còn mở; REJECTED mà chưa phân xử được → escalate-dispute (agent:gpt / status:blocked),
+ * CẤM coder tự đóng thread/tự gắn approved.
+ */
+export function resolveRebuttalOutcome({ coderVerdictKind, finding, reviewerVerdict = null, evidencePresent = false }) {
+  const REQUIRED = ['code', 'severity', 'evidence', 'risk'];
+  const malformed = !finding || REQUIRED.some((k) => finding[k] === undefined || finding[k] === null || finding[k] === '');
+  if (malformed) {
+    return { findingClosed: false, nextAction: 'request-reviewer-verdict', malformedFinding: true };
+  }
+  if (coderVerdictKind === 'CLINE-FIX') {
+    if (!evidencePresent) return { findingClosed: false, nextAction: 'keep-open-fix-applied' };
+    return { findingClosed: true, nextAction: 'close-finding' };
+  }
+  // CLINE-REBUT:
+  if (reviewerVerdict === 'ACCEPTED') return { findingClosed: true, nextAction: 'close-finding' };
+  if (reviewerVerdict === 'REJECTED') return { findingClosed: false, nextAction: 'escalate-dispute' };
+  return { findingClosed: false, nextAction: 'request-reviewer-verdict' };
+}
+
+// ---------------------------------------------------------------- task discovery (GPT-REV-037 runtime)
+
+/**
+ * Pure: ánh xạ kết quả khám phá task sang hành vi fail-closed theo minimalCommandDiscovery.
+ * zero → NO_TASK (không mutation); one → claim-exactly-one; many/conflict → blocked-no-guessing.
+ */
+export function planDiscoveryBehavior({ validTasks, conflicting = false }) {
+  if (conflicting || validTasks > 1) {
+    return { result: 'blocked-no-guessing', mutationAllowed: false };
+  }
+  if (validTasks === 1) return { result: 'claim-exactly-one', mutationAllowed: true };
+  return { result: 'NO_TASK', mutationAllowed: false };
+}
+
+

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node scripts/test-pure-logic.mjs",
-    "test:integration": "node scripts/test-integration-orchestrator.mjs && node scripts/test-integration-approval-gate.mjs",
+    "test:integration": "node scripts/test-integration-orchestrator.mjs && node scripts/test-integration-approval-gate.mjs && node scripts/test-integration-review-runtime.mjs",
+    "test:policy": "node scripts/test-effective-policy.mjs && node scripts/test-review-phases.mjs",
     "verify": "node scripts/full-verify.mjs",
     "test:baseline": "node scripts/extract-behavior-map.mjs && cp scripts/behavior-map-current.json scripts/behavior-map-baseline.json",
     "test:mcp": "node mcp-task-server/test-server.mjs",

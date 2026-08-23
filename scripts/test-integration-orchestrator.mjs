@@ -15,6 +15,16 @@ const POLICY = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
+  // reviewerPhases shape tối thiểu như canonical — thiếu → phase resolution fail-closed (blocked).
+  reviewerPhases: {
+    phases: {
+      transition: { runtimeWiringPrRequired: true, localReviewerCanApprove: false },
+      steadyState: {
+        activationRequires: ['runtimeWiringPrGptApproved', 'runtimeWiringPrMerged'],
+        localReviewerCanApprove: true,
+      },
+    },
+  },
 };
 
 const results = [];

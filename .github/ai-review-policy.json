@@ -1,9 +1,50 @@
 {
-  "policyVersion": "2026-08-23.3",
-  "description": "Policy canonical cho quy trinh AI PR Review (AI_PR_REVIEWER Issue #2, phan A - AI_PR_REVIEWER (orchestrator)). Tai lieu nguoi doc (AGENT_HANDOFF_PROTOCOL.md, AGENTS.md, .clinerules) PHAI tham chieu file nay, khong tu dinh nghia ban thu hai. Mo hinh reviewer hai giai doan (transition/steadyState) theo [USER-DECISION] tren Issue duongpdddic-droid/AI_PR_REVIEWER#2 (comment id 5381416494); contract reviewer-coder va discovery task fail-closed theo [GPT-REV-036]/[GPT-REV-037] (PR QLDA_DTXD#42).",
+  "policyVersion": "2026-08-23.5",
+  "description": "Policy CANONICAL DUY NHAT cho quy trinh AI PR Review (AI_PR_REVIEWER Issue #2 + Issue #5). Repo du an khong giu ban sao; tham chieu + pin version qua projectPolicyContract. Mo hinh reviewer hai giai doan (transition/steadyState) theo [USER-DECISION] tren Issue duongpdddic-droid/AI_PR_REVIEWER#2 (comment id 5381416494); contract reviewer-coder va discovery task fail-closed theo [GPT-REV-036]/[GPT-REV-037].",
   "scope": {
     "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD"],
-    "note": "Moi repo giu ban sao giong nhau cua file nay; policyVersion phai khop giua hai repo (lech tam thoi khi mot repo dang nang cap = known-drift, phai reconcile truoc khi dong Issue #2). requiredChecks co the khac ten vi CI moi repo dat ten job rieng."
+    "note": "Ban canonical duy nhat nam tai repo nay (.github/ai-review-policy.json). Repo du an (vd QLDA_DTXD) KHONG mirror file nay; chi giu .github/project-review-policy.json khai bao policySource + pinnedVersion + projectOverrides. Effective policy = global (canonical) + project overrides CHI tren allowedProjectOverrides."
+  },
+  "projectPolicyContract": {
+    "source": "[Issue #5] Centralize coder-reviewer protocol — AI_PR_REVIEWER la Single Source of Truth",
+    "model": "global+project",
+    "canonicalRepo": "duongpdddic-droid/AI_PR_REVIEWER",
+    "canonicalPath": ".github/ai-review-policy.json",
+    "projectConfigFile": ".github/project-review-policy.json",
+    "precedence": [
+      "canonical-global-rules",
+      "project-overrides-allowed-only"
+    ],
+    "precedenceNote": "Project override KHONG BAO GIO ghi de global invariant/quy trinh review; chi dinh nghia gia tri project-specific cho cac khoa trong allowedProjectOverrides.",
+    "allowedProjectOverrides": [
+      "requiredChecks",
+      "additionalTestCommands",
+      "protectedPaths",
+      "memoryBankRules",
+      "gasDeployRules"
+    ],
+    "invariantLockedKeys": [
+      "reviewerPhases",
+      "reviewerCoderContract",
+      "minimalCommandDiscovery",
+      "authority",
+      "blockingSeverities",
+      "severityTaxonomy",
+      "finalReviewer",
+      "maxReviewRounds",
+      "diffLimits",
+      "lateEventBehavior",
+      "approvalMarker",
+      "stateMachine",
+      "rules"
+    ],
+    "failClosed": {
+      "BLOCKED_CANONICAL_UNAVAILABLE": "Canonical policy khong doc duoc (missing/unreachable/unparseable) -> BLOCKED, khong approve, khong dung ban local cu.",
+      "BLOCKED_CANONICAL_INVALID": "Canonical policy khong pass validatePolicy -> BLOCKED.",
+      "BLOCKED_VERSION_MISMATCH": "projectConfig.policySource.pinnedVersion != canonical.policyVersion -> BLOCKED, phai bump pin cung canonical.",
+      "BLOCKED_INVALID_OVERRIDE": "Override khoa khong thuoc allowedProjectOverrides -> BLOCKED.",
+      "BLOCKED_INVARIANT_OVERRIDE": "Override cham vao invariantLockedKeys -> BLOCKED."
+    }
   },
   "requiredChecks": [
     "verify"

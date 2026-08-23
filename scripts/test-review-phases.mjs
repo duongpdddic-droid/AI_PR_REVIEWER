@@ -147,5 +147,25 @@ check('steadyState.activationRequires gồm runtimeWiringPrGptApproved + runtime
   (steady.activationRequires || []).includes('runtimeWiringPrGptApproved')
   && (steady.activationRequires || []).includes('runtimeWiringPrMerged'));
 
+// ---------------- [Issue #5 / GPT-REV-040] Canonical SSOT + projectPolicyContract ----------------
+console.log('P7 — [Issue #5] canonical single source of truth; project repo tham chiếu + pin, KHÔNG mirror');
+const ppc = policy.projectPolicyContract || {};
+check('projectPolicyContract.model = global+project', ppc.model === 'global+project');
+check('canonicalRepo trỏ đúng AI_PR_REVIEWER + canonicalPath',
+  ppc.canonicalRepo === 'duongpdddic-droid/AI_PR_REVIEWER' && ppc.canonicalPath === '.github/ai-review-policy.json');
+check('projectConfigFile khai báo .github/project-review-policy.json',
+  ppc.projectConfigFile === '.github/project-review-policy.json');
+check('allowedProjectOverrides không rỗng và KHÔNG chứa khóa bất biến',
+  (ppc.allowedProjectOverrides || []).length > 0
+  && (ppc.allowedProjectOverrides || []).every((k) => !(ppc.invariantLockedKeys || []).includes(k)));
+check('invariantLockedKeys khóa reviewerPhases/contract/discovery/authority/finalReviewer/maxReviewRounds/diffLimits',
+  ['reviewerPhases', 'reviewerCoderContract', 'minimalCommandDiscovery', 'authority', 'finalReviewer', 'maxReviewRounds', 'diffLimits']
+    .every((k) => (ppc.invariantLockedKeys || []).includes(k)));
+check('failClosed codes đầy đủ: UNAVAILABLE/INVALID/VERSION_MISMATCH/INVALID_OVERRIDE/INVARIANT_OVERRIDE',
+  ['BLOCKED_CANONICAL_UNAVAILABLE', 'BLOCKED_CANONICAL_INVALID', 'BLOCKED_VERSION_MISMATCH', 'BLOCKED_INVALID_OVERRIDE', 'BLOCKED_INVARIANT_OVERRIDE']
+    .every((c) => Object.keys(ppc.failClosed || {}).includes(c)));
+check('scope.note đã bỏ mô hình "mỗi repo giữ bản sao giống nhau"',
+  !/giu ban sao giong nhau/i.test((policy.scope.note || '')));
+
 console.log(`\ntest-review-phases: ${pass}/${total} PASS`);
 process.exit(pass === total ? 0 : 1);

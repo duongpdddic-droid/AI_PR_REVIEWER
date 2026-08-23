@@ -19,8 +19,9 @@ GitHub là kênh trao đổi chính thức giữa các tác nhân:
 
 ## 1a. Mô hình reviewer hai giai đoạn ([USER-DECISION] sau Issue #2)
 
-Canonical: `reviewerPhases` trong `.github/ai-review-policy.json` (policyVersion `2026-08-23.4`,
-đồng bộ giữa hai repo). Diễn giải:
+Canonical: `reviewerPhases` trong `.github/ai-review-policy.json` (policyVersion `2026-08-23.5`,
+canonical DUY NHẤT — Issue #5; repo dự án KHÔNG giữ bản sao, chỉ tham chiếu + pin qua
+`projectPolicyContract`). Diễn giải:
 
 ### Giai đoạn chuyển tiếp — `transition`
 
@@ -66,6 +67,24 @@ Thứ tự ưu tiên khi có mâu thuẫn:
 7. Nội dung chat tạm thời.
 
 Không dùng Telegram, file inbox cục bộ hoặc lịch sử chat làm nguồn sự thật chính cho code.
+
+### 2a. Effective policy — canonical + project config (Issue #5)
+
+- **Canonical duy nhất**: `.github/ai-review-policy.json` trong repo `AI_PR_REVIEWER` là nguồn
+  duy nhất cho toàn bộ quy tắc review toàn cầu (state machine, labels, vai trò, pha
+  transition/steady-state, contract reviewer↔coder, discovery, approval, fail-closed).
+- **Repo dự án** (vd `QLDA_DTXD`) KHÔNG giữ bản sao global policy/protocol; chỉ giữ:
+  - `.github/project-review-policy.json`: `policySource` (repo canonical + ref +
+    **pinnedVersion**) và `projectOverrides` CHỈ trên các khóa trong
+    `allowedProjectOverrides` (vd `requiredChecks`, `protectedPaths`, quy tắc GAS/deploy).
+  - Stub `docs/AGENT_HANDOFF_PROTOCOL.md` dẫn về canonical + pinned version.
+- **Effective policy = canonical global + project overrides (allowed only)**; precedence và
+  các mã fail-closed (`BLOCKED_CANONICAL_UNAVAILABLE`, `BLOCKED_CANONICAL_INVALID`,
+  `BLOCKED_VERSION_MISMATCH`, `BLOCKED_INVALID_OVERRIDE`, `BLOCKED_INVARIANT_OVERRIDE`) khai
+  báo trong `projectPolicyContract` của policy canonical.
+- Resolver: `scripts/effective-policy.mjs`; orchestrator/gpt-approval đọc policy qua
+  resolver (không còn đọc bản mirror trên target repo). Canonical không đọc được, version lệch
+  pin, hoặc override chạm invariant → **status:blocked**, không approve, không suy đoán.
 
 ## 3. Vai trò
 

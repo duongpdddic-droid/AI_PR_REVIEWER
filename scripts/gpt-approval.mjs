@@ -29,8 +29,9 @@ import { fileURLToPath } from 'node:url';
 import {
   AGENTS, LABELS, REVIEWER_LOCAL,
   buildApprovalMarker, canMutatePr, effectiveApproval, evaluateChecks,
-  isApprovalValid, parseApprovalMarkers, validateApprovalPayload,
+  isApprovalValid, parseApprovalMarkers, validateApprovalPayload, POLICY_PATH,
 } from './review-contract.mjs';
+import { CANONICAL_PATH, CANONICAL_REPO, PROJECT_CONFIG_FILE, resolveEffectivePolicy } from './effective-policy.mjs';
 
 // ---------------------------------------------------------------- IO adapter (DI cho test)
 
@@ -51,8 +52,17 @@ export function defaultIo() {
       return JSON.parse(gh(['pr', 'view', String(number), '--repo', repo, '--json', 'state,headRefOid,labels']));
     },
     getPolicy(repo, ref) {
-      const b64 = gh(['api', `repos/${repo}/contents/.github/ai-review-policy.json?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
-      return JSON.parse(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8'));
+      // 1) Canonical mirror legacy — backward-safe migration (Issue #5).
+      try {
+        const b64 = gh(['api', `repos/${repo}/contents/${POLICY_PATH}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
+        return JSON.parse(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8'));
+      } catch { /* 2) project config + resolver */ }
+      // 2) Effective policy = canonical (AI_PR_REVIEWER) + project config; lỗi → throw fail-closed.
+      const cfgB64 = gh(['api', `repos/${repo}/contents/${PROJECT_CONFIG_FILE}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
+      const projectConfig = JSON.parse(Buffer.from(String(cfgB64).replace(/\s+/g, ''), 'base64').toString('utf8'));
+      const canB64 = gh(['api', `repos/${CANONICAL_REPO}/contents/${CANONICAL_PATH}?ref=main`, '--jq', '.content']);
+      const canonical = JSON.parse(Buffer.from(String(canB64).replace(/\s+/g, ''), 'base64').toString('utf8'));
+      return resolveEffectivePolicy(canonical, projectConfig).policy;
     },
     getChecks(repo, number) {
       return JSON.parse(gh(['pr', 'checks', String(number), '--repo', repo, '--json', 'name,state']));

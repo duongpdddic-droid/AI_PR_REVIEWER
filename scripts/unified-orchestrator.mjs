@@ -26,8 +26,9 @@ import {
   AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, POLICY_PATH,
   canMutatePr, countReviewRounds, evaluateChecks, evaluateDiffLimits,
   gateOpenFindings, isStaleEvent, mutationKey, normalizeStatusLabels,
-  planApprovalDrift, planCiRouting, planPreReviewOutcome, scanDiffForSecrets,
+  planApprovalDrift, planCiRouting, planPreReviewOutcome, resolveReviewPhase, scanDiffForSecrets,
 } from './review-contract.mjs';
+import { CANONICAL_PATH, CANONICAL_REPO, PROJECT_CONFIG_FILE, resolveEffectivePolicy } from './effective-policy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -66,11 +67,20 @@ function defaultIo() {
       return String(out || '').split('\u0000');
     },
     getPolicy(repo, ref) {
+      // 1) Canonical mirror legacy (.github/ai-review-policy.json trên target repo) — backward-safe migration.
       try {
         const b64 = this.gh(['api', `repos/${repo}/contents/${POLICY_PATH}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
         return { policy: JSON.parse(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8')) };
+      } catch { /* 2) project config + resolver (Issue #5) */ }
+      try {
+        const cfgB64 = this.gh(['api', `repos/${repo}/contents/${PROJECT_CONFIG_FILE}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
+        const projectConfig = JSON.parse(Buffer.from(String(cfgB64).replace(/\s+/g, ''), 'base64').toString('utf8'));
+        const canB64 = this.gh(['api', `repos/${CANONICAL_REPO}/contents/${CANONICAL_PATH}?ref=main`, '--jq', '.content']);
+        const canonical = JSON.parse(Buffer.from(String(canB64).replace(/\s+/g, ''), 'base64').toString('utf8'));
+        return resolveEffectivePolicy(canonical, projectConfig); // ném PolicyResolutionError fail-closed
       } catch (e) {
-        return { policy: null, error: String((e && e.message) || e).slice(0, 200) };
+        const code = (e && e.code) || 'BLOCKED_CANONICAL_UNAVAILABLE';
+        return { policy: null, error: `${code}: ${String((e && e.message) || e).slice(0, 200)}` };
       }
     },
     getChecks(repo, number) {
@@ -243,6 +253,29 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
   }
 
   const { policy } = policyNow;
+
+  // Fail-closed hạ tầng policy (Issue #5 + GPT-REV-039): canonical/project resolution lỗi
+  // là lỗi hạ tầng review (BLOCKED_*), KHÔNG phải lỗi code của PR → status:blocked hỏi người
+  // dùng, KHÔNG rơi về "bản local cũ", KHÔNG trả coder như CI_UNKNOWN thông thường.
+  if (!policy && /BLOCKED_/.test(String(policyNow.error || ''))) {
+    const key = mutationKey({ repository: repo, prNumber: number, headSha, policyVersion: 'unknown', action: 'block-policy-unresolved' });
+    if (!hasMarkerFor(comments, key)) {
+      if (!dryRun) {
+        applyHandoff(io, repo, number, { addLabels: [LABELS.blocked], removeLabels: view.labels.filter((l) => l !== LABELS.blocked) });
+        io.postComment(repo, number, [
+          `⛔ **${String(policyNow.error).split(':')[0]}** — không phân giải được effective policy (canonical ${CANONICAL_REPO} + project config).`,
+          `Fail-closed theo \`projectPolicyContract\`: không approve, không tự suy đoán từ bản local cũ.`,
+          `${markerBlock(key)}`,
+        ].join('\n\n'));
+      }
+      result.mutated = true;
+    } else {
+      result.skipped = 'block-policy-unresolved đã phát hành cho HEAD này';
+    }
+    result.error = String(policyNow.error || '').slice(0, 200);
+    return result;
+  }
+
   const ciState = evaluateChecks(policy, io.getChecks(repo, number));
 
   // Chặn event muộn giữa chừng: đọc lại lần nữa để chắc chắn headSha chưa đổi.
@@ -295,6 +328,14 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     maxRounds: policy ? policy.maxReviewRounds : 3,
     decisionGate: pre.decisionGate,
   });
+  // Phase resolution runtime (GPT-REV-039): reviewerPhases hỏng trong effective policy →
+  // chặn blocked thay vì handoff/approval mù; transition giữ hành vi bàn giao GPT hiện tại.
+  const phaseInfo = resolveReviewPhase(policy || {}, { runtimeWiringMerged: false });
+  if (phaseInfo.phase === 'blocked') {
+    outcome.action = 'block-phase-unresolved';
+    outcome.addLabels = [LABELS.blocked];
+    outcome.removeLabels = [LABELS.reviewing, AGENTS.cline];
+  }
 
   const outKey = mutationKey({
     repository: repo, prNumber: number, headSha,
@@ -313,6 +354,9 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
         parts.push(`⛔ **DECISION GATE** — vượt giới hạn quy mô diff theo policy (\`diffLimits.maxLines\`, metric additions-plus-deletions): KHÔNG handoff approval, KHÔNG trả Cline như lỗi code thông thường. Chuyển \`status:blocked\` — người dùng quyết định tách PR nhỏ hơn hoặc ghi nhận ngoại lệ.`);
       }
     }
+    if (outcome.action === 'block-phase-unresolved') {
+      parts.push(`⛔ **BLOCKED_PHASE_UNRESOLVED** — \`reviewerPhases\` trong effective policy thiếu/mất shape: không thể xác định pha transition/steady-state an toàn. Fail-closed: KHÔNG handoff, KHÔNG approve. Sửa policy canonical rồi chạy lại.`);
+    }
     // Chỉ vòng request-fix mới tăng bộ đếm round; block/decision-gate không phải vòng fix.
     const roundMarker = outcome.action === 'request-fix' ? ` <!-- ai-pr-reviewer:round=${rounds + 1} -->` : '';
     const extraMarker = pre.verdict === 'PRE_REVIEW_PASS'
@@ -330,8 +374,9 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
       'handoff-gpt': `PRE_REVIEW_PASS — bàn giao GPT phê duyệt cuối (status:review-requested + agent:gpt).`,
       'request-fix': `PRE_REVIEW_FINDINGS (${pre.openBlocking.length} blocking) — trả Cline sửa qua nhãn PR.`,
       'block-decision-gate': `Diff vượt giới hạn policy (${pre.decisionGate}) — status:blocked, Decision Gate: người dùng quyết định.`,
+      'block-phase-unresolved': `reviewerPhases hỏng trong effective policy — status:blocked, fail-closed.`,
       'block': `Vượt tối đa ${rounds} vòng fix — status:blocked, cần người dùng quyết định.`,
-    }[outcome.action];
+    }[outcome.action] || `Kết quả pre-review: ${outcome.action}`;
     result.notified = io.notify('Kết quả pre-review', `${repo}#${number}: ${summary}`);
   }
   return result;
