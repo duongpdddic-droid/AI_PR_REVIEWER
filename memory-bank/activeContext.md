@@ -8,7 +8,8 @@
   - `planPhaseActivation`: nhận `wiringApprovalRecords` rich object → `effectiveApproval` xác thực GPT approval hợp lệ khóa head đã merge + policyVersion.
 - **Tests cập nhật sang rich comments**: C.4, C.5, C.19, C.20, C.22 (wiringApprovalRecords), approval-gate A.1–A.9 (`listPrComments` trả rich objects), orchestrator I.7 (approval hợp lệ phải có provenance).
 - **Gates**: full-verify **53/53**; test-pure-logic **169/169**; approval-gate **50/50**; orchestrator **73/73**; runtime **20 asserts**; review-phases **40/40**; effective-policy **21 asserts** — TẤT CẢ PASS.
-- Trạng thái: code hoàn tất + verify xanh. CHƯA commit/push (người dùng chưa yêu cầu). Tiếp tục chờ GPT re-review PR #4 (đã bàn giao [CLINE-FIX-046]).
+- **Bàn giao [CLINE-FIX-048] (23/08/2026 22:46–23:1x)**: commit `737774ab3d13943fb085189837d516c4152a81c4` (8 files, +147/−38) → push lên `chore/policy-sync-reviewer-phases`; remote PR #4 headRefOid khớp. PR body UTF-8 cập nhật (sửa lỗi `??` encode cũ bằng `--body-file`), read-back xác nhận KHÔNG còn `??`. Comment `issuecomment-5386953010`. Nhãn `agent:gpt` + `status:review-requested` (read-back PASS). CHƯA sửa PR QLDA_DTXD#42; KHÔNG merge/deploy.
+- Trạng thái: chờ GPT re-review PR #4.
 
 ## 23/08/2026 21:10 (ACT) — Fix [GPT-REV-046] activation authority ✅ BÀN GIAO LẠI GPT
 - **Finding**: [GPT-REV-046] Critical — activation marker chưa xác thực authority: `getPhaseActivationText` chỉ nối body comment (mất author/id), `parseActivationComment` không kiểm tra author được ủy quyền, wiringPr đúng phạm vi policy, PR merged thật, merge SHA khớp GitHub, GPT approval hợp lệ khóa head đã merge; `recordedBy` tự khai báo; test không đối chiếu dữ liệu GitHub thật.

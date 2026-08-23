@@ -6,7 +6,7 @@
 - [x] Sửa `gpt-approval.mjs` duplicate-detection (spread `r.marker`); `unified-orchestrator.mjs` `hasMarkerFor` + `countReviewRounds` trích `.body`; `planPhaseActivation` xác thực GPT approval qua rich `wiringApprovalRecords`.
 - [x] Tests cập nhật sang rich comments (C.4/C.5/C.19/C.20/C.22, approval-gate A.1–A.9, orchestrator I.7).
 - [x] Gates: full-verify **53/53**; pure-logic **169/169**; approval-gate **50/50**; orchestrator **73/73**; runtime **20 asserts**; review-phases **40/40**; effective-policy **21 asserts** — TẤT CẢ PASS.
-- [!] CHƯA commit/push (người dùng chưa yêu cầu). Tiếp tục chờ GPT re-review PR #4 ([CLINE-FIX-046] đã bàn giao).
+- [x] **Bàn giao [CLINE-FIX-048]**: commit `737774ab3d13943fb085189837d516c4152a81c4` (8 files, +147/−38) → push `chore/policy-sync-reviewer-phases`; remote PR #4 headRefOid khớp. PR body UTF-8 sửa lỗi `??` (read-back sạch); comment `issuecomment-5386953010`; nhãn `agent:gpt` + `status:review-requested`. CHƯA sửa PR #42; KHÔNG merge/deploy. Chờ GPT re-review.
 
 ## 23/08/2026 21:10 — Vòng fix [GPT-REV-046] activation authority — COMPLETED (chờ GPT re-review)
 
