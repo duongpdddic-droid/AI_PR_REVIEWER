@@ -1,3 +1,12 @@
+## 23/08/2026 09:05 (ACT) — [GPT-REV-039]: steady-state không tự kích hoạt ✅ BÀN GIAO LẠI GPT
+- **Finding**: GPT re-review AI_PR_REVIEWER#4 tại `c1fe477` — policy khai báo steady-state tự kích hoạt khi hai PR merge, trong khi runtime wiring chưa tồn tại; tests chỉ check khóa JSON.
+- **Chọn phương án (2) của GPT**: giữ PR #4 là contract trung gian; runtime wiring = acceptance criterion bắt buộc của Issue #2 (PR thứ ba riêng).
+- **Commit `f2abe47`** (3 files +29/−7): policy `.4` — `transition.runtimeWiringPrRequired: true`, `appliesWhile` viết lại theo điều kiện wiring; `steadyState.appliesAfter` = "PR wiring thứ ba được GPT duyệt đúng HEAD SHA và người dùng merge"; `activationRequires` = [runtimeWiringPrGptApproved, runtimeWiringPrMerged]. Protocol §1a + tiêu đề steadyState + bullet mới. Test P6 (+4 asserts) → 33/33.
+- **Verify**: verify 47/47; test 126/126; CI SUCCESS `f2abe47`. Đồng bộ QLDA#42 commit `64fa3db` (33/33, 14/14, 59, data PASS).
+- **Bàn giao**: `[CLINE-FIX-039]` (issuecomment-5383611705); labels read-back agent:gpt + review-requested; PR body HEAD cập nhật.
+- **Trạng thái**: IN PROGRESS — chờ GPT re-review #4 (`f2abe47`) + QLDA#42 (`64fa3db`). Sau approval: Bố merge → PR wiring runtime thứ ba.
+
+
 # Active Context (AI_PR_REVIEWER)
 
 ## Mục tiêu
