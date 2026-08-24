@@ -111,3 +111,12 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Triệu chứng**: test I.16 truyền `diff: null` vào mock `getPrDiff() { return opts.diff ?? '+const a = 1;' }` → null bị fallback thành diff mặc định, pre-review PASS, test fail ngược kỳ vọng.
 - **Nguyên nhân gốc**: toán tử `??` fallback cho CẢ null lẫn undefined; không phân biệt "không truyền" với "truyền giá trị null có chủ đích" (diff không đọc được).
 - **Tránh lặp lại**: mock có giá trị mặc định cần phân biệt sentinel — dùng `(opts.diff === undefined ? DEFAULT : opts.diff)`; khi cần mô phỏng "dữ liệu không đọc được", truyền `null` tường minh và assert đường fail-closed tương ứng.
+
+## L-019 (24/08/2026) — Không báo xanh / hand-off khi working tree chưa qua hết gate; JSON dư dấu phẩy cuối làm parse fail
+- **Triệu chứng**: commit `8f81c36` ([CLINE-FIX-049]) + đăng comment `agent:gpt`/`status:review-requested` rồi mới chạy test → ĐỎ: `JSON.parse` policy fail tại position 4066; nhiều test approval fail do test truyền param `approvers` (đã đổi tên `gptApprovers`) và `JSON.stringify(mkGpt())` bọc thêm marker; C.23 build marker thiếu `prNumber` → `isApprovalValid` báo "sai PR number".
+- **Nguyên nhân gốc**: (1) xoá block `approvers` khỏi policy JSON nhưng để lại dấu phẩy cuối (`"deploy": "user",` rồi `}`) → JSON không hợp lệ (policy CRLF, không có formatter tự động). (2) Tên param trong test lệch với hàm (`approvers` vs `gptApprovers`). (3) `buildApprovalMarker` TRẢ CHUỖI marker; `JSON.stringify()` thêm lần nữa sinh quote thừa làm `parseApprovalMarkers` bỏ qua. (4) Hand-off (comment + label) thực hiện TRƯỚC khi verify xanh trên working tree.
+- **Tránh lặp lại**:
+  1. Sau mọi sửa JSON config (policy): chạy `node -e "JSON.parse(require('fs').readFileSync('.github/ai-review-policy.json','utf8'))"` (hoặc chạy `pnpm test:effective-policy` vốn parse policy) TRƯỚC commit — full-verify chỉ `node --check`, KHÔNG parse JSON.
+  2. Sửa tên param hàm → cập nhật MỌI caller/test cùng lúc; chạy toàn bộ gate (pure-logic + effective-policy + approval-gate + orchestrator) chứ không chỉ 1 file.
+  3. Marker từ `buildApprovalMarker` dùng NGUYÊN CHUỖI (không `JSON.stringify`); build marker luôn đủ mọi trường bắt buộc (`prNumber`, `decisionId`, `ciEvidence`, `reviewedAt`, ...).
+  4. Quy trình: verify XANH trên working tree → commit → (tùy）push → MỚI hand-off comment/label. Không đánh dấu COMPLETED hay báo GPT re-review khi còn test ĐỎ.
