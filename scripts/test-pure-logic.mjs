@@ -128,6 +128,11 @@ eq('C.3 checks null', evaluateChecks(policy, null), 'unknown');
 eq('C.3 policy null', evaluateChecks(null, { checks: [] }), 'unknown');
 eq('C.3 policy sai shape', evaluateChecks({ policyVersion: 'x' }, { checks: [{ name: 'verify', state: 'SUCCESS' }] }), 'unknown');
 eq('C.3 requiredChecks rỗng → missing', evaluateChecks({ ...policy, requiredChecks: [] }, { checks: [{ name: 'verify', state: 'SUCCESS' }] }), 'missing');
+// [CLINE-FIX-050] shape thật của `gh pr checks --json name,state` là mảng phẳng — phải pass như wrapper.
+eq('C.3 checks pass (mảng phẳng gh)', evaluateChecks(policy, [{ name: 'verify', state: 'SUCCESS' }]), 'pass');
+eq('C.3 checks fail (mảng phẳng gh)', evaluateChecks(policy, [{ name: 'verify', state: 'FAILURE' }]), 'fail');
+eq('C.3 checks thiếu required (mảng phẳng gh)', evaluateChecks(policy, [{ name: 'lint', state: 'SUCCESS' }]), 'missing');
+
 eq('C.3 validatePolicy ok', validatePolicy(policy).ok, true);
 eq('C.3 validatePolicy thiếu version', validatePolicy({ requiredChecks: [], maxReviewRounds: 1, finalReviewer: 'x' }).ok, false);
 
