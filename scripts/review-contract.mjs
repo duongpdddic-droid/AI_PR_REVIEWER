@@ -104,8 +104,11 @@ export function evaluateChecks(policy, checksDetail) {
   if (!checksDetail || typeof checksDetail !== 'object') return 'unknown';
   const required = policy.requiredChecks.map((c) => String(c).trim()).filter(Boolean);
   if (required.length === 0) return 'missing'; // policy không khai báo check → coi như không có CI
+  // [CLINE-FIX-050] gh pr checks --json trả MẢNG phẳng; test/mock dùng wrapper {checks:[...]}.
+  // Chấp nhận cả 2 shape — trước đây mảng thật làm byName rỗng → CI 'missing' sai trên production.
+  const checkList = Array.isArray(checksDetail) ? checksDetail : (checksDetail.checks || []);
   const byName = new Map();
-  for (const c of checksDetail.checks || []) byName.set(c.name, c.state);
+  for (const c of checkList) byName.set(c.name, c.state);
   let anyPending = false;
   for (const name of required) {
     const st = byName.get(name);

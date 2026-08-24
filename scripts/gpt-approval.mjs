@@ -66,8 +66,19 @@ export function defaultIo() {
       return JSON.parse(gh(['pr', 'checks', String(number), '--repo', repo, '--json', 'name,state']));
     },
     listPrComments(repo, number) {
-      const out = gh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate', '--jq', '[.[].body] | join("\\u0000")']);
-      return String(out || '').split('\u0000');
+      // [CLINE-FIX-051] Trả comment RICH {id, user:{login}, created_at, body} — bản legacy
+      // ([.[].body] join) làm mọi marker thiếu provenance → read-back approval luôn FAIL.
+      const out = gh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate',
+        '--jq', `[.[] | ((.id // "") | tostring) + " " + ((.user.login) // "") + " " + ((.created_at) // "-") + " " + ((.body // "") | @base64)] | join("\\n")`]);
+      return String(out || '').split('\n').filter(Boolean).map((line) => {
+        const parts = line.split(' ');
+        return {
+          id: parts[0],
+          user: { login: parts[1] },
+          created_at: parts[2],
+          body: Buffer.from(parts.slice(3).join(' '), 'base64').toString('utf8'),
+        };
+      });
     },
     postComment(repo, number, body) {
       return gh(['pr', 'comment', String(number), '--repo', repo, '--body-file', '-'], { input: body });
