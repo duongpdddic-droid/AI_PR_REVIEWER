@@ -17,6 +17,43 @@ GitHub là kênh trao đổi chính thức giữa các tác nhân:
   GitHub Actions kiểm tra độc lập.
 - **Người dùng giữ quyền merge và deploy** — không agent nào tự thực hiện.
 
+## 1a. Mô hình reviewer hai giai đoạn ([USER-DECISION] sau Issue #2)
+
+Canonical: `reviewerPhases` trong `.github/ai-review-policy.json` (policyVersion `2026-08-23.5`,
+canonical DUY NHẤT — Issue #5; repo dự án KHÔNG giữ bản sao, chỉ tham chiếu + pin qua
+`projectPolicyContract`). Diễn giải:
+
+### Giai đoạn chuyển tiếp — `transition`
+
+- Hiệu lực khi Issue `duongpdddic-droid/AI_PR_REVIEWER#2` chưa hoàn thành: runtime wiring
+  (`unified-orchestrator.mjs` / `review-contract.mjs` / `gpt-approval.mjs`) chưa được triển khai
+  qua PR riêng được GPT duyệt và merge (`transition.runtimeWiringPrRequired = true`).
+- GPT (`agent:gpt`) là reviewer cuối cho hai PR triển khai Issue #2; approval chỉ do GPT phát,
+  relay bởi người dùng qua `scripts/gpt-approval.mjs`.
+- `localReviewerCanApprove: false` — AI_PR_REVIEWER không tự chứng nhận thay đổi kiến trúc
+  reviewer của chính nó.
+
+### Trạng thái vận hành — `steadyState` (chỉ hiệu lực sau khi PR runtime wiring được GPT duyệt + merge)
+
+- Reviewer mặc định là `reviewer:local`; được phép approve khi đủ TOÀN BỘ
+  `approvalRequiresAllGates` (6 gate: CI pass đủ required checks, semantic review thật,
+  approval khóa HEAD SHA + policyVersion, không còn finding chặn, policy hợp lệ,
+  read-after-write thành công).
+- GPT không re-review từng PR; chỉ escalation theo `escalateToGptWhen`
+  (5 trường hợp) hoặc hậu kiểm/chọn mẫu.
+- Bất kỳ thiếu bằng chứng/xung đột/nghi ngờ → fail-closed: chuyển GPT hoặc `status:blocked`.
+- **Steady-state KHÔNG tự kích hoạt** khi hai PR triển khai Issue #2 được merge
+  (`steadyState.activationRequires = [runtimeWiringPrGptApproved, runtimeWiringPrMerged]`,
+  `transition.runtimeWiringPrRequired = true`): cần PR thứ ba wiring runtime
+  (`unified-orchestrator.mjs` / `review-contract.mjs` / `gpt-approval.mjs`) được GPT duyệt đúng
+  HEAD SHA và người dùng merge — acceptance criterion bắt buộc để đóng Issue #2.
+
+Bất biến mọi pha (`invariantsAllPhases`): CI PASS không approve; checks rỗng fail-closed;
+approval khóa full HEAD SHA + policyVersion; HEAD đổi → vô hiệu; finding Critical/Important
+còn mở chặn approval; PR draft/closed/merged/event muộn không bao giờ được approve;
+nhiều nhãn trạng thái/mutation dở/read-back sai → blocked; không nuốt lỗi GitHub/Telegram/model;
+người dùng luôn quyết merge/deploy.
+
 ## 2. Nguồn sự thật
 
 Thứ tự ưu tiên khi có mâu thuẫn:
@@ -30,6 +67,24 @@ Thứ tự ưu tiên khi có mâu thuẫn:
 7. Nội dung chat tạm thời.
 
 Không dùng Telegram, file inbox cục bộ hoặc lịch sử chat làm nguồn sự thật chính cho code.
+
+### 2a. Effective policy — canonical + project config (Issue #5)
+
+- **Canonical duy nhất**: `.github/ai-review-policy.json` trong repo `AI_PR_REVIEWER` là nguồn
+  duy nhất cho toàn bộ quy tắc review toàn cầu (state machine, labels, vai trò, pha
+  transition/steady-state, contract reviewer↔coder, discovery, approval, fail-closed).
+- **Repo dự án** (vd `QLDA_DTXD`) KHÔNG giữ bản sao global policy/protocol; chỉ giữ:
+  - `.github/project-review-policy.json`: `policySource` (repo canonical + ref +
+    **pinnedVersion**) và `projectOverrides` CHỈ trên các khóa trong
+    `allowedProjectOverrides` (vd `requiredChecks`, `protectedPaths`, quy tắc GAS/deploy).
+  - Stub `docs/AGENT_HANDOFF_PROTOCOL.md` dẫn về canonical + pinned version.
+- **Effective policy = canonical global + project overrides (allowed only)**; precedence và
+  các mã fail-closed (`BLOCKED_CANONICAL_UNAVAILABLE`, `BLOCKED_CANONICAL_INVALID`,
+  `BLOCKED_VERSION_MISMATCH`, `BLOCKED_INVALID_OVERRIDE`, `BLOCKED_INVARIANT_OVERRIDE`) khai
+  báo trong `projectPolicyContract` của policy canonical.
+- Resolver: `scripts/effective-policy.mjs`; orchestrator/gpt-approval đọc policy qua
+  resolver (không còn đọc bản mirror trên target repo). Canonical không đọc được, version lệch
+  pin, hoặc override chạm invariant → **status:blocked**, không approve, không suy đoán.
 
 ## 3. Vai trò
 
@@ -141,20 +196,54 @@ Label vai trò:
 
 ## 6. Quy tắc review
 
-Mỗi finding của pre-reviewer/reviewer phải có:
+Contract máy đọc được canonical: `reviewerCoderContract` trong `.github/ai-review-policy.json`.
+Mục này diễn giải; khi mâu thuẫn → policy thắng.
 
-- Mã: `[LOCAL-REV-001]`, `[LOCAL-REV-002]`... (GPT dùng `[GPT-REV-NNN]` chỉ khi được người dùng lệnh review).
-- Mức độ theo taxonomy canonical trong policy (`severityTaxonomy`): Critical | Important | Suggestion — Critical và Important là blocking; finding Important còn mở cũng chặn handoff/approval (GPT-REV-034).
-- File và khu vực liên quan; vấn đề đã xác nhận (evidence); rủi ro.
-- Yêu cầu sửa có thể kiểm chứng + điều kiện đóng finding.
+Mỗi finding của pre-reviewer/reviewer phải có ĐỦ 5 trường bắt buộc theo policy
+(`findingRequiredFields`):
 
-Cline phản hồi theo mẫu:
+- `code`: `[LOCAL-REV-NNN]` / `[GPT-REV-NNN]` (kèm `[GPT-RULE-NNN]`/`[LOCAL-RULE-NNN]` nếu trích quy tắc).
+- `severity`: Critical | Important | Suggestion (taxonomy `severityTaxonomy`; Critical/Important blocking).
+- `evidence`: file/khu vực/vấn đề đã xác nhận (không suy đoán).
+- `risk`: rủi ro hoặc hành vi sai.
+- `expectedOutcome`: yêu cầu sửa kiểm chứng được + điều kiện đóng finding.
 
-- Mã: `[CLINE-FIX-001]`; commit đã sửa; nội dung sửa; lệnh kiểm tra; kết quả kiểm tra.
-- Trạng thái `READY_FOR_REREVIEW` — orchestrator sẽ pre-review lại tự động sau push mới.
+Finding thiếu bất kỳ trường nào = malformed-finding: Cline phản hồi `[CLINE-REBUT-NNN]`
+với lý do `malformed-finding`; reviewer phải bổ sung/cập nhật finding trước khi nó tiếp tục blocking.
 
-Không resolve review thread nếu chưa có commit và bằng chứng tương ứng.
+Cline phản hồi theo MỘT trong hai verdict hợp lệ (`coderVerdicts`):
+
+- `[CLINE-FIX-NNN]`: đã sửa — commit, nội dung sửa, lệnh kiểm tra, kết quả kiểm tra,
+  trạng thái `READY_FOR_REREVIEW`.
+- `[CLINE-REBUT-NNN]`: phản biện bằng bằng chứng cụ thể (code/API/test/số liệu).
+  REBUT không được dùng để tự resolve thread khi chưa có commit/bằng chứng tương ứng
+  (`coderSelfResolveForbidden: true`).
+
+Reviewer BẮT BUỘC xử lý từng `[CLINE-REBUT-NNN]` với một verdict
+(`reviewerRebuttalVerdicts`): `ACCEPTED` (đóng finding, ghi nhận lập luận) hoặc
+`REJECTED` (trả lời từng điểm bằng evidence). Im lặng = finding còn mở.
+
+Bất đồng không phân xử được sau một vòng `REBUT → REJECTED` → fail-closed
+(`unresolvedDisputeBehavior`): chuyển `agent:gpt` hoặc `status:blocked` hỏi người dùng.
+Cline KHÔNG tự đóng thread, KHÔNG tự gắn nhãn approved.
 Tối đa `maxReviewRounds` vòng fix cho một HEAD; vượt → `status:blocked`.
+
+### 6a. Lệnh tối thiểu và task discovery fail-closed
+
+Canonical: `minimalCommandDiscovery` trong policy. Diễn giải:
+
+- Hai lệnh tối thiểu **"Xử lý tiếp."** và **"Thực thi tiếp."** TƯƠNG ĐƯƠNG tuyệt đối
+  (`equivalentTo: discover-and-resume`): Coder và Reviewer hiểu cùng một nghĩa —
+  tự khám phá trạng thái rồi tiếp tục. Người dùng KHÔNG phải nhớ số Issue/PR.
+- Thứ tự tự đối chiếu bắt buộc (`discoveryOrder`): repo/origin + worktree → Memory Bank
+  (`activeContext.md`, `progress.md`) → GitHub (Issue/PR/HEAD/CI/findings).
+- Hành vi theo số lượng task (`zeroTaskBehavior` / `oneTaskBehavior` /
+  `manyOrConflictingTaskBehavior`):
+  - Zero → `NO_TASK`, không mutation.
+  - One → claim đúng một task (sau preflight PASS) rồi thực thi.
+  - Many/mâu thuẫn → `status:blocked` hỏi người dùng; KHÔNG đoán, KHÔNG tự chọn.
+- Stale checkpoint trong Memory Bank KHÔNG bao giờ thắng trạng thái GitHub thật
+  (Issue đã đổi labels/PR đã merge → trạng thái GitHub thắng; cập nhật Memory Bank sau).
 
 ## 7. Quality Gate
 

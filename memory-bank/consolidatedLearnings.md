@@ -76,6 +76,47 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Tránh lặp lại**: dựng chuỗi pattern bằng phép nối `'… `' + 'sha`'` thay vì gõ backtick kép; SAU MỌI edit PR body/issue chạy lại `gh pr view --json body` và Select-String kiểm tra chuỗi đích tồn tại trước khi coi là xong; heading markdown phải có dòng trống phía trước.
 
 ## L-014 (23/08/2026) — Mock io dùng `??` fallback nuốt sentinel `null`
+
+## L-015 (23/08/2026) — PowerShell here-string biến backtick+chữ số thành NUL/BEL, hỏng comment GitHub
+- **Triệu chứng**: Comment PR đăng từ `--body-file` chứa ký tự rác: `` `02290ba `` → `\0` + mất chữ số; `` `agent `` → BEL (`^G`) thay chuỗi. Read-back thấy `^@2290ba`, `^G82558c`.
+- **Nguyên nhân gốc**: Trong PowerShell here-string/string, backtick là escape char: `` `0 `` = NUL, `` `a `` = BEL, `` `r `` = CR. Mọi backtick markdown đứng TRƯỚC chữ số hoặc a/f/n/r/t/v đều bị biến thành control char.
+- **Tránh lặp lại**:
+  1. Nội dung markdown có inline-code chứa SHA/số: KHÔNG viết qua PS string literal — ghi bằng editor tool ra file tạm rồi `--body-file`.
+  2. Nếu phải dùng PS: thay backtick bằng `` `" `` không được (vẫn escape) — dùng `[char]0x60` nối chuỗi hoặc node script.
+  3. Sau mọi PATCH/POST comment: read-back body qua `gh api ... --jq .body` và kiểm NUL/BEL trước khi coi là xong.
+
+## L-016 (23/08/2026) — `[IO.File]::ReadAllText/WriteAllText` path tương đối dùng cwd của .NET, KHÔNG phải `Set-Location`
+- **Triệu chứng**: Đọc `.clinerules/01-execution-workflow.md` để replace nhưng `IndexOf` trả -1 dù `Select-String` thấy nội dung; một lệnh WriteAllText suýt ghi đè file cùng tên ở repo khác.
+- **Nguyên nhân gốc**: .NET Framework API dùng process working directory (thư mục khởi động terminal), trong khi `Set-Location` chỉ đổi location của PowerShell provider.
+- **Tránh lặp lại**:
+  1. Mọi thao tác file .NET ([IO.File]::*, [IO.Directory]::*) BẮT BUỘC dùng đường dẫn TUYỆT ĐỐI.
+  2. Trước khi WriteAllText có điều kiện, assert `$t.Contains($old)` và chỉ ghi khi match; log kết quả replace.
+  3. Sau đợt sửa hàng loạt, chạy `git status --porcelain` cả hai workspace để phát hiện file lạ.
+
+## L-018 (23/08/2026) — Đường dẫn policy `reviewerPhases.phases.steadyState`, không phải `reviewerPhases.steadyState`
+- **Triệu chứng**: test runtime fail `Cannot read properties of undefined (reading 'activationEvidence')` khi đọc `canonical.reviewerPhases.steadyState.activationEvidence` sau khi viết code mới.
+- **Nguyên nhân gốc**: schema policy lồng 2 cấp — `reviewerPhases.phases.{transition|steadyState}`; `reviewerPhases.steadyState` không tồn tại. Code mới (orchestrator + test) suy diễn đường dẫn ngắn.
+- **Tránh lặp lại**:
+  1. Trước khi truy cập key policy mới, mở `.github/ai-review-policy.json` xem đúng cấp lồng (đọc đoạn JSON thật, không nhớ theo tên finding).
+  2. Test integration đọc policy THẬT từ file sẽ lộ sai path ngay ở lần chạy đầu — chạy `pnpm test:integration` trước khi kết luận xong.
+
+## L-017 (23/08/2026) — Pin cross-repo policy theo branch/ref di động gây CI fail khi hai PR lệch merge
+- **Triệu chứng**: CI QLDA fail `BLOCKED_VERSION_MISMATCH`/không tìm thấy resolver sau migration Issue #5: workflow checkout canonical `ref: main`, nhưng policy `.5` + `effective-policy.mjs` còn nằm trên PR AI_PR_REVIEWER#4 chưa merge.
+- **Nguyên nhân gốc**: "Pin" trỏ `main` là tham chiếu DI ĐỘNG — không đảm bảo version khớp `pinnedVersion`; fail-closed hoạt động đúng nhưng chặn CI hợp lệ.
+- **Tránh lặp lại**:
+  1. Cross-repo pin BẮT BUỘC dùng full 40-hex commit SHA (bất biến) trong `policySource.ref` + checkout action cùng ref; bump version = PR cập nhật pin ở cả hai repo cùng lúc.
+  2. Resolver import từ nguồn canonical chỉ khi tồn tại (`existsSync`) — cần fallback embedded tối thiểu cho giai đoạn chuyển tiếp, đánh dấu `ponytail:` + điều kiện bỏ.
+  3. Test resolution phải chạy được độc lập trạng thái merge repo kia; drift/version check vẫn fail-closed.
+
 - **Triệu chứng**: test I.16 truyền `diff: null` vào mock `getPrDiff() { return opts.diff ?? '+const a = 1;' }` → null bị fallback thành diff mặc định, pre-review PASS, test fail ngược kỳ vọng.
 - **Nguyên nhân gốc**: toán tử `??` fallback cho CẢ null lẫn undefined; không phân biệt "không truyền" với "truyền giá trị null có chủ đích" (diff không đọc được).
 - **Tránh lặp lại**: mock có giá trị mặc định cần phân biệt sentinel — dùng `(opts.diff === undefined ? DEFAULT : opts.diff)`; khi cần mô phỏng "dữ liệu không đọc được", truyền `null` tường minh và assert đường fail-closed tương ứng.
+
+## L-019 (24/08/2026) — Không báo xanh / hand-off khi working tree chưa qua hết gate; JSON dư dấu phẩy cuối làm parse fail
+- **Triệu chứng**: commit `8f81c36` ([CLINE-FIX-049]) + đăng comment `agent:gpt`/`status:review-requested` rồi mới chạy test → ĐỎ: `JSON.parse` policy fail tại position 4066; nhiều test approval fail do test truyền param `approvers` (đã đổi tên `gptApprovers`) và `JSON.stringify(mkGpt())` bọc thêm marker; C.23 build marker thiếu `prNumber` → `isApprovalValid` báo "sai PR number".
+- **Nguyên nhân gốc**: (1) xoá block `approvers` khỏi policy JSON nhưng để lại dấu phẩy cuối (`"deploy": "user",` rồi `}`) → JSON không hợp lệ (policy CRLF, không có formatter tự động). (2) Tên param trong test lệch với hàm (`approvers` vs `gptApprovers`). (3) `buildApprovalMarker` TRẢ CHUỖI marker; `JSON.stringify()` thêm lần nữa sinh quote thừa làm `parseApprovalMarkers` bỏ qua. (4) Hand-off (comment + label) thực hiện TRƯỚC khi verify xanh trên working tree.
+- **Tránh lặp lại**:
+  1. Sau mọi sửa JSON config (policy): chạy `node -e "JSON.parse(require('fs').readFileSync('.github/ai-review-policy.json','utf8'))"` (hoặc chạy `pnpm test:effective-policy` vốn parse policy) TRƯỚC commit — full-verify chỉ `node --check`, KHÔNG parse JSON.
+  2. Sửa tên param hàm → cập nhật MỌI caller/test cùng lúc; chạy toàn bộ gate (pure-logic + effective-policy + approval-gate + orchestrator) chứ không chỉ 1 file.
+  3. Marker từ `buildApprovalMarker` dùng NGUYÊN CHUỖI (không `JSON.stringify`); build marker luôn đủ mọi trường bắt buộc (`prNumber`, `decisionId`, `ciEvidence`, `reviewedAt`, ...).
+  4. Quy trình: verify XANH trên working tree → commit → (tùy）push → MỚI hand-off comment/label. Không đánh dấu COMPLETED hay báo GPT re-review khi còn test ĐỎ.

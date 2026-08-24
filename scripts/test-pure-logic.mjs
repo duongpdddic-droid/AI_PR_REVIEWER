@@ -18,11 +18,17 @@ import {
   normalizeStatusLabels, validatePolicy, evaluateChecks, planCiRouting,
   planPreReviewOutcome, buildApprovalMarker, parseApprovalMarkers, isApprovalValid,
   effectiveApproval, planApprovalDrift, isStaleEvent, canMutatePr, mutationKey,
+  collectActivationRecords, planPhaseActivation,
   countReviewRounds, gateOpenFindings, scanDiffForSecrets, evaluateDiffLimits,
   validateApprovalPayload,
+  LOCAL_APPROVAL_REQUIRED_FIELDS, parseActivationComment, scanDuplicateObjectKeys,
+  resolveRebuttalOutcome, steadyLocalApproval,
 } from './review-contract.mjs';
 import { runSemanticPreReview } from './unified-orchestrator.mjs';
 import { withRetry } from './tg-notify-core.mjs';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const checks = [];
 const eq = (name, got, want) => checks.push({ name, ok: got === want, got, want });
@@ -37,6 +43,7 @@ const policy = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
+  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-user'], localApprovalCommentAuthors: ['user'] },
 };
 
 // escapeHtml: escape & < > cho parse_mode=HTML, giữ tiếng Việt nguyên.
@@ -132,31 +139,43 @@ eq('C.3 validatePolicy thiếu version', validatePolicy({ requiredChecks: [], ma
     decisionId: 'dec-c4', openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z',
   });
   tru('C.4 marker html comment', marker.startsWith('<!-- ai-review-approval:{') && marker.endsWith('-->'));
-  const recs = parseApprovalMarkers([`nội dung thường ${marker} đuôi`]);
+  const recs = parseApprovalMarkers([{ id: 'c1', user: { login: 'user' }, created_at: '2026-08-22T00:00:00Z', body: `nội dung thường ${marker} đuôi` }]);
   eq('C.4 parse 1 record', recs.length, 1);
-  eq('C.4 parse sha', recs[0].headSha, SHA);
-  eq('C.4 valid cùng SHA', isApprovalValid(recs[0], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion }).valid, true);
-  eq('C.4 invalid khác SHA', isApprovalValid(recs[0], { headSha: SHA2, repository: 'o/r', prNumber: 7 }).valid, false);
-  tru('C.4 invalid nêu lý do HEAD', String(isApprovalValid(recs[0], { headSha: SHA2 }).reason).includes('HEAD'));
-  eq('C.4 invalid khác reviewer', isApprovalValid({ ...recs[0], reviewer: 'agent:cline' }, { headSha: SHA }).valid, false);
-  eq('C.4 invalid policy lệch', isApprovalValid(recs[0], { headSha: SHA, policyVersion: 'khác' }).valid, false);
-  eq('C.4 invalid còn blocking', isApprovalValid({ ...recs[0], openBlockingFindings: 2 }, { headSha: SHA }).valid, false);
-  eq('C.4 invalid thiếu decisionId', isApprovalValid({ ...recs[0], decisionId: '' }, { headSha: SHA }).valid, false);
+  eq('C.4 parse sha', recs[0].marker.headSha, SHA);
+  const rec0 = { ...recs[0].marker, commentId: recs[0].commentId, authorLogin: recs[0].authorLogin };
+  eq('C.4 valid cùng SHA', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion, gptApprovers: ['user'] }).valid, true);
+  eq('C.4 invalid khác SHA', isApprovalValid(rec0, { headSha: SHA2, repository: 'o/r', prNumber: 7 }).valid, false);
+  tru('C.4 invalid nêu lý do HEAD', String(isApprovalValid(rec0, { headSha: SHA2 }).reason).includes('HEAD'));
+  eq('C.4 invalid khác reviewer', isApprovalValid({ ...rec0, reviewer: 'agent:cline' }, { headSha: SHA }).valid, false);
+  eq('C.4 invalid policy lệch', isApprovalValid(rec0, { headSha: SHA, policyVersion: 'khác' }).valid, false);
+  eq('C.4 invalid còn blocking', isApprovalValid({ ...rec0, openBlockingFindings: 2 }, { headSha: SHA }).valid, false);
+  eq('C.4 invalid thiếu decisionId', isApprovalValid({ ...rec0, decisionId: '' }, { headSha: SHA }).valid, false);
+  // [GPT-REV-049] allowlist fail-closed: actor không thuộc approvers bị từ chối.
+  eq('C.4 invalid actor không thuộc approvers', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7, gptApprovers: ['someone-else'] }).valid, false);
+  tru('C.4 invalid nêu lý do UNAUTHORIZED_ACTOR', String(isApprovalValid(rec0, { headSha: SHA, gptApprovers: ['someone-else'] }).reason).includes('UNAUTHORIZED_ACTOR'));
+  eq('C.4 invalid approvers rỗng/không truyền', isApprovalValid(rec0, { headSha: SHA, repository: 'o/r', prNumber: 7 }).valid, false);
+  tru('C.4 invalid nêu lý do approvers thiếu', String(isApprovalValid(rec0, { headSha: SHA }).reason).includes('UNAUTHORIZED_ACTOR'));
   eq('C.4 marker hỏng bỏ qua', parseApprovalMarkers(['<!-- ai-review-approval:{hỏng -->']).length, 0);
   const old = buildApprovalMarker({ ...{ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-old', openBlockingFindings: 0 }, reviewedAt: '2026-08-21T00:00:00Z' });
+  const oldC = { id: 'old1', user: { login: 'gpt-user' }, created_at: '2026-08-21T00:00:00Z', body: old };
+  const newC = { id: 'new1', user: { login: 'gpt-user' }, created_at: '2026-08-22T00:00:00Z', body: marker };
   eq('C.4 effective chọn mới nhất',
-    effectiveApproval([old, marker], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion }).reviewedAt,
+    effectiveApproval([oldC, newC], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: policy.policyVersion, gptApprovers: ['gpt-user'] }).reviewedAt,
     '2026-08-22T00:00:00Z');
 }
 
 // C.5 approval-drift.
 {
-  const d = planApprovalDrift({ labels: ['status:approved'], comments: ['comment thường'], headSha: SHA, repository: 'o/r', prNumber: 7 });
+  const plain = { id: 'p1', user: { login: 'user' }, created_at: '-', body: 'comment thường' };
+  const d = planApprovalDrift({ labels: ['status:approved'], comments: [plain], headSha: SHA, repository: 'o/r', prNumber: 7, gptApprovers: ['gpt-user'] });
   eq('C.5 drift phát hiện', d.drift, true);
   tru('C.5 drift gỡ approved', d.removeLabels.includes('status:approved'));
   tru('C.5 drift thêm review-requested + gpt', d.addLabels.includes('status:review-requested') && d.addLabels.includes('agent:gpt'));
   const marker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: policy.policyVersion, decisionId: 'dec-c5', openBlockingFindings: 0, reviewedAt: '2026-08-22T00:00:00Z' });
-  eq('C.5 approval hợp lệ → không drift', planApprovalDrift({ labels: ['status:approved'], comments: [marker], headSha: SHA, repository: 'o/r', prNumber: 7 }).drift, false);
+  const richMarker = { id: 'm1', user: { login: 'gpt-user' }, created_at: '2026-08-22T00:00:00Z', body: marker };
+  eq('C.5 approval hợp lệ → không drift', planApprovalDrift({ labels: ['status:approved'], comments: [richMarker], headSha: SHA, repository: 'o/r', prNumber: 7, gptApprovers: ['gpt-user'] }).drift, false);
+  // [GPT-REV-049] actor không thuộc approvers → approval KHÔNG hợp lệ → drift phát hiện.
+  eq('C.5 actor không thuộc approvers → drift', planApprovalDrift({ labels: ['status:approved'], comments: [richMarker], headSha: SHA, repository: 'o/r', prNumber: 7, gptApprovers: ['someone-else'] }).drift, true);
   eq('C.5 không phải approved → bỏ qua', planApprovalDrift({ labels: ['status:reviewing'], comments: [], headSha: SHA }).drift, false);
 }
 
@@ -294,6 +313,178 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   tru('C.16 sai policyVersion → chặn', !validateApprovalPayload({ ...base, policyVersion: '2026-08-22.1' }, ctx).ok);
   tru('C.16 decisionId trống/khoảng trắng → chặn', !validateApprovalPayload({ ...base, decisionId: '  ' }, ctx).ok);
   tru('C.16 payload null → chặn', !validateApprovalPayload(null, ctx).ok);
+}
+
+// --- C.17 [GPT-REV-045] parseActivationComment — nguồn kích hoạt máy đọc được, fail-closed ---
+{
+  const rec = {
+    phase: 'steady-state', wiringPr: 'duongpdddic-droid/AI_PR_REVIEWER#9',
+    wiringMergedSha: SHA, gptApprovedHeadSha: 'b'.repeat(40),
+    recordedBy: 'user', recordedAt: '2026-08-23T00:00:00Z',
+  };
+  const marker = (r) => `<!-- ai-review-phase-activation:${JSON.stringify(r)} -->`;
+  tru('C.17 marker hợp lệ → active', parseActivationComment(`text\n${marker(rec)}\n`).active === true);
+  tru('C.17 thiếu marker → inactive', parseActivationComment('không có gì').active === false);
+  tru('C.17 marker không đóng → inactive', parseActivationComment('<!-- ai-review-phase-activation:{}').active === false);
+  tru('C.17 JSON hỏng → inactive', parseActivationComment('<!-- ai-review-phase-activation:{bad} -->').active === false);
+  tru('C.17 phase sai → inactive', parseActivationComment(marker({ ...rec, phase: 'transition' })).active === false);
+  tru('C.17 thiếu recordedBy → inactive', parseActivationComment(marker({ ...rec, recordedBy: '' })).active === false);
+  tru('C.17 wiringMergedSha ngắn → inactive', parseActivationComment(marker({ ...rec, wiringMergedSha: 'abc' })).active === false);
+  tru('C.17 gptApprovedHeadSha thiếu → inactive', parseActivationComment(marker({ ...rec, gptApprovedHeadSha: null })).active === false);
+}
+
+// --- C.18 [GPT-REV-045] scanDuplicateObjectKeys — chống duplicate JSON keys ---
+{
+  const dup = '{"a":1,"projectPolicyContract":{"x":1,"x":2},"arr":[{"k":1},{"k":2}]}';
+  const d = scanDuplicateObjectKeys(dup).duplicates;
+  tru('C.18 phát hiện duplicate trong cùng object', d.length === 1 && d[0].key === 'x');
+  tru('C.18 khác object trùng tên key KHÔNG phải dup',
+    scanDuplicateObjectKeys('{"a":{"b":1},"c":{"b":2}}').duplicates.length === 0);
+  tru('C.18 chuỗi giá trị chứa ":" không gây nhiễu',
+    scanDuplicateObjectKeys('{"url":"http://x","a":1}').duplicates.length === 0);
+  // Canonical THẬT phải sạch duplicate keys.
+  const raw = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', POLICY_PATH), 'utf8');
+  tru('C.18 canonical policy thật không có duplicate keys',
+    scanDuplicateObjectKeys(raw).duplicates.length === 0);
+  // LOCAL_APPROVAL_REQUIRED_FIELDS khớp policy.approvalMarker.requiredFields (cả hai chiều).
+  const policyObj = JSON.parse(raw);
+  const pf = policyObj.approvalMarker.requiredFields;
+  tru('C.18 LOCAL_APPROVAL_REQUIRED_FIELDS đồng bộ policy.approvalMarker.requiredFields',
+    LOCAL_APPROVAL_REQUIRED_FIELDS.length === pf.length
+    && LOCAL_APPROVAL_REQUIRED_FIELDS.every((f) => pf.includes(f)));
+}
+
+// --- C.19/C.20 [GPT-REV-045] steadyLocalApproval + drift fallback ---
+{
+  const payload = {
+    repository: 'o/r', prNumber: 7, reviewer: REVIEWER_LOCAL, headSha: SHA,
+    policyVersion: 'v1', decisionId: 'steady-local-x', ciEvidence: { state: 'pass' },
+    openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z',
+  };
+  const commentBody = `✅ ok\n<!-- ai-review-approval:${JSON.stringify(payload)} -->`;
+  const comment = { id: 'c1', user: { login: 'duongpdddic' }, created_at: '2026-08-23T00:00:00Z', body: commentBody };
+  const ctx = { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1', localApprovers: ['duongpdddic'] };
+  tru('C.19 local approval hợp lệ được nhận diện', Boolean(steadyLocalApproval([comment], ctx)));
+  tru('C.19 sai HEAD → không nhận diện', !steadyLocalApproval([comment], { ...ctx, headSha: 'b'.repeat(40) }));
+  tru('C.19 sai policyVersion → không nhận diện', !steadyLocalApproval([comment], { ...ctx, policyVersion: 'v2' }));
+  tru('C.19 reviewer:gpt marker KHÔNG bị coi là local approval',
+    !steadyLocalApproval([{ id: 'c2', user: { login: 'user' }, created_at: '-', body: `<!-- ai-review-approval:${JSON.stringify({ ...payload, reviewer: RA.gpt })} -->` }], ctx));
+  tru('C.20 planApprovalDrift: approved + local marker hợp lệ → KHÔNG drift',
+    planApprovalDrift({ labels: [RL.approved], comments: [comment], ...ctx }).drift === false);
+  tru('C.20 planApprovalDrift: approved + local marker lệch SHA → drift',
+    planApprovalDrift({ labels: [RL.approved], comments: [comment], ...ctx, headSha: 'b'.repeat(40) }).drift === true);
+  tru('C.20 planApprovalDrift: approved + không marker nào → drift (như cũ)',
+    planApprovalDrift({ labels: [RL.approved], comments: [], ...ctx }).drift === true);
+}
+
+// --- C.21 [GPT-REV-045] resolveRebuttalOutcome đủ 5 trường bắt buộc ---
+{
+  const base4 = { code: 'LOCAL-REV-001', severity: 'important', evidence: 'e', risk: 'r' };
+  tru('C.21 finding thiếu expectedOutcome → malformed',
+    resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: base4, evidencePresent: true }).malformedFinding === true);
+  tru('C.21 đủ 5 trường + evidence → đóng finding',
+    resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: { ...base4, expectedOutcome: 'ok' }, evidencePresent: true }).findingClosed === true);
+  tru('C.21 expectedOutcome rỗng → malformed',
+    resolveRebuttalOutcome({ coderVerdictKind: 'CLINE-FIX', finding: { ...base4, expectedOutcome: '' } }).malformedFinding === true);
+}
+
+// --- C.22 [GPT-REV-046] activation CÓ AUTHORITY: metadata + GitHub state + GPT approval ---
+{
+  const PV = '2026-08-23.7';
+  const MERGE_SHA = 'c'.repeat(40);
+  const MERGED_HEAD = 'd'.repeat(40);
+  const WPR = 'duongpdddic-droid/AI_PR_REVIEWER#4';
+  const marker = (o = {}) => `<!-- ai-review-phase-activation:${JSON.stringify({
+    phase: 'steady-state', wiringPr: WPR, wiringMergedSha: MERGE_SHA,
+    gptApprovedHeadSha: MERGED_HEAD, recordedBy: 'duongpdddic-droid',
+    recordedAt: '2026-08-23T01:00:00Z', ...o,
+  })} -->`;
+  const comment = (body, login = 'duongpdddic-droid') => ({ id: '1', user: { login }, created_at: '2026-08-23T01:00:00Z', body });
+  const gptApproval = buildApprovalMarker({
+    repository: 'duongpdddic-droid/AI_PR_REVIEWER', prNumber: 4, reviewer: RA.gpt,
+    headSha: MERGED_HEAD, policyVersion: PV, decisionId: 'gpt-wiring-001',
+    ciEvidence: null, openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z',
+  });
+  const wiringState = { state: 'closed', merged: true, mergeCommitSha: MERGE_SHA, headSha: MERGED_HEAD };
+  const recs = (body, login) => collectActivationRecords([comment(body, login)]);
+  const plan = (over = {}) => planPhaseActivation({
+    records: recs(marker()), allowedRecorders: ['duongpdddic-droid'],
+    expectedWiringPr: { repo: 'duongpdddic-droid/AI_PR_REVIEWER', number: 4 },
+    wiringState, wiringApprovalRecords: [{ id: 'w1', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-23T00:00:00Z', body: gptApproval }], policyVersion: PV, gptApprovers: ['duongpdddic-droid'], ...over,
+  });
+  tru('C.22 collect bóc tách metadata author/id', (() => {
+    const r = collectActivationRecords([comment(marker(), 'duongpdddic-droid')]);
+    return r.length === 1 && r[0].authorLogin === 'duongpdddic-droid' && r[0].commentId === '1';
+  })());
+  tru('C.22 collect bỏ qua comment không có marker', collectActivationRecords([comment('plain text')]).length === 0);
+  tru('C.22 collect bỏ qua entry null/rỗng/string', collectActivationRecords([null, 'x', {}]).length === 0);
+  tru('C.22 đủ authority (author+merge+SHA+GPT approval) → active', plan().active === true);
+  tru('C.22 không có marker → inactive', plan({ records: [] }).active === false);
+  tru('C.22 hai marker mâu thuẫn → inactive', plan({ records: [...recs(marker()), ...recs(marker({ wiringMergedSha: 'e'.repeat(40) }))] }).active === false);
+  tru('C.22 marker trùng nội dung (duplicate) vẫn active', plan({ records: [...recs(marker()), ...recs(marker())] }).active === true);
+  tru('C.22 author không thuộc allowedRecorders → inactive', plan({ records: recs(marker(), 'some-bot') }).active === false);
+  tru('C.22 author rỗng → inactive', plan({ records: recs(marker(), '') }).active === false);
+  tru('C.22 wiringPr sai PR → inactive', plan({ records: recs(marker({ wiringPr: 'duongpdddic-droid/AI_PR_REVIEWER#5' })) }).active === false);
+  tru('C.22 wiringPr sai repo → inactive', plan({ records: recs(marker({ wiringPr: 'other/repo#4' })) }).active === false);
+  tru('C.22 policy thiếu expectedWiringPr → inactive', plan({ expectedWiringPr: null }).active === false);
+  tru('C.22 wiringState null → inactive', plan({ wiringState: null }).active === false);
+  tru('C.22 wiringState.error → inactive', plan({ wiringState: { error: 'gh FAIL' } }).active === false);
+  tru('C.22 PR chưa merge → inactive', plan({ wiringState: { ...wiringState, merged: false, state: 'open' } }).active === false);
+  tru('C.22 mergeCommitSha lệch → inactive', plan({ wiringState: { ...wiringState, mergeCommitSha: 'e'.repeat(40) } }).active === false);
+  tru('C.22 gptApprovedHeadSha lệch head thật → inactive', plan({ wiringState: { ...wiringState, headSha: 'e'.repeat(40) } }).active === false);
+  tru('C.22 không có GPT approval trên wiring PR → inactive', plan({ wiringApprovalRecords: [] }).active === false);
+  tru('C.22 approval stale (sai policyVersion) → inactive', plan({ policyVersion: '2026-08-22.9' }).active === false);
+  tru('C.22 approval reviewer:local không được tính → inactive', (() => {
+    const localMark = buildApprovalMarker({
+      repository: 'duongpdddic-droid/AI_PR_REVIEWER', prNumber: 4, reviewer: REVIEWER_LOCAL,
+      headSha: MERGED_HEAD, policyVersion: PV, decisionId: 'steady-local-x',
+      ciEvidence: null, openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z',
+    });
+    return plan({ wiringApprovalRecords: [localMark] }).active === false;
+  })());
+  tru('C.22 [GPT-REV-049] GPT approval author không thuộc approvers → inactive', plan({ gptApprovers: ['someone-else'] }).active === false);
+}
+
+// --- C.23 [GPT-REV-049] approvalAuthorities allowlist (gpt + local) fail-closed ---
+{
+  const mkGpt = (o = {}) => buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: RA.gpt, headSha: SHA, policyVersion: 'v1', decisionId: 'dec-1', openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z', ...o });
+  const ALLOW = ['duongpdddic-droid'];
+  const recBad = parseApprovalMarkers([{ id: 'c1', user: { login: 'attacker' }, created_at: '-', body: `x ${mkGpt()}` }])[0];
+  eq('C.23 GPT marker sai author → invalid', isApprovalValid({ ...recBad.marker, commentId: recBad.commentId, authorLogin: recBad.authorLogin }, { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1', gptApprovers: ALLOW }).valid, false);
+  tru('C.23 GPT marker sai author nêu UNAUTHORIZED_ACTOR', String(isApprovalValid({ ...recBad.marker, commentId: recBad.commentId, authorLogin: recBad.authorLogin }, { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1', gptApprovers: ALLOW }).reason).includes('UNAUTHORIZED_ACTOR'));
+  eq('C.23 thiếu commentId (legacy body) → invalid', isApprovalValid({ ...mkGpt(), commentId: undefined, authorLogin: 'attacker' }, { headSha: SHA, gptApprovers: ALLOW }).valid, false);
+  eq('C.23 thiếu authorLogin → invalid', isApprovalValid({ ...mkGpt(), commentId: 'c9', authorLogin: undefined }, { headSha: SHA, gptApprovers: ALLOW }).valid, false);
+  eq('C.23 validatePolicy thiếu approvalAuthorities → invalid', validatePolicy({ ...policy, approvalAuthorities: undefined }).ok, false);
+  eq('C.23 validatePolicy gptApprovers rỗng → invalid', validatePolicy({ ...policy, approvalAuthorities: { gptApprovalCommentAuthors: [], localApprovalCommentAuthors: ['x'] } }).ok, false);
+  eq('C.23 validatePolicy localApprovers rỗng → invalid', validatePolicy({ ...policy, approvalAuthorities: { gptApprovalCommentAuthors: ['x'], localApprovalCommentAuthors: [] } }).ok, false);
+  eq('C.23 isApprovalValid gptApprovers rỗng → invalid', isApprovalValid({ ...mkGpt(), commentId: 'c1', authorLogin: 'duongpdddic-droid' }, { headSha: SHA, gptApprovers: [] }).valid, false);
+  const mkLocal = (o = {}) => ({ repository: 'o/r', prNumber: 7, reviewer: REVIEWER_LOCAL, headSha: SHA, policyVersion: 'v1', decisionId: 'steady-x', ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z', ...o });
+  const goodLocal = { id: 'c1', user: { login: 'duongpdddic' }, created_at: '-', body: `x <!-- ai-review-approval:${JSON.stringify(mkLocal())} -->` };
+  const wrongLocal = { id: 'c1', user: { login: 'attacker' }, created_at: '-', body: `x <!-- ai-review-approval:${JSON.stringify(mkLocal())} -->` };
+  const lctx = { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1', localApprovers: ['duongpdddic'] };
+  tru('C.23 local marker đúng author → nhận diện', Boolean(steadyLocalApproval([goodLocal], lctx)));
+  tru('C.23 local marker sai author → KHÔNG nhận diện', !steadyLocalApproval([wrongLocal], lctx));
+  eq('C.23 drift khi chỉ có local marker sai author', planApprovalDrift({ labels: [RL.approved], comments: [wrongLocal], gptApprovers: [], localApprovers: ['duongpdddic'] }).drift, true);
+  // 6) planPhaseActivation kích hoạt hợp lệ nhưng GPT approval sai author → không kích hoạt.
+  const PV = '2026-08-23.7';
+  const MERGE = 'c'.repeat(40);
+  const HEAD = 'd'.repeat(40);
+  const WPR = 'duongpdddic-droid/AI_PR_REVIEWER#4';
+  const actMarker = (o = {}) => `<!-- ai-review-phase-activation:${JSON.stringify({ phase: 'steady-state', wiringPr: WPR, wiringMergedSha: MERGE, gptApprovedHeadSha: HEAD, recordedBy: 'duongpdddic-droid', recordedAt: '2026-08-23T01:00:00Z', ...o })} -->`;
+  const actComment = (body, login = 'duongpdddic-droid') => ({ id: '1', user: { login }, created_at: '2026-08-23T01:00:00Z', body });
+  const gptApproval = buildApprovalMarker({ repository: 'duongpdddic-droid/AI_PR_REVIEWER', prNumber: 4, reviewer: RA.gpt, headSha: HEAD, policyVersion: PV, decisionId: 'gpt-wiring-001', ciEvidence: null, openBlockingFindings: 0, reviewedAt: '2026-08-23T00:00:00Z' });
+  const wiringState = { state: 'closed', merged: true, mergeCommitSha: MERGE, headSha: HEAD };
+  const recs = (body, login) => collectActivationRecords([actComment(body, login)]);
+  const planAA = (over = {}) => planPhaseActivation({ records: recs(actMarker()), allowedRecorders: ['duongpdddic-droid'], expectedWiringPr: { repo: 'duongpdddic-droid/AI_PR_REVIEWER', number: 4 }, wiringState, wiringApprovalRecords: [{ id: 'w1', user: { login: 'attacker' }, created_at: '2026-08-23T00:00:00Z', body: gptApproval }], policyVersion: PV, gptApprovers: ['duongpdddic-droid'], ...over });
+  eq('C.23 activation hợp lệ nhưng GPT approval sai author → inactive', planAA({}).active, false);
+  const planAAok = planPhaseActivation({ records: recs(actMarker()), allowedRecorders: ['duongpdddic-droid'], expectedWiringPr: { repo: 'duongpdddic-droid/AI_PR_REVIEWER', number: 4 }, wiringState, wiringApprovalRecords: [{ id: 'w1', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-23T00:00:00Z', body: gptApproval }], policyVersion: PV, gptApprovers: ['duongpdddic-droid'] });
+  eq('C.23 activation + GPT approval đúng author → active', planAAok.active, true);
+  // 7) Chỉ marker đúng author + repo + PR + HEAD + policyVersion mới hợp lệ.
+  const good = { id: 'g', user: { login: 'duongpdddic-droid' }, created_at: '-', body: `x ${mkGpt()}` };
+  const wrongAuthor = { id: 'w', user: { login: 'attacker' }, created_at: '-', body: `x ${mkGpt()}` };
+  const wrongHead = { id: 'h', user: { login: 'duongpdddic-droid' }, created_at: '-', body: `x ${mkGpt({ headSha: 'b'.repeat(40) })}` };
+  const best = effectiveApproval([good, wrongAuthor, wrongHead], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1', gptApprovers: ALLOW });
+  eq('C.23 chỉ marker đúng author + HEAD hợp lệ được chọn', Boolean(best) && best.decisionId === 'dec-1' && best.headSha === SHA, true);
 }
 
 let fail = 0;

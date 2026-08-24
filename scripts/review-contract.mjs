@@ -74,6 +74,19 @@ export function validatePolicy(policy) {
   if (!Number.isInteger(policy.maxReviewRounds) || policy.maxReviewRounds < 1) {
     return { ok: false, error: 'maxReviewRounds phải là số nguyên >= 1' };
   }
+  // [GPT-REV-049] approvalAuthorities: allowlist riêng theo loại approval (KHÔNG dùng
+  // activationEvidence.allowedRecorders). gptApprovalCommentAuthors / localApprovalCommentAuthors
+  // đều phải là mảng không rỗng. Thiếu/rỗng/sai schema → fail-closed (bất kỳ actor nào cũng có
+  // thể giả marker approval).
+  const aa = policy.approvalAuthorities;
+  if (!aa || typeof aa !== 'object') {
+    return { ok: false, error: 'thiếu object approvalAuthorities' };
+  }
+  for (const k of ['gptApprovalCommentAuthors', 'localApprovalCommentAuthors']) {
+    if (!Array.isArray(aa[k]) || aa[k].length === 0) {
+      return { ok: false, error: `approvalAuthorities.${k} phải là mảng không rỗng (allowlist người đăng approval marker)` };
+    }
+  }
   return { ok: true, error: null };
 }
 
@@ -189,14 +202,40 @@ export function buildApprovalMarker(record) {
   return `<!-- ai-review-approval:${json} -->`;
 }
 
-// Quét danh sách comment text, trích toàn bộ approval records hợp lệ về cú pháp.
-export function parseApprovalMarkers(texts) {
+// Quét danh sách comment RICH (kèm metadata id/author/created_at/body), trích toàn bộ
+// approval records hợp lệ VÀ giữ metadata nguồn. Fail-closed: entry thiếu metadata bắt buộc
+// (id, authorLogin) → bỏ qua marker đó (không tin cậy body thuần).
+// Trả về: [{ marker: {...parsed}, commentId, authorLogin, createdAt, body }].
+export function parseApprovalMarkers(comments) {
   const out = [];
-  for (const t of Array.isArray(texts) ? texts : []) {
+  for (const c of Array.isArray(comments) ? comments : []) {
+    // Hỗ trợ cả comment object {id, user:{login}, created_at, body} VÀ legacy string
+    let body = '';
+    let commentId = '';
+    let authorLogin = '';
+    let createdAt = '';
+    if (c && typeof c === 'object' && c.body !== undefined) {
+      body = String(c.body || '');
+      commentId = String(c.id || '');
+      authorLogin = c.user && c.user.login ? String(c.user.login) : '';
+      createdAt = String(c.created_at || '');
+    } else {
+      // Legacy: plain text string — KHÔNG có metadata → marker từ nguồn này KHÔNG được tin cậy
+      // cho approval provenance (fail-closed). Vẫn parse để backward-compat nhưng gắn cờ.
+      body = String(c || '');
+      commentId = '';
+      authorLogin = '';
+      createdAt = '';
+    }
     const re = /<!--\s*ai-review-approval:(\{.*?\})\s*-->/g;
     let m;
-    while ((m = re.exec(String(t || ''))) !== null) {
-      try { out.push(JSON.parse(m[1])); } catch {} // marker hỏng → bỏ qua, không làm sập vòng review
+    while ((m = re.exec(body)) !== null) {
+      try {
+        const marker = JSON.parse(m[1]);
+        out.push({ marker, commentId, authorLogin, createdAt, body });
+      } catch {
+        // marker hỏng → bỏ qua, không làm sập vòng review
+      }
     }
   }
   return out;
@@ -204,8 +243,15 @@ export function parseApprovalMarkers(texts) {
 
 // Approval có còn hiệu lực cho (repo, pr, HEAD hiện tại, policy hiện tại) không?
 // Bất kỳ lệch SHA/policy/repo/pr nào → invalid (không kế thừa approval từ commit trước).
+// [GPT-REV-048] Fail-closed: record PHẢI có provenance (authorLogin + commentId) hợp lệ.
+// GPT approval marker CHỈ hợp lệ khi do user relay (author là người dùng/coder) —
+// marker do actor bất kỳ khác đăng (bot,第三方) bị từ chối.
 export function isApprovalValid(record, ctx) {
   if (!record || typeof record !== 'object') return { valid: false, reason: 'record rỗng' };
+  // [GPT-REV-048] provenance check: cần authorLogin + commentId
+  if (!record.commentId || !record.authorLogin) {
+    return { valid: false, reason: 'marker thiếu provenance (commentId/authorLogin) — body thuần không được tin cậy' };
+  }
   if (String(record.reviewer) !== AGENTS.gpt) return { valid: false, reason: `reviewer không phải ${AGENTS.gpt}` };
   if (!/^[0-9a-f]{40}$/i.test(String(record.headSha))) return { valid: false, reason: 'headSha không phải full 40-hex' };
   if (String(record.headSha).toLowerCase() !== String(ctx.headSha || '').toLowerCase()) {
@@ -218,6 +264,17 @@ export function isApprovalValid(record, ctx) {
   if (ctx.prNumber != null && Number(record.prNumber) !== Number(ctx.prNumber)) return { valid: false, reason: 'sai PR number' };
   if (Number(record.openBlockingFindings ?? 0) > 0) return { valid: false, reason: 'còn finding blocking mở' };
   if (!String(record.decisionId || '').trim()) return { valid: false, reason: 'marker thiếu decisionId (không hợp lệ theo GPT-REV-032)' };
+  // [GPT-REV-049] Allowlist fail-closed: GPT approval marker CHỈ hợp lệ khi commentId + authorLogin
+  // có provenance VÀ authorLogin thuộc policy.approvalAuthorities.gptApprovalCommentAuthors.
+  // Không cho phép actor bất kỳ (bot/third-party) giả marker reviewer:agent:gpt. Nếu caller
+  // không truyền gptApprovers (policy thiếu approvalAuthorities) → fail-closed.
+  const gptApprovers = Array.isArray(ctx.gptApprovers) ? ctx.gptApprovers.map((a) => String(a)) : [];
+  if (gptApprovers.length === 0) {
+    return { valid: false, reason: 'UNAUTHORIZED_ACTOR: policy.approvalAuthorities.gptApprovalCommentAuthors rỗng/không được truyền — từ chối mọi GPT approval marker' };
+  }
+  if (!gptApprovers.includes(String(record.authorLogin))) {
+    return { valid: false, reason: `UNAUTHORIZED_ACTOR: author "${String(record.authorLogin || '(rỗng)')}" không thuộc policy.approvalAuthorities.gptApprovalCommentAuthors` };
+  }
   return { valid: true, reason: null };
 }
 
@@ -251,21 +308,64 @@ export function validateApprovalPayload(payload, ctx) {
 }
 
 // Approval hiệu lực MỚI NHẤT cho HEAD hiện tại, hoặc null.
+// [GPT-REV-048] records: mảng comment RICH object {id, user:{login}, created_at, body} hoặc legacy string.
+// Trả về marker object (parsed JSON) hoặc null.
 export function effectiveApproval(records, ctx) {
   let best = null;
-  for (const r of parseApprovalMarkers(records)) {
-    const v = isApprovalValid(r, ctx);
+  for (const entry of parseApprovalMarkers(records)) {
+    const r = entry.marker;
+    const v = isApprovalValid({ ...r, commentId: entry.commentId, authorLogin: entry.authorLogin }, ctx);
     if (v.valid && (!best || String(r.reviewedAt) > String(best.reviewedAt))) best = r;
   }
   return best;
 }
 
+// Approval cục bộ steady-state (GPT-REV-045): marker do reviewer:local ghi khi đủ toàn bộ
+// evaluateSteadyApprovalGates. KHÔNG thay thế GPT approval ở transition; chỉ được dùng để
+// chống approval-drift SAI khi PR đã được local approve đúng gates ở steady-state.
+// Trường bắt buộc khớp policy.approvalMarker.requiredFields (test assert đồng bộ với JSON).
+export const LOCAL_APPROVAL_REQUIRED_FIELDS = [
+  'repository', 'prNumber', 'reviewer', 'headSha', 'policyVersion',
+  'decisionId', 'ciEvidence', 'openBlockingFindings', 'reviewedAt',
+];
+
+// [GPT-REV-048] Fail-closed: local approval marker PHẢI có provenance (authorLogin + commentId).
+// Chỉ chấp nhận marker do actor/relay được policy cho phép (allowedRecorders từ activationEvidence,
+// hoặc identity người dùng relay). Legacy body string không được tin cậy.
+export function steadyLocalApproval(records, { headSha, repository, prNumber, policyVersion, localApprovers } = {}) {
+  // [GPT-REV-049] Fail-closed: thiếu allowlist local → KHÔNG có approval cục bộ hợp lệ nào.
+  const local = Array.isArray(localApprovers) ? localApprovers.map((a) => String(a)) : [];
+  if (local.length === 0) return null;
+  for (const entry of parseApprovalMarkers(records)) {
+    const r = entry.marker;
+    if (String(r.reviewer) !== REVIEWER_LOCAL) continue;
+    // Provenance check: cần commentId + authorLogin
+    if (!entry.commentId || !entry.authorLogin) continue; // bỏ qua legacy body string
+    // Authorization check: author PHẢI thuộc localApprovalCommentAuthors.
+    if (!local.includes(entry.authorLogin)) continue;
+    const fieldsOk = LOCAL_APPROVAL_REQUIRED_FIELDS.every((k) => r[k] !== undefined && r[k] !== null && r[k] !== '');
+    const shaOk = /^[0-9a-f]{40}$/i.test(String(r.headSha || ''))
+      && String(r.headSha).toLowerCase() === String(headSha || '').toLowerCase();
+    const scopeOk = String(r.repository) === String(repository)
+      && Number(r.prNumber) === Number(prNumber)
+      && policyVersion != null && String(r.policyVersion) === String(policyVersion);
+    if (fieldsOk && shaOk && scopeOk && Number(r.openBlockingFindings ?? 0) === 0) return r;
+  }
+  return null;
+}
+
 // Phát hiện approval-drift: PR gắn status:approved nhưng không có approval GPT hợp lệ
 // cho HEAD hiện tại → gỡ hiệu lực approval cũ, chuyển lại status:review-requested.
-export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion } = {}) {
+// [GPT-REV-048] comments: mảng comment RICH object {id, user:{login}, created_at, body} hoặc legacy string.
+// allowedRecorders: danh sách actor được phép đăng local approval marker (từ policy.activationEvidence.allowedRecorders).
+export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion, gptApprovers, localApprovers } = {}) {
   const norm = normalizeStatusLabels(labels);
   if (norm.keepStatus !== LABELS.approved) return { drift: false };
-  const approval = effectiveApproval(comments, { headSha, repository, prNumber, policyVersion });
+  const ctx = { headSha, repository, prNumber, policyVersion, gptApprovers };
+  // [GPT-REV-045 + GPT-REV-048 + GPT-REV-049] Approval hợp lệ = GPT (mọi pha, có provenance +
+  // author ∈ gptApprovalCommentAuthors) HOẶC reviewer:local steady-state đủ gates VÀ có
+  // provenance + author ∈ localApprovalCommentAuthors. Thiếu allowlist → fail-closed (drift).
+  const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, { ...ctx, localApprovers });
   if (approval) return { drift: false, approval };
   return {
     drift: true,
@@ -296,10 +396,12 @@ export function mutationKey({ repository, prNumber, headSha, policyVersion, acti
 // ---------------------------------------------------------------- vòng fix (A6: KHÔNG tạo issue [review-fix])
 
 // Đếm số vòng findings đã phát hành từ comment có marker `<!-- ai-pr-reviewer:round=N -->`.
+// [GPT-REV-048] comments có thể là rich object {body} hoặc legacy string.
 export function countReviewRounds(comments) {
   let max = 0;
   for (const t of Array.isArray(comments) ? comments : []) {
-    const m = String(t || '').match(/<!--\s*ai-pr-reviewer:round=(\d+)\s*-->/);
+    const text = t && typeof t === 'object' && t.body != null ? String(t.body) : String(t || '');
+    const m = text.match(/<!--\s*ai-pr-reviewer:round=(\d+)\s*-->/);
     if (m) max = Math.max(max, Number(m[1]));
   }
   return max;
@@ -354,6 +456,233 @@ export function scanDiffForSecrets(diffText) {
   return findings;
 }
 
+// ---------------------------------------------------------------- reviewer phases (runtime, GPT-REV-039)
+
+// Resolve pha review hiện tại từ dữ liệu policy (fail-closed):
+//   - policy thiếu/mất shape reviewerPhases → phase 'blocked' (BLOCKED_PHASE_UNRESOLVED),
+//     luôn escalate GPT, không bao giờ cho local approve.
+//   - transition.runtimeWiringPrRequired === true và wiring chưa merge → 'transition'
+//     (GPT duyệt mọi PR, local KHÔNG tự approve).
+//   - steady-state CHỈ khi activationRequires đủ [runtimeWiringPrGptApproved,
+//     runtimeWiringPrMerged] VÀ caller xác nhận wiring đã được GPT duyệt + merge
+//     (tham số runtimeWiringMerged — marker máy đọc được do người dùng/orchestrator ghi).
+export function resolveReviewPhase(policy, { runtimeWiringMerged = false } = {}) {
+  const rp = policy && policy.reviewerPhases;
+  const phases = rp && rp.phases;
+  if (!rp || !phases || !phases.transition || !phases.steadyState) {
+    return { phase: 'blocked', code: 'BLOCKED_PHASE_UNRESOLVED', escalateToGpt: true, localReviewerCanApprove: false };
+  }
+  const tr = phases.transition;
+  const ss = phases.steadyState;
+  const req = Array.isArray(ss.activationRequires) ? ss.activationRequires : [];
+  const activationComplete =
+    runtimeWiringMerged === true &&
+    req.includes('runtimeWiringPrGptApproved') &&
+    req.includes('runtimeWiringPrMerged');
+  if (!activationComplete) {
+    return { phase: 'transition', escalateToGpt: true, localReviewerCanApprove: tr.localReviewerCanApprove === true };
+  }
+  return { phase: 'steady-state', localReviewerCanApprove: ss.localReviewerCanApprove === true };
+}
+
+// Escalation theo pha (pure). Transition: MỌI PR sau pre-review đều bàn giao GPT.
+// Steady-state: chỉ escalate GPT khi có blocking findings / decision gate / verdict không xác định;
+// PASS sạch mới xét đường local-accept (vẫn phải qua evaluateSteadyApprovalGates trước khi ghi approval).
+export function planEscalationForPhase(phaseInfo, { verdict, decisionGate = null, openBlockingCount = 0 } = {}) {
+  if (!phaseInfo || phaseInfo.phase === 'blocked') {
+    return { action: 'block', reason: (phaseInfo && phaseInfo.code) || 'BLOCKED_PHASE_UNRESOLVED',
+      addLabels: [LABELS.blocked], removeLabels: [LABELS.reviewing] };
+  }
+  if (phaseInfo.phase === 'transition') {
+    return { action: 'escalate-gpt', reason: 'transition-phase-final-reviewer-gpt' };
+  }
+  // steady-state:
+  if (verdict !== 'PRE_REVIEW_PASS' || decisionGate || openBlockingCount > 0) {
+    return { action: 'escalate-gpt', reason: 'blocking-findings-or-decision-gate' };
+  }
+  return { action: 'local-accept-candidate', reason: 'clean-pass-steady-state' };
+}
+
+// 6 gate approvalRequiresAllGates của steady-state (pure, fail-closed):
+// trả { ok, gates: [{gate, pass}] } — thiếu bất kỳ bằng chứng nào → ok=false.
+export function evaluateSteadyApprovalGates({ ciState, passMarkerPresent, headSha, policyValid, policyVersionMatch, openBlockingCount, readAfterWriteOk }) {
+  const gates = [
+    ['requiredChecksAllPassed', ciState === 'pass'],
+    ['realSemanticReviewCompleted', passMarkerPresent === true],
+    ['approvalLockedToHeadShaAndPolicyVersion', Boolean(headSha) && /^[0-9a-f]{40}$/i.test(String(headSha))],
+    ['noOpenBlockingFindings', Number(openBlockingCount) === 0],
+    ['policyValid', policyValid === true],
+    ['readAfterWriteSucceeded', readAfterWriteOk === true],
+    ['policyVersionMatchesCurrent', policyVersionMatch === true], // ràng buộc bổ sung, fail-closed thêm
+  ];
+  return { ok: gates.every(([, pass]) => pass), gates: gates.map(([gate, pass]) => ({ gate, pass })) };
+}
+
+// ---------------------------------------------------------------- activation & duplicate keys (GPT-REV-045)
+
+/**
+ * Pure: phân tích marker kích hoạt steady-state máy đọc được từ nguồn policy khai báo
+ * (reviewerPhases.steadyState.activationEvidence — issue-comment marker).
+ * Fail-closed: thiếu prefix / JSON hỏng / sai shape / SHA không full 40-hex → { active: false }.
+ */
+export function parseActivationComment(rawText) {
+  const PREFIX = '<!-- ai-review-phase-activation:';
+  const text = String(rawText || '');
+  const start = text.indexOf(PREFIX);
+  if (start === -1) return { active: false, reason: 'không có marker kích hoạt' };
+  const end = text.indexOf('-->', start);
+  if (end === -1) return { active: false, reason: 'marker không đóng -->' };
+  let rec;
+  try { rec = JSON.parse(text.slice(start + PREFIX.length, end).trim()); }
+  catch { return { active: false, reason: 'JSON trong marker không parse được' }; }
+  if (!rec || typeof rec !== 'object') return { active: false, reason: 'record không phải object' };
+  if (rec.phase !== 'steady-state') return { active: false, reason: `phase=${String(rec.phase)} không phải steady-state` };
+  for (const k of ['wiringPr', 'wiringMergedSha', 'gptApprovedHeadSha', 'recordedBy']) {
+    if (!String(rec[k] || '').trim()) return { active: false, reason: `thiếu ${k}` };
+  }
+  const shaOk = (s) => /^[0-9a-f]{40}$/i.test(String(s || ''));
+  if (!shaOk(rec.wiringMergedSha)) return { active: false, reason: 'wiringMergedSha không phải full 40-hex' };
+  if (!shaOk(rec.gptApprovedHeadSha)) return { active: false, reason: 'gptApprovedHeadSha không phải full 40-hex' };
+  return { active: true, record: rec };
+}
+
+/**
+ * Pure [GPT-REV-046]: trích activation records KÈM METADATA (author login + comment id +
+ * created_at) từ danh sách comment object GitHub API ({id, user:{login}, created_at, body}).
+ * Chỉ nhận record có cú pháp hợp lệ qua parseActivationComment; marker hỏng → bỏ qua (fail-closed).
+ */
+export function collectActivationRecords(comments) {
+  const out = [];
+  for (const c of Array.isArray(comments) ? comments : []) {
+    if (!c || typeof c !== 'object') continue;
+    const parsed = parseActivationComment(c.body);
+    if (!parsed.active) continue;
+    out.push({
+      record: parsed.record,
+      authorLogin: String((c.user && c.user.login) || ''),
+      commentId: c.id != null ? String(c.id) : '',
+      createdAt: String(c.created_at || ''),
+    });
+  }
+  return out;
+}
+
+/**
+ * Pure [GPT-REV-046]: xác minh activation steady-state CHỈ từ dữ liệu CÓ AUTHORITY —
+ * không tin các trường tự khai báo trong body marker:
+ *   1. author comment phải thuộc allowedRecorders do policy khai báo;
+ *   2. wiringPr phải đúng repo/PR policy chỉ định (expectedWiringPr);
+ *   3. wiring PR phải MERGED thật (wiringState đọc từ GitHub REST);
+ *   4. wiringMergedSha phải khớp merge_commit_sha thực tế;
+ *   5. gptApprovedHeadSha phải là head ĐÃ MERGE của wiring PR;
+ *   6. trên wiring PR phải có GPT approval marker hợp lệ (isApprovalValid: reviewer agent:gpt,
+ *      khóa đúng head đã merge + policyVersion hiện tại, không còn finding blocking).
+ * Nhiều marker CHỈ chấp nhận khi nội dung record giống hệt nhau (duplicate); khác nhau → mâu thuẫn.
+ * Fail-closed: bất kỳ điều kiện thiếu/sai/mâu thuẫn/lỗi IO (wiringState null) → { active:false }.
+ */
+export function planPhaseActivation({
+  records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion, gptApprovers,
+} = {}) {
+  const inactive = (reason) => ({ active: false, reason });
+  if (!Array.isArray(records) || records.length === 0) return inactive('không có marker kích hoạt');
+  const canon = (e) => JSON.stringify(e.record);
+  if (new Set(records.map(canon)).size > 1) {
+    return inactive(`có ${records.length} marker activation mâu thuẫn nhau`);
+  }
+  const entry = records[0];
+  const rec = entry.record;
+  const allowed = (Array.isArray(allowedRecorders) ? allowedRecorders : []).map((a) => String(a));
+  if (!entry.authorLogin || !allowed.includes(entry.authorLogin)) {
+    return inactive(`author "${entry.authorLogin || '(rỗng)'}" không thuộc allowedRecorders của policy`);
+  }
+  const ev = expectedWiringPr || {};
+  if (!ev.repo || !ev.number) return inactive('policy thiếu expectedWiringPr (không thể xác minh phạm vi wiring PR)');
+  const expected = `${ev.repo}#${ev.number}`.toLowerCase();
+  if (String(rec.wiringPr || '').trim().toLowerCase() !== expected) {
+    return inactive(`wiringPr "${rec.wiringPr}" không đúng PR policy chỉ định (${ev.repo}#${ev.number})`);
+  }
+  if (!wiringState || wiringState.error) return inactive('không đọc được trạng thái wiring PR từ GitHub (fail-closed)');
+  if (wiringState.merged !== true) return inactive(`wiring PR chưa merge (state=${String(wiringState.state || '?')})`);
+  if (String(rec.wiringMergedSha).toLowerCase() !== String(wiringState.mergeCommitSha || '').toLowerCase()) {
+    return inactive('wiringMergedSha không khớp merge commit thực tế của wiring PR trên GitHub');
+  }
+  if (String(rec.gptApprovedHeadSha).toLowerCase() !== String(wiringState.headSha || '').toLowerCase()) {
+    return inactive('gptApprovedHeadSha không phải head đã merge của wiring PR');
+  }
+  const approval = effectiveApproval(wiringApprovalRecords, {
+    repository: ev.repo, prNumber: ev.number, headSha: rec.gptApprovedHeadSha, policyVersion,
+    gptApprovers,
+  });
+  if (!approval) {
+    return inactive('không có GPT approval hợp lệ khóa đúng head đã merge + policyVersion hiện tại trên wiring PR');
+  }
+  return { active: true, reason: 'activation hợp lệ: authority + merge + SHA + GPT approval đều khớp', approval };
+}
+
+/**
+ * Pure: quét raw JSON text phát hiện duplicate key TRONG CÙNG MỘT object
+ * (JSON.parse âm thầm giữ key cuối → schema mơ hồ theo GPT-REV-045).
+ * Trả { duplicates: [{ key, path }] }; mảng rỗng = sạch.
+ */
+export function scanDuplicateObjectKeys(text) {
+  const s = String(text || '');
+  const dups = [];
+  /** @type {Array<Set<string>|null>} null = level là array (không collect key) */
+  const stack = [new Set()];
+  const pathStack = [''];
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '"') {
+      // đọc string (tôn trọng escape)
+      let j = i + 1;
+      let str = '';
+      while (j < s.length) {
+        if (s[j] === '\\') { str += s[j] + s[j + 1]; j += 2; continue; }
+        if (s[j] === '"') break;
+        str += s[j];
+        j += 1;
+      }
+      // peek ký hiệu sau string
+      let k = j + 1;
+      while (k < s.length && /\s/.test(s[k])) k += 1;
+      const top = stack[stack.length - 1];
+      if (s[k] === ':' && top) {
+        if (top.has(str)) dups.push({ key: str, path: pathStack.join('.') });
+        else top.add(str);
+        i = k + 1; // nhảy qua ':'
+        continue;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === '{') {
+      stack.push(new Set());
+      // tên object hiện tại = chuỗi key gần nhất trong level cha
+      pathStack.push(lastKeyBefore(s, i));
+    } else if (ch === '[') {
+      stack.push(null);
+      pathStack.push(lastKeyBefore(s, i));
+    } else if (ch === '}' || ch === ']') {
+      stack.pop();
+      pathStack.pop();
+      if (!stack.length) break;
+    }
+    i += 1;
+  }
+  return { duplicates: dups };
+}
+
+// Tên key gần nhất trước vị trí idx (dùng làm path mô tả; không cần chính xác tuyệt đối).
+function lastKeyBefore(s, idx) {
+  const re = /"((?:[^"\\]|\\.)*)"\s*:/g;
+  let last = '';
+  let m;
+  const slice = s.slice(0, idx);
+  while ((m = re.exec(slice)) !== null) last = m[1];
+  return last;
+}
+
 // Giới hạn kích thước diff theo policy.diffLimits.maxLines (0/undefined = không giới hạn).
 // Metric canonical (GPT-REV-031): churn review = additions + deletions — cả hai phía diff
 // đều tốn công review, chỉ đếm additions đã đánh giá thấp quy mô thật của PR.
@@ -365,3 +694,46 @@ export function evaluateDiffLimits(policy, diffText) {
   const churn = added + removed;
   return { over: limit > 0 && churn > limit, lines: churn, added, removed, limit };
 }
+
+// ---------------------------------------------------------------- reviewer↔coder rebuttal (GPT-REV-036 runtime)
+
+/**
+ * Pure: xử lý phản hồi coder trên một finding.
+ * Quy tắc: finding thiếu trường bắt buộc = malformed → reviewer phải xác nhận/cập nhật trước khi
+ * đem lại làm blocking; FIX không có evidence → finding vẫn mở; REBUT im lặng (không verdict) =
+ * còn mở; REJECTED mà chưa phân xử được → escalate-dispute (agent:gpt / status:blocked),
+ * CẤM coder tự đóng thread/tự gắn approved.
+ */
+export function resolveRebuttalOutcome({ coderVerdictKind, finding, reviewerVerdict = null, evidencePresent = false }) {
+  // [GPT-REV-045] Đủ 5 trường bắt buộc theo reviewerCoderContract.findingRequiredFields
+  // (thiếu expectedOutcome trước đây → finding malformed bị coi hợp lệ).
+  const REQUIRED = ['code', 'severity', 'evidence', 'risk', 'expectedOutcome'];
+  const malformed = !finding || REQUIRED.some((k) => finding[k] === undefined || finding[k] === null || finding[k] === '');
+  if (malformed) {
+    return { findingClosed: false, nextAction: 'request-reviewer-verdict', malformedFinding: true };
+  }
+  if (coderVerdictKind === 'CLINE-FIX') {
+    if (!evidencePresent) return { findingClosed: false, nextAction: 'keep-open-fix-applied' };
+    return { findingClosed: true, nextAction: 'close-finding' };
+  }
+  // CLINE-REBUT:
+  if (reviewerVerdict === 'ACCEPTED') return { findingClosed: true, nextAction: 'close-finding' };
+  if (reviewerVerdict === 'REJECTED') return { findingClosed: false, nextAction: 'escalate-dispute' };
+  return { findingClosed: false, nextAction: 'request-reviewer-verdict' };
+}
+
+// ---------------------------------------------------------------- task discovery (GPT-REV-037 runtime)
+
+/**
+ * Pure: ánh xạ kết quả khám phá task sang hành vi fail-closed theo minimalCommandDiscovery.
+ * zero → NO_TASK (không mutation); one → claim-exactly-one; many/conflict → blocked-no-guessing.
+ */
+export function planDiscoveryBehavior({ validTasks, conflicting = false }) {
+  if (conflicting || validTasks > 1) {
+    return { result: 'blocked-no-guessing', mutationAllowed: false };
+  }
+  if (validTasks === 1) return { result: 'claim-exactly-one', mutationAllowed: true };
+  return { result: 'NO_TASK', mutationAllowed: false };
+}
+
+

@@ -10,8 +10,10 @@
 //     CI fail/missing/unknown → status:changes-requested + agent:cline
 //
 // Bất biến bắt buộc:
-//   - KHÔNG BAO GIỜ tự gắn status:approved từ CI hay pre-review; approval chỉ do GPT
-//     ghi qua scripts/gpt-approval.mjs, khóa full HEAD SHA + policyVersion.
+//   - KHÔNG BAO GIỜ tự gắn status:approved từ CI hay pre-review.
+//   - AI_PR_REVIEWER local reviewer tự gắn status:approved CHỈ ở steady-state khi đủ toàn bộ
+//     evaluateSteadyApprovalGates (reviewerPhases.steadyState.approvalRequiresAllGates) + read-after-write,
+//     theo nguồn kích hoạt máy đọc được (activationEvidence). Transition: KHÔNG tự approve.
 //   - KHÔNG tạo issue [review-fix]; mọi vòng fix đi qua nhãn trên PR.
 //   - Event muộn (headSha đổi, PR closed/merged) bị bỏ qua.
 //   - Mọi mutation có khóa idempotency repo::pr::sha::policy::action trong comment.
@@ -23,11 +25,14 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
-  AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, POLICY_PATH,
-  canMutatePr, countReviewRounds, evaluateChecks, evaluateDiffLimits,
-  gateOpenFindings, isStaleEvent, mutationKey, normalizeStatusLabels,
-  planApprovalDrift, planCiRouting, planPreReviewOutcome, scanDiffForSecrets,
+  AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, REVIEWER_LOCAL,
+  canMutatePr, collectActivationRecords, countReviewRounds, evaluateChecks, evaluateDiffLimits,
+  evaluateSteadyApprovalGates, gateOpenFindings, isStaleEvent, mutationKey,
+  normalizeStatusLabels, planEscalationForPhase,
+  planApprovalDrift, planCiRouting, planPhaseActivation, planPreReviewOutcome,
+  resolveReviewPhase, scanDiffForSecrets,
 } from './review-contract.mjs';
+import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,18 +65,59 @@ function defaultIo() {
         'state,headRefOid,labels,number,url,title,isDraft']));
       return { ...v, labels: (v.labels || []).map((l) => l.name), comments: [] };
     },
-    listPrComments(repo, number) {
+        listPrComments(repo, number) {
+      // Trả về comment RICH objects {id, user:{login}, created_at, body} để giữ metadata
+      // cho approval provenance (GPT-REV-048).
       const out = this.gh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate',
-        '--jq', '[.[].body] | join("\\u0000")']);
-      return String(out || '').split('\u0000');
+        '--jq', `[.[] | ((.id // "") | tostring) + " " + ((.user.login) // "") + " " + ((.created_at) // "-") + " " + ((.body // "") | @base64)] | join("\\n")`]);
+      return String(out || '').split('\n').filter(Boolean).map((line) => {
+        const parts = line.split(' ');
+        return {
+          id: parts[0] || '',
+          user: { login: parts[1] || '' },
+          created_at: parts[2] || '',
+          body: Buffer.from(parts.slice(3).join(' '), 'base64').toString('utf8'),
+        };
+      });
     },
     getPolicy(repo, ref) {
+      // [GPT-REV-042] Không còn legacy mirror: project repo bắt buộc project config +
+      // canonical từ đúng policySource.repo+full SHA+path; canonical repo dùng nội bộ.
       try {
-        const b64 = this.gh(['api', `repos/${repo}/contents/${POLICY_PATH}?ref=${encodeURIComponent(ref)}`, '--jq', '.content']);
-        return { policy: JSON.parse(Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8')) };
+        return resolvePolicyForRepo({
+          repo,
+          ref,
+          fetchContent: (r, p, rr) => {
+            const b64 = this.gh(['api', `repos/${r}/contents/${p}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
+            return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');
+          },
+        });
       } catch (e) {
-        return { policy: null, error: String((e && e.message) || e).slice(0, 200) };
+        const code = (e && e.code) || 'BLOCKED_CANONICAL_UNAVAILABLE';
+        return { policy: null, error: `${code}: ${String((e && e.message) || e).slice(0, 200)}` };
       }
+    },
+    // [GPT-REV-045][GPT-REV-046] Đọc comments Issue KÈM METADATA (id/author/created_at) để
+    // xác thực authority của activation marker — không còn nối body thuần. Body encode base64
+    // qua jq để an toàn newline/tab khi gh trả text.
+    getIssueComments(repo, number) {
+      const out = this.gh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate',
+        '--jq', `[.[] | ((.id // "")|tostring) + " " + ((.user.login) // "") + " " + ((.created_at) // "-") + " " + ((.body // "") | @base64)] | join("\\n")`]);
+      return String(out || '').split('\n').filter(Boolean).map((line) => {
+        const parts = line.split(' ');
+        return {
+          id: parts[0] || '',
+          user: { login: parts[1] || '' },
+          created_at: parts[2] || '',
+          body: Buffer.from(parts.slice(3).join(' '), 'base64').toString('utf8'),
+        };
+      });
+    },
+    // [GPT-REV-046] Trạng thái THẬT của một PR từ GitHub REST: merged + merge_commit_sha +
+    // head sha. Ném Error khi gh fail — caller xử lý fail-closed (giữ transition), KHÔNG nuốt.
+    getPullState(repo, number) {
+      return JSON.parse(this.gh(['api', `repos/${repo}/pulls/${number}`,
+        '--jq', '{state:(.state//""),merged:(.merged//false),mergeCommitSha:(.merge_commit_sha//""),headSha:((.head.sha)//"")}']));
     },
     getChecks(repo, number) {
       try {
@@ -130,9 +176,13 @@ export function applyHandoff(io, repo, prNumber, plan) {
 }
 
 // Idempotency: action đã phát hành cho đúng khóa (repo::pr::sha::policy::action) thì bỏ qua.
+// [GPT-REV-048] comments có thể là rich object {body} hoặc legacy string.
 export function hasMarkerFor(comments, key) {
   const needle = `<!-- ai-pr-reviewer:key=${key} -->`;
-  for (const t of comments || []) if (String(t).includes(needle)) return true;
+  for (const t of comments || []) {
+    const body = t && typeof t === 'object' && t.body != null ? String(t.body) : String(t);
+    if (body.includes(needle)) return true;
+  }
   return false;
 }
 
@@ -196,6 +246,41 @@ function formatFindingsComment(findings, round) {
   return `${lines.join('\n\n---\n\n')}\n\nVòng fix hiện tại: ${round}. Sửa xong push thẳng lên nhánh PR (KHÔNG tạo issue [review-fix]) — orchestrator sẽ tự pre-review lại.`;
 }
 
+// ---------------------------------------------------------------- activation có authority (GPT-REV-046)
+
+// Tổng hợp bằng chứng activation steady-state từ nguồn CÓ AUTHORITY theo policy khai báo
+// (reviewerPhases.steadyState.activationEvidence):
+//   - comments Issue (kèm author/id) → collectActivationRecords;
+//   - trạng thái thật của wiring PR (merged + merge commit SHA + head SHA) qua GitHub REST;
+//   - approval markers trên wiring PR (bodies) để verify GPT approval khóa head đã merge.
+// Bất kỳ lỗi IO nào (gh fail, thiếu method) → NÉM cho caller xử lý fail-closed (giữ transition).
+export function resolvePhaseActivation(io, policy) {
+  const ev = policy && policy.reviewerPhases && policy.reviewerPhases.phases
+    && policy.reviewerPhases.phases.steadyState
+    && policy.reviewerPhases.phases.steadyState.activationEvidence;
+  if (!ev || ev.type !== 'issue-comment-marker' || !ev.repo || !ev.issue) {
+    return { active: false, reason: 'policy thiếu khai báo activationEvidence' };
+  }
+  const records = collectActivationRecords(io.getIssueComments(ev.repo, ev.issue));
+  let wiringState = null;
+  let wiringApprovalRecords = [];
+  const wp = ev.expectedWiringPr;
+  if (wp && wp.repo && wp.number) {
+    wiringState = io.getPullState(wp.repo, wp.number);
+    // [GPT-REV-048] Giữ comment RICH objects (metadata id/author) thay vì chỉ body string.
+    wiringApprovalRecords = io.getIssueComments(wp.repo, wp.number);
+  }
+  return planPhaseActivation({
+    records,
+    allowedRecorders: ev.allowedRecorders,
+    expectedWiringPr: wp,
+    wiringState,
+    wiringApprovalRecords,
+    policyVersion: policy.policyVersion,
+    gptApprovers: policy.approvalAuthorities && policy.approvalAuthorities.gptApprovalCommentAuthors,
+  });
+}
+
 // ---------------------------------------------------------------- vòng xử lý 1 PR
 
 export async function processPr(io, repo, number, { dryRun } = {}) {
@@ -215,6 +300,12 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     labels: view.labels, comments, headSha,
     repository: repo, prNumber: number,
     policyVersion: policyNow.policy ? policyNow.policy.policyVersion : undefined,
+    localApprovers: policyNow.policy && policyNow.policy.approvalAuthorities
+      ? policyNow.policy.approvalAuthorities.localApprovalCommentAuthors
+      : undefined,
+    gptApprovers: policyNow.policy && policyNow.policy.approvalAuthorities
+      ? policyNow.policy.approvalAuthorities.gptApprovalCommentAuthors
+      : undefined,
   });
   if (drift.drift) {
     const key = mutationKey({ repository: repo, prNumber: number, headSha, policyVersion: 'drift-check', action: 'invalidate-approval' });
@@ -243,6 +334,29 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
   }
 
   const { policy } = policyNow;
+
+  // Fail-closed hạ tầng policy (Issue #5 + GPT-REV-039): canonical/project resolution lỗi
+  // là lỗi hạ tầng review (BLOCKED_*), KHÔNG phải lỗi code của PR → status:blocked hỏi người
+  // dùng, KHÔNG rơi về "bản local cũ", KHÔNG trả coder như CI_UNKNOWN thông thường.
+  if (!policy && /BLOCKED_/.test(String(policyNow.error || ''))) {
+    const key = mutationKey({ repository: repo, prNumber: number, headSha, policyVersion: 'unknown', action: 'block-policy-unresolved' });
+    if (!hasMarkerFor(comments, key)) {
+      if (!dryRun) {
+        applyHandoff(io, repo, number, { addLabels: [LABELS.blocked], removeLabels: view.labels.filter((l) => l !== LABELS.blocked) });
+        io.postComment(repo, number, [
+          `⛔ **${String(policyNow.error).split(':')[0]}** — không phân giải được effective policy (canonical ${CANONICAL_REPO} + project config).`,
+          `Fail-closed theo \`projectPolicyContract\`: không approve, không tự suy đoán từ bản local cũ.`,
+          `${markerBlock(key)}`,
+        ].join('\n\n'));
+      }
+      result.mutated = true;
+    } else {
+      result.skipped = 'block-policy-unresolved đã phát hành cho HEAD này';
+    }
+    result.error = String(policyNow.error || '').slice(0, 200);
+    return result;
+  }
+
   const ciState = evaluateChecks(policy, io.getChecks(repo, number));
 
   // Chặn event muộn giữa chừng: đọc lại lần nữa để chắc chắn headSha chưa đổi.
@@ -295,6 +409,101 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     maxRounds: policy ? policy.maxReviewRounds : 3,
     decisionGate: pre.decisionGate,
   });
+  // [GPT-REV-045][GPT-REV-046] Activation state máy đọc được VÀ có authority: marker phải do
+  // actor được policy cho phép đăng, wiring PR đúng phạm vi policy chỉ định, merged THẬT với
+  // merge SHA khớp GitHub, GPT approval hợp lệ khóa đúng head đã merge + policyVersion hiện tại.
+  // Fail-closed: mọi sai lệch/lỗi IO/mâu thuẫn → giữ transition (GPT duyệt mọi PR), không approve.
+  let runtimeWiringMerged = false;
+  try {
+    const act = resolvePhaseActivation(io, policy);
+    runtimeWiringMerged = act.active === true;
+    if (!act.active && act.reason) io.log('warn', `[activation] giữ transition: ${act.reason}`);
+  } catch (e) {
+    io.log('warn', `[activation] lỗi bằng chứng → transition fail-closed: ${String((e && e.message) || e).slice(0, 200)}`);
+    runtimeWiringMerged = false;
+  }
+  const phaseInfo = resolveReviewPhase(policy || {}, { runtimeWiringMerged });
+
+  const escalation = planEscalationForPhase(phaseInfo, {
+    verdict: pre.verdict, decisionGate: pre.decisionGate, openBlockingCount: pre.openBlocking.length,
+  });
+
+  if (phaseInfo.phase === 'blocked' || escalation.action === 'block') {
+    outcome.action = 'block-phase-unresolved';
+    outcome.addLabels = [LABELS.blocked];
+    outcome.removeLabels = [LABELS.reviewing, AGENTS.cline];
+  } else if (escalation.action === 'local-accept-candidate' && !pre.decisionGate) {
+    // Steady-state: đủ gate mới ghi local approval; mỗi gate thiếu → fail-closed escalate-gpt.
+    // Pre-check 5 gate trước ghi (readAfterWriteOk tạm true — sẽ verify thật bằng read-after-write).
+    const gates = evaluateSteadyApprovalGates({
+      ciState: 'pass',
+      passMarkerPresent: pre.verdict === 'PRE_REVIEW_PASS',
+      headSha,
+      policyValid: true,
+      policyVersionMatch: true,
+      openBlockingCount: pre.openBlocking.length,
+      readAfterWriteOk: true,
+    });
+    if (!gates.ok) {
+      const failed = gates.gates.filter((g) => !g.pass).map((g) => g.gate).join(',');
+      outcome.action = 'escalate-gpt';
+      outcome.addLabels = [LABELS.reviewRequested, AGENTS.gpt];
+      outcome.removeLabels = [LABELS.reviewing, AGENTS.cline];
+      if (!dryRun) {
+        io.postComment(repo, number,
+          `⚠️ Steady-state đủ điều kiện pha nhưng gate FAIL (${failed}) → fail-closed, bàn giao GPT. KHÔNG gắn status:approved.`);
+      }
+    } else {
+      const approvalPayload = {
+        repository: repo, prNumber: number, reviewer: REVIEWER_LOCAL, headSha,
+        policyVersion: policy.policyVersion,
+        decisionId: `steady-local-${headSha.slice(0, 16)}`,
+        ciEvidence: { requiredChecks: policy.requiredChecks, state: 'pass' },
+        openBlockingFindings: pre.openBlocking.length,
+        reviewedAt: new Date().toISOString(),
+      };
+      const approvalMarker = `<!-- ai-review-approval:${JSON.stringify(approvalPayload)} -->`;
+      const outKey = mutationKey({
+        repository: repo, prNumber: number, headSha,
+        policyVersion: policy.policyVersion, action: 'steady-local-approve',
+      });
+      if (dryRun) {
+        result.preReview = { verdict: pre.verdict, outcome: 'local-approved', gates: gates.gates };
+        return result;
+      }
+      io.postComment(repo, number,
+        `✅ **LOCAL APPROVAL (steady-state)** — đủ ${gates.gates.length} gate, không blocking. Bàn giao quyết định merge/deploy cho người dùng.\n\n${approvalMarker}${markerBlock(outKey)}`);
+      // Read-after-write: xác nhận marker thực sự ghi được trước khi chuyển status:approved.
+      const afterComments = io.listPrComments(repo, number);
+      const readBackOk = afterComments.some(
+        (t) => String(t).includes(approvalMarker) || String(t).includes(JSON.stringify(approvalPayload)),
+      );
+      // Gate cuối cùng với bằng chứng read-after-write THẬT.
+      const finalGates = evaluateSteadyApprovalGates({
+        ciState: 'pass',
+        passMarkerPresent: pre.verdict === 'PRE_REVIEW_PASS',
+        headSha,
+        policyValid: true,
+        policyVersionMatch: true,
+        openBlockingCount: pre.openBlocking.length,
+        readAfterWriteOk: readBackOk,
+      });
+      if (!finalGates.ok) {
+        result.notified = io.notify('Local approval read-after-write FAIL',
+          `${repo}#${number}: marker không xuất hiện sau ghi — fail-closed, KHÔNG gắn status:approved.`);
+        outcome.action = 'escalate-gpt';
+        outcome.addLabels = [LABELS.reviewRequested, AGENTS.gpt];
+        outcome.removeLabels = [LABELS.reviewing, AGENTS.cline];
+      } else {
+        applyHandoff(io, repo, number, { addLabels: [LABELS.approved], removeLabels: [LABELS.reviewing, AGENTS.cline] });
+        result.preReview = { verdict: pre.verdict, outcome: 'local-approved', gates: gates.gates };
+        result.notified = io.notify('Local approval (steady-state)',
+          `${repo}#${number}: đủ ${gates.gates.length} gate → status:approved cục bộ; người dùng merge/deploy.`);
+        return result;
+      }
+    }
+  }
+  // transition / escalate-gpt: giữ hành vi handoff/request-fix/block-decision-gate hiện tại phía dưới.
 
   const outKey = mutationKey({
     repository: repo, prNumber: number, headSha,
@@ -313,6 +522,9 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
         parts.push(`⛔ **DECISION GATE** — vượt giới hạn quy mô diff theo policy (\`diffLimits.maxLines\`, metric additions-plus-deletions): KHÔNG handoff approval, KHÔNG trả Cline như lỗi code thông thường. Chuyển \`status:blocked\` — người dùng quyết định tách PR nhỏ hơn hoặc ghi nhận ngoại lệ.`);
       }
     }
+    if (outcome.action === 'block-phase-unresolved') {
+      parts.push(`⛔ **BLOCKED_PHASE_UNRESOLVED** — \`reviewerPhases\` trong effective policy thiếu/mất shape: không thể xác định pha transition/steady-state an toàn. Fail-closed: KHÔNG handoff, KHÔNG approve. Sửa policy canonical rồi chạy lại.`);
+    }
     // Chỉ vòng request-fix mới tăng bộ đếm round; block/decision-gate không phải vòng fix.
     const roundMarker = outcome.action === 'request-fix' ? ` <!-- ai-pr-reviewer:round=${rounds + 1} -->` : '';
     const extraMarker = pre.verdict === 'PRE_REVIEW_PASS'
@@ -330,8 +542,9 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
       'handoff-gpt': `PRE_REVIEW_PASS — bàn giao GPT phê duyệt cuối (status:review-requested + agent:gpt).`,
       'request-fix': `PRE_REVIEW_FINDINGS (${pre.openBlocking.length} blocking) — trả Cline sửa qua nhãn PR.`,
       'block-decision-gate': `Diff vượt giới hạn policy (${pre.decisionGate}) — status:blocked, Decision Gate: người dùng quyết định.`,
+      'block-phase-unresolved': `reviewerPhases hỏng trong effective policy — status:blocked, fail-closed.`,
       'block': `Vượt tối đa ${rounds} vòng fix — status:blocked, cần người dùng quyết định.`,
-    }[outcome.action];
+    }[outcome.action] || `Kết quả pre-review: ${outcome.action}`;
     result.notified = io.notify('Kết quả pre-review', `${repo}#${number}: ${summary}`);
   }
   return result;

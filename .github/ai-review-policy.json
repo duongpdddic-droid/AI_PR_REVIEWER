@@ -1,19 +1,64 @@
 {
-  "policyVersion": "2026-08-23.1",
-  "description": "Policy canonical cho quy trinh AI PR Review (Issue #2). Tai lieu nguoi doc (AGENT_HANDOFF_PROTOCOL.md, AGENTS.md, .clinerules) PHAI tham chieu file nay, khong tu dinh nghia ban thu hai.",
+  "policyVersion": "2026-08-23.7",
+  "description": "Policy CANONICAL DUY NHAT cho quy trinh AI PR Review (AI_PR_REVIEWER Issue #2 + Issue #5). Repo du an khong giu ban sao; tham chieu + pin version qua projectPolicyContract. Mo hinh reviewer hai giai doan (transition/steadyState) theo [USER-DECISION] tren Issue duongpdddic-droid/AI_PR_REVIEWER#2 (comment id 5381416494); contract reviewer-coder va discovery task fail-closed theo [GPT-REV-036]/[GPT-REV-037].",
   "scope": {
     "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD"],
-    "note": "Moi repo giu ban sao giong nhau cua file nay; policyVersion phai khop giua hai repo."
+    "note": "Ban canonical duy nhat nam tai repo nay (.github/ai-review-policy.json). Repo du an (vd QLDA_DTXD) KHONG mirror file nay; chi giu .github/project-review-policy.json khai bao policySource + pinnedVersion + projectOverrides. Effective policy = global (canonical) + project overrides CHI tren allowedProjectOverrides."
+  },
+  "projectPolicyContract": {
+    "source": "[Issue #5] Centralize coder-reviewer protocol — AI_PR_REVIEWER la Single Source of Truth",
+    "model": "global+project",
+    "canonicalRepo": "duongpdddic-droid/AI_PR_REVIEWER",
+    "canonicalPath": ".github/ai-review-policy.json",
+    "projectConfigFile": ".github/project-review-policy.json",
+    "precedence": [
+      "canonical-global-rules",
+      "project-overrides-allowed-only"
+    ],
+    "precedenceNote": "Project override KHONG BAO GIO ghi de global invariant/quy trinh review; chi dinh nghia gia tri project-specific cho cac khoa trong allowedProjectOverrides.",
+    "allowedProjectOverrides": [
+      "requiredChecks",
+      "additionalTestCommands",
+      "protectedPaths",
+      "memoryBankRules",
+      "gasDeployRules"
+    ],
+    "invariantLockedKeys": [
+      "reviewerPhases",
+      "reviewerCoderContract",
+      "minimalCommandDiscovery",
+      "authority",
+      "approvalAuthorities",
+      "blockingSeverities",
+      "severityTaxonomy",
+      "finalReviewer",
+      "maxReviewRounds",
+      "diffLimits",
+      "lateEventBehavior",
+      "approvalMarker",
+      "stateMachine",
+      "rules"
+    ],
+    "failClosed": {
+      "BLOCKED_CANONICAL_UNAVAILABLE": "Canonical policy khong doc duoc (missing/unreachable/unparseable) -> BLOCKED, khong approve, khong dung ban local cu.",
+      "BLOCKED_CANONICAL_INVALID": "Canonical policy khong pass validatePolicy -> BLOCKED.",
+      "BLOCKED_POLICY_DUPLICATE_KEYS": "Canonical policy co duplicate JSON keys (vd khai lai canonicalRepo) -> schema mo ho -> BLOCKED. [GPT-REV-045]",
+      "BLOCKED_VERSION_MISMATCH": "projectConfig.policySource.pinnedVersion != canonical.policyVersion -> BLOCKED, phai bump pin cung canonical.",
+      "BLOCKED_INVALID_OVERRIDE": "Override khoa khong thuoc allowedProjectOverrides -> BLOCKED.",
+      "BLOCKED_INVARIANT_OVERRIDE": "Override cham vao invariantLockedKeys -> BLOCKED."
+    }
   },
   "requiredChecks": [
     "verify"
   ],
+  "requiredChecksNote": "Ten chinh xac cua check-run trong .github/workflows/verify.yml (job id/name: 'verify' / 'Verify CI'). Thieu/sai ten = CI_UNKNOWN fail-closed.",
   "blockingSeverities": [
     "critical",
     "important"
   ],
   "severityTaxonomy": ["critical", "important", "suggestion"],
   "finalReviewer": "agent:gpt",
+  "finalReviewerNote": "Gia tri nay la reviewer cuoi cho GIAI DOAN CHUYEN TIEP (transition) — xem reviewerPhases. O steady state reviewer mac dinh la reviewer:local theo dieu kien approvalRequiresAllGates.",
   "preReviewer": "reviewer:local",
   "executor": "agent:cline",
   "maxReviewRounds": 3,
@@ -26,8 +71,98 @@
     "ciVerification": "AI_PR_REVIEWER local",
     "semanticPreReview": "reviewer:local",
     "finalApproval": "agent:gpt",
+    "finalApprovalNote": "Giai doan transition. Steady state: reviewer:local duoc phep approve khi du toan bo reviewerPhases.steadyState.approvalRequiresAllGates.",
     "merge": "user",
     "deploy": "user"
+
+  },
+  "approvalAuthorities": {
+    "gptApprovalCommentAuthors": ["duongpdddic-droid"],
+    "localApprovalCommentAuthors": ["duongpdddic-droid"]
+  },
+  "reviewerPhases": {
+    "source": "[USER-DECISION] Mo hinh reviewer muc tieu sau Issue #2 — duongpdddic-droid/AI_PR_REVIEWER#2, comment id 5381416494 (22/08/2026)",
+    "currentPhase": "transition",
+    "phases": {
+      "transition": {
+        "appliesWhile": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 chua hoan thanh: runtime wiring (unified-orchestrator.mjs / review-contract.mjs / gpt-approval.mjs) chua duoc trien khai qua PR rieng duoc GPT duyet va merge",
+        "finalReviewer": "agent:gpt",
+        "localReviewerCanApprove": false,
+        "runtimeWiringPrRequired": true,
+        "rationale": "AI_PR_REVIEWER khong tu chung nhan ban thay doi kien truc reviewer cua chinh no; local chi pre-review/ho tro. Hai PR contract/fix chi duoc merge sau khi GPT duet dung HEAD SHA va nguoi dung cho phep; viec merge hai PR nay KHONG tu kich hoat steady-state."
+      },
+      "steadyState": {
+        "appliesAfter": "Issue duongpdddic-droid/AI_PR_REVIEWER#2 hoan thanh: PR runtime wiring thu ba da duoc GPT duyet dung full HEAD SHA va nguoi dung merge (khong tu kich hoat khi hai PR contract/fix merge)",
+        "activationRequires": ["runtimeWiringPrGptApproved", "runtimeWiringPrMerged"],
+        "activationEvidence": {
+          "type": "issue-comment-marker",
+          "repo": "duongpdddic-droid/AI_PR_REVIEWER",
+          "issue": 2,
+          "prefix": "<!-- ai-review-phase-activation:",
+          "allowedRecorders": ["duongpdddic-droid"],
+          "expectedWiringPr": {"repo": "duongpdddic-droid/AI_PR_REVIEWER", "number": 4},
+          "note": "[GPT-REV-045]+[GPT-REV-046] Nguon kich hoat may doc duoc CO AUTHORITY, fail-closed: MOT comment tren Issue nay chua marker prefix + JSON {phase:'steady-state', wiringPr, wiringMergedSha (full 40-hex), gptApprovedHeadSha (full 40-hex), recordedBy, recordedAt}. Orchestrator KHONG tin truong tu khai bao trong body: author comment phai thuoc allowedRecorders; wiringPr phai dung expectedWiringPr; wiring PR phai MERGED that (doc tu GitHub REST, merged=true) voi merge_commit_sha khop wiringMergedSha va head sha khop gptApprovedHeadSha; tren wiring PR phai co GPT approval marker hop le (reviewer agent:gpt, khoa dung head da merge + policyVersion hien tai, khong con finding blocking). Nhieu marker mau thuan / thieu quyen / sai bat ky dieu kien / API loi -> giu transition, tuyet doi khong local approve."
+        },
+        "defaultReviewer": "reviewer:local",
+        "localReviewerCanApprove": true,
+        "gptReReviewsEveryPr": false,
+        "approvalRequiresAllGates": [
+          "requiredChecksAllPassed",
+          "realSemanticReviewCompleted",
+          "approvalLockedToHeadShaAndPolicyVersion",
+          "noOpenBlockingFindings",
+          "policyValid",
+          "readAfterWriteSucceeded"
+        ],
+        "escalateToGptWhen": [
+          "userExplicitRequest",
+          "statusBlockedOrDecisionGate",
+          "highRiskPrPerPolicy",
+          "insufficientEvidenceOrConflictOrReviewLimitExceededOrApprovalSuspicion",
+          "postAuditOrQualitySampling"
+        ],
+        "escalationBehavior": "Bat ky truong hop escalation/thieu bang chung/xung dot/nghi van approval -> fail-closed: khong approve, chuyen GPT (agent:gpt) hoac status:blocked hoi nguoi dung. Nguoi dung van la nguoi quyet merge va deploy."
+      }
+    },
+    "invariantsAllPhases": [
+      "ciPassNeverApproves",
+      "emptyChecksFailClosed",
+      "approvalLockedToFullHeadShaAndPolicyVersion",
+      "headChangeInvalidatesApproval",
+      "openCriticalOrImportantFindingBlocksApproval",
+      "draftClosedMergedOrLateEventNeverApproved",
+      "multipleStatusLabelsOrPartialMutationOrBadReadBackGoesBlocked",
+      "neverSwallowGithubTelegramModelErrors",
+      "userAlwaysDecidesMergeAndDeploy"
+    ]
+  },
+  "reviewerCoderContract": {
+    "source": "[GPT-REV-036] PR duongpdddic-droid/QLDA_DTXD#42 — Reviewer <-> Coder protocol bat buoc",
+    "findingRequiredFields": ["code", "severity", "evidence", "risk", "expectedOutcome"],
+    "findingRequiredFieldsNote": "Finding thieu bat ky truong nao -> finding KHONG hop le, coder co the REBUT voi ly do 'malformed-finding'; reviewer phai xac nhan va cap nhat finding truoc khi dem lai blocking.",
+    "findingCodeFormat": "(GPT|LOCAL)-REV-NNN hoac (GPT|LOCAL)-RULE-NNN; Cline phan hoi bang CLINE-FIX-NNN hoac CLINE-REBUT-NNN.",
+    "coderVerdicts": ["CLINE-FIX-NNN", "CLINE-REBUT-NNN"],
+    "coderVerdictsNote": "CLINE-FIX-NNN = da sua + commit + evidence test. CLINE-REBUT-NNN = phan bien van de moi (evidence cu the: code/API/test/so lieu); REBUT khong duoc dung de tu resolve thread khi chua co bang chung.",
+    "reviewerRebuttalVerdicts": ["ACCEPTED", "REJECTED"],
+    "rebuttalHandlingNote": "Reviewer BAT BUOC xu ly moi CLINE-REBUT-NNN bang ACCEPTED (dong finding/ghi nhan lap luan) hoac REJECTED (tra loi tung diem bang evidence). Im lang = chua xu ly = finding van con mo.",
+    "coderSelfResolveForbidden": true,
+    "unresolvedDisputeBehavior": "Bất đồng không phân xử được sau 1 vòng REBUT->REJECTED (coder vẫn chưa đồng ý hoặc thiếu bằng chứng kết luận) -> fail-closed: chuyển agent:gpt hoặc status:blocked hỏi người dùng; CẤM coder tự đóng thread/tự gắn approved."
+  },
+  "minimalCommandDiscovery": {
+    "source": "[GPT-REV-037] PR duongpdddic-droid/QLDA_DTXD#42 — prompt toi thieu + task discovery fail-closed",
+    "minimalCommands": [
+      { "text": "Xử lý tiếp.", "aliases": ["Thực thi tiếp."], "equivalentTo": "discover-and-resume" }
+    ],
+    "minimalCommandsNote": "Hai câu lệnh TƯƠNG ĐƯƠNG tuyệt đối; cả Coder và Reviewer hiểu cùng một nghĩa: tự khám phá trạng thái rồi tiếp tục, không cần người dùng nhớ số Issue/PR.",
+    "discoveryOrder": [
+      "git-repo-origin-and-worktree-state",
+      "memory-bank-activeContext-progress",
+      "github-issue-pr-head-ci-findings"
+    ],
+    "discoveryOrderNote": "Agent tự đối chiếu repo/origin -> Memory Bank -> GitHub (Issue/PR/HEAD/CI/findings) trước khi hỏi người dùng bất kỳ số hiệu nào; stale checkpoint trong Memory Bank KHÔNG BAO GIỜ thắng trạng thái GitHub thật.",
+    "zeroTaskBehavior": { "result": "NO_TASK", "mutationAllowed": false, "note": "Không có Issue agent:cline+status:ready-for-cline và không có checkpoint dang dở -> báo NO_TASK, KHÔNG mutation." },
+    "oneTaskBehavior": { "result": "claim-exactly-one", "note": "Đúng một task hợp lệ -> claim đúng task đó (preflight PASS) và thực thi." },
+    "manyOrConflictingTaskBehavior": { "result": "blocked-no-guessing", "mutationAllowed": false, "note": "Nhiều task hợp lệ hoặc task mâu thuẫn nhau -> status:blocked hỏi người dùng chọn; KHÔNG đoán, KHÔNG tự chọn." }
   },
   "lateEventBehavior": {
     "staleByHeadSha": true,

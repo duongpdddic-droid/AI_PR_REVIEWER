@@ -5,7 +5,7 @@
 // Exit 0 = PASS, 1 = FAIL.
 
 import { processOneCycle, processPr, applyHandoff } from './unified-orchestrator.mjs';
-import { LABELS, AGENTS, buildApprovalMarker } from './review-contract.mjs';
+import { LABELS, AGENTS, REVIEWER_LOCAL, buildApprovalMarker } from './review-contract.mjs';
 
 const SHA = 'c'.repeat(40);
 const POLICY = {
@@ -15,6 +15,17 @@ const POLICY = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
+  approvalAuthorities: { gptApprovalCommentAuthors: ['duongpdddic-droid'], localApprovalCommentAuthors: ['duongpdddic-droid'] },
+  // reviewerPhases shape tối thiểu như canonical — thiếu → phase resolution fail-closed (blocked).
+  reviewerPhases: {
+    phases: {
+      transition: { runtimeWiringPrRequired: true, localReviewerCanApprove: false },
+      steadyState: {
+        activationRequires: ['runtimeWiringPrGptApproved', 'runtimeWiringPrMerged'],
+        localReviewerCanApprove: true,
+      },
+    },
+  },
 };
 
 const results = [];
@@ -169,7 +180,8 @@ function makeIo(opts = {}) {
   tru('I.7 về review-requested + gpt', pr.labels.includes(LABELS.reviewRequested) && pr.labels.includes(AGENTS.gpt));
   // Approval hợp lệ cho HEAD → không drift, PR bị skip (chờ người dùng merge).
   const marker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: AGENTS.gpt, headSha: SHA, policyVersion: POLICY.policyVersion, decisionId: 'dec-i7', openBlockingFindings: 0, reviewedAt: '2026-08-22T01:00:00Z' });
-  const t2 = makeIo({ labels: [LABELS.approved], comments: [`approval ${marker}`] });
+  // [GPT-REV-048] approval hợp lệ phải có provenance (commentId + authorLogin = rich comment object).
+  const t2 = makeIo({ labels: [LABELS.approved], comments: [{ id: 'm1', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-22T01:00:00Z', body: `approval ${marker}` }] });
   const cycle2 = await processOneCycle(t2.io, { dryRun: false, repos: ['o/r'] });
   eq('I.7 approval hợp lệ → được quét', cycle2.results.length, 1);
   tru('I.7 skip chờ merge', String(cycle2.results[0].skipped || '').includes('approved'));
@@ -308,12 +320,32 @@ function makeIo(opts = {}) {
   const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   tru('I.17 orchestrator không gọi gpt-approval trong code', !codeOnly.includes('gpt-approval'));
   tru('I.17 orchestrator không tự build approval marker', !src.includes('buildApprovalMarker'));
-  tru('I.17 không nhánh nào add status:approved trong orchestrator',
-    !src.match(/addLabels:\s*\[[^\]]*approved/));
+  // [GPT-REV-045] add status:approved CHỈ được phép DUY NHẤT trong nhánh steady-state,
+  // sau guard escalation local-accept-candidate + evaluateSteadyApprovalGates + !gates.ok fallback.
+  const approvedAddIdx = codeOnly.search(/addLabels:\s*\[[^\]]*LABELS\.approved/);
+  const secondApprovedAdd = approvedAddIdx === -1 ? -1
+    : codeOnly.slice(approvedAddIdx + 1).search(/addLabels:\s*\[[^\]]*LABELS\.approved/);
+  const guardIdx = codeOnly.indexOf("escalation.action === 'local-accept-candidate'");
+  const gatesIdx = codeOnly.indexOf('evaluateSteadyApprovalGates({');
+  const failGateIdx = codeOnly.indexOf('if (!gates.ok)');
+  tru('I.17 add status:approved duy nhất, nằm sau guard steady-state gates',
+    approvedAddIdx !== -1 && secondApprovedAdd === -1
+    && guardIdx !== -1 && gatesIdx !== -1 && failGateIdx !== -1
+    && guardIdx < approvedAddIdx && gatesIdx < approvedAddIdx && failGateIdx < approvedAddIdx);
   // Hành vi: chu kỳ đầy đủ trên PR sạch chỉ kết thúc ở review-requested + agent:gpt.
   const { io, pr } = makeIo({ labels: [LABELS.reviewing] });
   await processOneCycle(io, { dryRun: false, repos: ['o/r'] });
   tru('I.17 kết thúc không approved', !pr.labels.includes(LABELS.approved));
+}
+
+// I.18 [GPT-REV-049] Local marker đúng payload nhưng sai author → KHÔNG giữ status:approved (drift).
+{
+  const localMarker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: REVIEWER_LOCAL, headSha: SHA, policyVersion: POLICY.policyVersion, decisionId: 'steady-wrong', openBlockingFindings: 0, reviewedAt: '2026-08-22T01:00:00Z' });
+  const { io, pr } = makeIo({ labels: [LABELS.approved], comments: [{ id: 'm1', user: { login: 'attacker' }, created_at: '2026-08-22T01:00:00Z', body: `local ${localMarker}` }] });
+  const cycle = await processOneCycle(io, { dryRun: false, repos: ['o/r'] });
+  eq('I.18 không lỗi', cycle.errors.length, 0);
+  tru('I.18 gỡ approved do local author sai', !pr.labels.includes(LABELS.approved));
+  tru('I.18 về review-requested + gpt', pr.labels.includes(LABELS.reviewRequested) && pr.labels.includes(AGENTS.gpt));
 }
 
 let fail = 0;
