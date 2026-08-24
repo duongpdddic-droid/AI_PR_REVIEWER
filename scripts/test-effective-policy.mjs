@@ -82,6 +82,14 @@ const projectConfigQldA = {
   ok('override invariant → BLOCKED_INVARIANT_OVERRIDE; khóa lạ → BLOCKED_INVALID_OVERRIDE');
 }
 
+// --- [GPT-REV-049] Project override approvalAuthorities → BLOCKED_INVARIANT_OVERRIDE (allowlist không được ghi đè) ---
+{
+  const bad = JSON.parse(JSON.stringify(projectConfigQldA));
+  bad.projectOverrides.approvalAuthorities = { gptApprovalCommentAuthors: ['evil'], localApprovalCommentAuthors: ['evil'] };
+  assert.throws(() => resolveEffectivePolicy(canonical, bad), (e) => e.code === 'BLOCKED_INVARIANT_OVERRIDE');
+  ok('project override approvalAuthorities → BLOCKED_INVARIANT_OVERRIDE (không ghi đè allowlist)');
+}
+
 // --- Repo không có project config → effective = canonical (backward-safe) ---
 {
   const { policy, meta } = resolveEffectivePolicy(canonical, null);

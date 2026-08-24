@@ -1,5 +1,12 @@
 # Progress (AI_PR_REVIEWER)
 
+## 24/08/2026 — Vá lỗ hổng allowlist actor giả marker `agent:gpt` (GPT-REV-049) — COMPLETED (verify xanh sau corrective)
+
+- [x] [GPT-REV-049] PR AI_PR_REVIEWER#4, commit `8f81c36` + corrective commit: `isApprovalValid` bắt buộc `authorLogin ∈ ctx.gptApprovers` fail-closed `UNAUTHORIZED_ACTOR`; policy `authority.gptApprovers: ["duongpdddic-droid"]`; thread `gptApprovers`/`localApprovers` qua `effectiveApproval`→`planPhaseActivation`/`planApprovalDrift`/`performApproval`; `validatePolicy` bắt buộc `gptApprovers`+`localApprovers` non-empty. Sửa JSON dư dấu phẩy + test param `approvers`→`gptApprovers` + marker thiếu `prNumber`.
+- [x] Gates (thực tế): full-verify **53/53**; pure-logic **189/189**; approval-gate **53/53**; orchestrator **76/76**; runtime **20/20**; effective-policy **22/22**; review-phases **40/40** — TẤT CẢ PASS.
+- [x] Bàn giao `[CLINE-FIX-049]` comment PR #4; nhãn `agent:gpt` + `status:review-requested`; PR body HEAD cập nhật tại HEAD mới. KHÔNG merge/deploy.
+- Trạng thái: chờ GPT re-review #4.
+
 ## 23/08/2026 22:46 — Align approval pipeline to rich comment objects (GPT-REV-048) — COMPLETED (verify xanh)
 
 - [x] Toàn bộ pipeline approval nhận RICH comment object `{id, user:{login}, created_at, body}`; fail-closed: marker body thuần không provenance bị từ chối.

@@ -74,13 +74,18 @@ export function validatePolicy(policy) {
   if (!Number.isInteger(policy.maxReviewRounds) || policy.maxReviewRounds < 1) {
     return { ok: false, error: 'maxReviewRounds phải là số nguyên >= 1' };
   }
-  // [GPT-REV-049] authority.approvers là allowlist danh tính được phép đăng GPT approval
-  // marker. Thiếu/rỗng → fail-closed (bất kỳ actor nào cũng có thể giả marker).
-  if (!policy.authority || typeof policy.authority !== 'object') {
-    return { ok: false, error: 'thiếu object authority' };
+  // [GPT-REV-049] approvalAuthorities: allowlist riêng theo loại approval (KHÔNG dùng
+  // activationEvidence.allowedRecorders). gptApprovalCommentAuthors / localApprovalCommentAuthors
+  // đều phải là mảng không rỗng. Thiếu/rỗng/sai schema → fail-closed (bất kỳ actor nào cũng có
+  // thể giả marker approval).
+  const aa = policy.approvalAuthorities;
+  if (!aa || typeof aa !== 'object') {
+    return { ok: false, error: 'thiếu object approvalAuthorities' };
   }
-  if (!Array.isArray(policy.authority.approvers) || policy.authority.approvers.length === 0) {
-    return { ok: false, error: 'authority.approvers phải là mảng không rỗng (allowlist người đăng GPT approval)' };
+  for (const k of ['gptApprovalCommentAuthors', 'localApprovalCommentAuthors']) {
+    if (!Array.isArray(aa[k]) || aa[k].length === 0) {
+      return { ok: false, error: `approvalAuthorities.${k} phải là mảng không rỗng (allowlist người đăng approval marker)` };
+    }
   }
   return { ok: true, error: null };
 }
@@ -259,15 +264,16 @@ export function isApprovalValid(record, ctx) {
   if (ctx.prNumber != null && Number(record.prNumber) !== Number(ctx.prNumber)) return { valid: false, reason: 'sai PR number' };
   if (Number(record.openBlockingFindings ?? 0) > 0) return { valid: false, reason: 'còn finding blocking mở' };
   if (!String(record.decisionId || '').trim()) return { valid: false, reason: 'marker thiếu decisionId (không hợp lệ theo GPT-REV-032)' };
-  // [GPT-REV-049] Allowlist fail-closed: GPT approval marker CHỈ hợp lệ khi authorLogin
-  // thuộc policy.authority.approvers. Không cho phép actor bất kỳ (bot/third-party) giả
-  // marker reviewer:agent:gpt. Nếu caller không truyền approvers (policy thiếu) → fail-closed.
-  const approvers = Array.isArray(ctx.approvers) ? ctx.approvers.map((a) => String(a)) : [];
-  if (approvers.length === 0) {
-    return { valid: false, reason: 'UNAUTHORIZED_ACTOR: policy.authority.approvers rỗng/không được truyền — từ chối mọi GPT approval marker' };
+  // [GPT-REV-049] Allowlist fail-closed: GPT approval marker CHỈ hợp lệ khi commentId + authorLogin
+  // có provenance VÀ authorLogin thuộc policy.approvalAuthorities.gptApprovalCommentAuthors.
+  // Không cho phép actor bất kỳ (bot/third-party) giả marker reviewer:agent:gpt. Nếu caller
+  // không truyền gptApprovers (policy thiếu approvalAuthorities) → fail-closed.
+  const gptApprovers = Array.isArray(ctx.gptApprovers) ? ctx.gptApprovers.map((a) => String(a)) : [];
+  if (gptApprovers.length === 0) {
+    return { valid: false, reason: 'UNAUTHORIZED_ACTOR: policy.approvalAuthorities.gptApprovalCommentAuthors rỗng/không được truyền — từ chối mọi GPT approval marker' };
   }
-  if (!approvers.includes(String(record.authorLogin))) {
-    return { valid: false, reason: `UNAUTHORIZED_ACTOR: author "${String(record.authorLogin || '(rỗng)')}" không thuộc policy.authority.approvers` };
+  if (!gptApprovers.includes(String(record.authorLogin))) {
+    return { valid: false, reason: `UNAUTHORIZED_ACTOR: author "${String(record.authorLogin || '(rỗng)')}" không thuộc policy.approvalAuthorities.gptApprovalCommentAuthors` };
   }
   return { valid: true, reason: null };
 }
@@ -326,16 +332,17 @@ export const LOCAL_APPROVAL_REQUIRED_FIELDS = [
 // [GPT-REV-048] Fail-closed: local approval marker PHẢI có provenance (authorLogin + commentId).
 // Chỉ chấp nhận marker do actor/relay được policy cho phép (allowedRecorders từ activationEvidence,
 // hoặc identity người dùng relay). Legacy body string không được tin cậy.
-export function steadyLocalApproval(records, { headSha, repository, prNumber, policyVersion, allowedRecorders } = {}) {
+export function steadyLocalApproval(records, { headSha, repository, prNumber, policyVersion, localApprovers } = {}) {
+  // [GPT-REV-049] Fail-closed: thiếu allowlist local → KHÔNG có approval cục bộ hợp lệ nào.
+  const local = Array.isArray(localApprovers) ? localApprovers.map((a) => String(a)) : [];
+  if (local.length === 0) return null;
   for (const entry of parseApprovalMarkers(records)) {
     const r = entry.marker;
     if (String(r.reviewer) !== REVIEWER_LOCAL) continue;
     // Provenance check: cần commentId + authorLogin
     if (!entry.commentId || !entry.authorLogin) continue; // bỏ qua legacy body string
-    // Authorization check: author phải trong allowedRecorders (nếu có khai báo)
-    if (allowedRecorders && Array.isArray(allowedRecorders) && allowedRecorders.length > 0) {
-      if (!allowedRecorders.includes(entry.authorLogin)) continue;
-    }
+    // Authorization check: author PHẢI thuộc localApprovalCommentAuthors.
+    if (!local.includes(entry.authorLogin)) continue;
     const fieldsOk = LOCAL_APPROVAL_REQUIRED_FIELDS.every((k) => r[k] !== undefined && r[k] !== null && r[k] !== '');
     const shaOk = /^[0-9a-f]{40}$/i.test(String(r.headSha || ''))
       && String(r.headSha).toLowerCase() === String(headSha || '').toLowerCase();
@@ -351,13 +358,14 @@ export function steadyLocalApproval(records, { headSha, repository, prNumber, po
 // cho HEAD hiện tại → gỡ hiệu lực approval cũ, chuyển lại status:review-requested.
 // [GPT-REV-048] comments: mảng comment RICH object {id, user:{login}, created_at, body} hoặc legacy string.
 // allowedRecorders: danh sách actor được phép đăng local approval marker (từ policy.activationEvidence.allowedRecorders).
-export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion, allowedRecorders, approvers } = {}) {
+export function planApprovalDrift({ labels, comments, headSha, repository, prNumber, policyVersion, gptApprovers, localApprovers } = {}) {
   const norm = normalizeStatusLabels(labels);
   if (norm.keepStatus !== LABELS.approved) return { drift: false };
-  const ctx = { headSha, repository, prNumber, policyVersion, approvers };
-  // [GPT-REV-045 + GPT-REV-048] Approval hợp lệ = GPT (mọi pha, có provenance) HOẶC
-  // reviewer:local steady-state đủ gates VÀ có provenance + authorized author.
-  const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, { ...ctx, allowedRecorders });
+  const ctx = { headSha, repository, prNumber, policyVersion, gptApprovers };
+  // [GPT-REV-045 + GPT-REV-048 + GPT-REV-049] Approval hợp lệ = GPT (mọi pha, có provenance +
+  // author ∈ gptApprovalCommentAuthors) HOẶC reviewer:local steady-state đủ gates VÀ có
+  // provenance + author ∈ localApprovalCommentAuthors. Thiếu allowlist → fail-closed (drift).
+  const approval = effectiveApproval(comments, ctx) || steadyLocalApproval(comments, { ...ctx, localApprovers });
   if (approval) return { drift: false, approval };
   return {
     drift: true,
@@ -573,7 +581,7 @@ export function collectActivationRecords(comments) {
  * Fail-closed: bất kỳ điều kiện thiếu/sai/mâu thuẫn/lỗi IO (wiringState null) → { active:false }.
  */
 export function planPhaseActivation({
-  records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion, authorityApprovers,
+  records, allowedRecorders, expectedWiringPr, wiringState, wiringApprovalRecords, policyVersion, gptApprovers,
 } = {}) {
   const inactive = (reason) => ({ active: false, reason });
   if (!Array.isArray(records) || records.length === 0) return inactive('không có marker kích hoạt');
@@ -603,7 +611,7 @@ export function planPhaseActivation({
   }
   const approval = effectiveApproval(wiringApprovalRecords, {
     repository: ev.repo, prNumber: ev.number, headSha: rec.gptApprovedHeadSha, policyVersion,
-    approvers: authorityApprovers,
+    gptApprovers,
   });
   if (!approval) {
     return inactive('không có GPT approval hợp lệ khóa đúng head đã merge + policyVersion hiện tại trên wiring PR');

@@ -1,3 +1,15 @@
+## 24/08/2026 — Vá lỗ hổng allowlist actor giả marker `agent:gpt` ([CLINE-FIX-049] / GPT-REV-049) ✅ ALL GREEN (sau corrective commit)
+
+- **Finding**: [GPT-REV-049] Critical — `isApprovalValid`/`effectiveApproval` chỉ check `authorLogin` không rỗng, không đối chiếu allowlist. Actor bất kỳ (bot/third-party) đăng marker `reviewer: agent:gpt` được chấp nhận là GPT approval hợp lệ → leo quyền phê duyệt.
+- **Fix** (logic tại commit `8f81c36` + corrective commit trên `chore/policy-sync-reviewer-phases`):
+  - `.github/ai-review-policy.json`: thêm `authority.gptApprovers: ["duongpdddic-droid"]` (allowlist danh tính được phép đăng GPT approval marker). Sửa lỗi JSON dư dấu phẩy cuối (trailing comma) làm `JSON.parse` fail tại position 4066.
+  - `review-contract.mjs` `isApprovalValid`: bắt buộc `record.authorLogin ∈ ctx.gptApprovers`, fail-closed `UNAUTHORIZED_ACTOR` (thiếu/không thuộc allowlist).
+  - Thread `gptApprovers`/`localApprovers` qua `effectiveApproval` → `planPhaseActivation` / `planApprovalDrift` / `performApproval`. (Đổi tên param `approvers`→`gptApprovers` cho khớp test + orchestrator; `validatePolicy` bắt buộc `gptApprovers`+`localApprovers` non-empty.)
+- **Tests (correction)**: `8f81c36` từng báo xanh NHƯNG thực tế ĐỎ do (1) policy JSON dư dấu phẩy + (2) test truyền `approvers`/`mkGpt()` sai shape. Đã sửa: test C.4/C.5 dùng `gptApprovers`; C.23 build marker đủ `prNumber:4`; `JSON.stringify(mkGpt())`→`mkGpt()`. Debug tiếp: `gptApproval` thiếu `prNumber` → `isApprovalValid` báo "sai PR number" (đã thêm).
+- **Gates (thực tế xanh)**: full-verify **53/53**; pure-logic **189/189**; approval-gate **53/53**; orchestrator **76/76**; runtime **20/20**; effective-policy **22/22**; review-phases **40/40** — TẤT CẢ PASS.
+- **Bàn giao**: đã push `8f81c36` + corrective commit; remote PR #4 headRefOid sẽ khớp HEAD mới. Comment `[CLINE-FIX-049]`. Nhãn `agent:gpt` + `status:review-requested`. CHƯA merge/deploy.
+- **Trạng thái**: sửa xong, verify xanh. Cần re-confirm PR body HEAD + labels tại HEAD mới, chờ GPT re-review PR #4.
+
 ## 23/08/2026 22:46 (ACT) — Align approval pipeline to rich comment objects (GPT-REV-048) ✅ ALL GREEN
 
 - **Mục tiêu**: toàn bộ pipeline approval (parse/validate/effective/drift/local/steady-state) nhận comment RICH object `{id, user:{login}, created_at, body}` thay vì legacy string; fail-closed: marker từ body thuần (không provenance) KHÔNG được tin cậy cho approval.

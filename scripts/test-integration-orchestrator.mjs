@@ -5,7 +5,7 @@
 // Exit 0 = PASS, 1 = FAIL.
 
 import { processOneCycle, processPr, applyHandoff } from './unified-orchestrator.mjs';
-import { LABELS, AGENTS, buildApprovalMarker } from './review-contract.mjs';
+import { LABELS, AGENTS, REVIEWER_LOCAL, buildApprovalMarker } from './review-contract.mjs';
 
 const SHA = 'c'.repeat(40);
 const POLICY = {
@@ -15,7 +15,7 @@ const POLICY = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 100 },
-  authority: { approvers: ['duongpdddic-droid'] },
+  approvalAuthorities: { gptApprovalCommentAuthors: ['duongpdddic-droid'], localApprovalCommentAuthors: ['duongpdddic-droid'] },
   // reviewerPhases shape tối thiểu như canonical — thiếu → phase resolution fail-closed (blocked).
   reviewerPhases: {
     phases: {
@@ -336,6 +336,16 @@ function makeIo(opts = {}) {
   const { io, pr } = makeIo({ labels: [LABELS.reviewing] });
   await processOneCycle(io, { dryRun: false, repos: ['o/r'] });
   tru('I.17 kết thúc không approved', !pr.labels.includes(LABELS.approved));
+}
+
+// I.18 [GPT-REV-049] Local marker đúng payload nhưng sai author → KHÔNG giữ status:approved (drift).
+{
+  const localMarker = buildApprovalMarker({ repository: 'o/r', prNumber: 7, reviewer: REVIEWER_LOCAL, headSha: SHA, policyVersion: POLICY.policyVersion, decisionId: 'steady-wrong', openBlockingFindings: 0, reviewedAt: '2026-08-22T01:00:00Z' });
+  const { io, pr } = makeIo({ labels: [LABELS.approved], comments: [{ id: 'm1', user: { login: 'attacker' }, created_at: '2026-08-22T01:00:00Z', body: `local ${localMarker}` }] });
+  const cycle = await processOneCycle(io, { dryRun: false, repos: ['o/r'] });
+  eq('I.18 không lỗi', cycle.errors.length, 0);
+  tru('I.18 gỡ approved do local author sai', !pr.labels.includes(LABELS.approved));
+  tru('I.18 về review-requested + gpt', pr.labels.includes(LABELS.reviewRequested) && pr.labels.includes(AGENTS.gpt));
 }
 
 let fail = 0;

@@ -277,7 +277,7 @@ export function resolvePhaseActivation(io, policy) {
     wiringState,
     wiringApprovalRecords,
     policyVersion: policy.policyVersion,
-    authorityApprovers: policy.authority && policy.authority.approvers,
+    gptApprovers: policy.approvalAuthorities && policy.approvalAuthorities.gptApprovalCommentAuthors,
   });
 }
 
@@ -300,13 +300,11 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     labels: view.labels, comments, headSha,
     repository: repo, prNumber: number,
     policyVersion: policyNow.policy ? policyNow.policy.policyVersion : undefined,
-    allowedRecorders: policyNow.policy && policyNow.policy.reviewerPhases
-      && policyNow.policy.reviewerPhases.phases.steadyState
-      && policyNow.policy.reviewerPhases.phases.steadyState.activationEvidence
-      ? policyNow.policy.reviewerPhases.phases.steadyState.activationEvidence.allowedRecorders
+    localApprovers: policyNow.policy && policyNow.policy.approvalAuthorities
+      ? policyNow.policy.approvalAuthorities.localApprovalCommentAuthors
       : undefined,
-    approvers: policyNow.policy && policyNow.policy.authority
-      ? policyNow.policy.authority.approvers
+    gptApprovers: policyNow.policy && policyNow.policy.approvalAuthorities
+      ? policyNow.policy.approvalAuthorities.gptApprovalCommentAuthors
       : undefined,
   });
   if (drift.drift) {

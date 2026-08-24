@@ -28,6 +28,7 @@
       "reviewerCoderContract",
       "minimalCommandDiscovery",
       "authority",
+      "approvalAuthorities",
       "blockingSeverities",
       "severityTaxonomy",
       "finalReviewer",
@@ -72,9 +73,12 @@
     "finalApproval": "agent:gpt",
     "finalApprovalNote": "Giai doan transition. Steady state: reviewer:local duoc phep approve khi du toan bo reviewerPhases.steadyState.approvalRequiresAllGates.",
     "merge": "user",
-    "deploy": "user",
-    "approvers": ["duongpdddic-droid"],
-    "approversNote": "[GPT-REV-049] Allowlist DANH TINH duoc phep dang GPT approval marker (reviewer:agent:gpt) hoac wiring GPT approval. Chi nhung binh luan do login thuoc danh sach nay moi hop le (fail-closed: author bat ky khac bi tu choi UNAUTHORIZED_ACTOR). GPT approval la quyet dinh relay boi nguoi dung, nen approvers la tai khoan nguoi dung (duongpdddic-droid) — KHONG phai bat ky actor/bot nao."
+    "deploy": "user"
+
+  },
+  "approvalAuthorities": {
+    "gptApprovalCommentAuthors": ["duongpdddic-droid"],
+    "localApprovalCommentAuthors": ["duongpdddic-droid"]
   },
   "reviewerPhases": {
     "source": "[USER-DECISION] Mo hinh reviewer muc tieu sau Issue #2 — duongpdddic-droid/AI_PR_REVIEWER#2, comment id 5381416494 (22/08/2026)",

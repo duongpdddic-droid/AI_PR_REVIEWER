@@ -78,6 +78,10 @@ export function defaultIo() {
     removeLabels(repo, number, labels) {
       for (const l of labels) gh(['pr', 'edit', String(number), '--repo', repo, '--remove-label', l]);
     },
+    getCurrentUser() {
+      const out = gh(['api', 'user', '--jq', '.login']);
+      return String(out || '').trim();
+    },
     log(level, msg) { console.error(`[${level}] ${msg}`); },
   };
 }
@@ -123,6 +127,18 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
     throw new Error(`TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại HEAD — ${String((e && e.message) || e).slice(0, 160)}`);
   }
 
+  const gptApprovers = policy && policy.approvalAuthorities && policy.approvalAuthorities.gptApprovalCommentAuthors;
+  if (!Array.isArray(gptApprovers) || gptApprovers.length === 0) {
+    throw new Error('TỪ CHỐI: policy thiếu approvalAuthorities.gptApprovalCommentAuthors — không xác định được actor được phép đăng GPT approval marker');
+  }
+  // [GPT-REV-049] Xác minh DANH TÍNH THẬT của actor đang đăng comment phải thuộc allowlist.
+  // gh pr comment đăng dưới tư cách tài khoản gh đã xác thực; script từ chối nếu actor đó
+  // không thuộc gptApprovalCommentAuthors (không một bot/third-party nào được giả GPT approval).
+  const actor = io.getCurrentUser();
+  if (!gptApprovers.includes(String(actor || ''))) {
+    throw new Error(`TỪ CHỐI: actor "${String(actor || '(rỗng)')}" không thuộc approvalAuthorities.gptApprovalCommentAuthors — không được đăng GPT approval marker`);
+  }
+
   let checks = null;
   try { checks = io.getChecks(repo, pr); } catch { checks = null; }
   const ciState = evaluateChecks(policy, checks);
@@ -139,9 +155,13 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
 
   // Idempotent: approval trùng HEAD/repo/pr đã hợp lệ → không ghi lần 2.
   // [GPT-REV-048] r là kết quả parseApprovalMarkers {marker, commentId, authorLogin}; cần spread marker.
+  // [GPT-REV-049] Duplicate detection: CHỈ marker do author thuộc gptApprovers mới tính là
+  // approval hợp lệ. Marker giả (sai author) KHÔNG được coi là duplicate → không chặn việc
+  // tạo approval hợp lệ mới, và không được nhận là approval thật.
   const existing = parseApprovalMarkers(bodies).filter((r) =>
-    isApprovalValid({ ...r.marker, commentId: r.commentId, authorLogin: r.authorLogin },
-      { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, approvers: policy.authority && policy.authority.approvers }).valid);
+    r.authorLogin && gptApprovers.includes(String(r.authorLogin))
+      && isApprovalValid({ ...r.marker, commentId: r.commentId, authorLogin: r.authorLogin },
+        { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, gptApprovers }).valid);
   if (existing.length) {
     return { mutated: false, skipped: 'duplicate', headSha, message: `BỎ QUA: approval ${AGENTS.gpt} cho HEAD ${headSha.slice(0, 12)} đã tồn tại (${existing.length} marker) — không ghi trùng.` };
   }
@@ -180,7 +200,7 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
   io.postComment(repo, pr, body); // lỗi → ném ra, CHƯA mutation nhãn nào
 
   const afterComments = io.listPrComments(repo, pr);
-  const recorded = effectiveApproval(afterComments, { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, approvers: policy.authority && policy.authority.approvers });
+  const recorded = effectiveApproval(afterComments, { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, gptApprovers });
   if (!recorded || String(recorded.decisionId || '') !== String(payload.decisionId)) {
     throw new Error('read-back FAIL: marker approval chưa ghi nhận được/không hợp lệ tại HEAD — giữ nguyên nhãn, KHÔNG gắn status:approved.');
   }
