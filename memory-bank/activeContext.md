@@ -1,4 +1,4 @@
-## 24/08/2026 — Vá lỗ hổng allowlist actor giả marker `agent:gpt` ([CLINE-FIX-049] / GPT-REV-049) ✅ ALL GREEN (sau corrective commit)
+## 24/08/2026 — Vá lỗ hổng allowlist actor giả marker `agent:gpt` ([CLINE-FIX-049] / GPT-REV-049) ✅ ALL GREEN — MERGED vào main ✓
 
 - **Finding**: [GPT-REV-049] Critical — `isApprovalValid`/`effectiveApproval` chỉ check `authorLogin` không rỗng, không đối chiếu allowlist. Actor bất kỳ (bot/third-party) đăng marker `reviewer: agent:gpt` được chấp nhận là GPT approval hợp lệ → leo quyền phê duyệt.
 - **Fix** (logic tại commit `8f81c36` + corrective commit trên `chore/policy-sync-reviewer-phases`):
@@ -7,8 +7,8 @@
   - Thread `gptApprovers`/`localApprovers` qua `effectiveApproval` → `planPhaseActivation` / `planApprovalDrift` / `performApproval`. (Đổi tên param `approvers`→`gptApprovers` cho khớp test + orchestrator; `validatePolicy` bắt buộc `gptApprovers`+`localApprovers` non-empty.)
 - **Tests (correction)**: `8f81c36` từng báo xanh NHƯNG thực tế ĐỎ do (1) policy JSON dư dấu phẩy + (2) test truyền `approvers`/`mkGpt()` sai shape. Đã sửa: test C.4/C.5 dùng `gptApprovers`; C.23 build marker đủ `prNumber:4`; `JSON.stringify(mkGpt())`→`mkGpt()`. Debug tiếp: `gptApproval` thiếu `prNumber` → `isApprovalValid` báo "sai PR number" (đã thêm).
 - **Gates (thực tế xanh)**: full-verify **53/53**; pure-logic **189/189**; approval-gate **53/53**; orchestrator **76/76**; runtime **20/20**; effective-policy **22/22**; review-phases **40/40** — TẤT CẢ PASS.
-- **Bàn giao**: đã push `8f81c36` + corrective commit; remote PR #4 headRefOid sẽ khớp HEAD mới. Comment `[CLINE-FIX-049]`. Nhãn `agent:gpt` + `status:review-requested`. CHƯA merge/deploy.
-- **Trạng thái**: sửa xong, verify xanh. Cần re-confirm PR body HEAD + labels tại HEAD mới, chờ GPT re-review PR #4.
+- **Bàn giao + Merge**: push `a7457a4` (fix) + `d986cfa` (memory L-019) lên `chore/policy-sync-reviewer-phases`; comment `[CLINE-FIX-049]`; nhãn `agent:gpt` + `status:review-requested`. **MERGED 24/08/2026 theo lệnh Bố** qua `gh pr merge --squash` → squash commit `7262a86a93d6298eff7420b3b83cd14db2118c92` trên `main`; remote branch deleted; local `main` fast-forward đồng bộ `7262a86`. (GPT review chưa ghi nhận — Bố tự quyết merge, quyền merge thuộc người dùng; ghi minh bạch như tiền lệ PR #3.)
+- **Trạng thái**: ✅ HOÀN TẤT — fix + verify xanh + merge vào main + local sync. PR #4 closed (merged).
 
 ## 23/08/2026 22:46 (ACT) — Align approval pipeline to rich comment objects (GPT-REV-048) ✅ ALL GREEN
 
