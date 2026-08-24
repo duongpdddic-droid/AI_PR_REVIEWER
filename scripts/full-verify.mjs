@@ -89,34 +89,30 @@ try {
     add(`Dup top-level fn ${path.relative(ROOT, f).split(path.sep).join('/')} = 0`, dup.length === 0, dup.length ? 'trùng: ' + dup.join(', ') : '');
   }
 
-  // 4. test runner (nếu tồn tại)
-  const pureTest = path.join(ROOT, 'scripts', 'test-pure-logic.mjs');
-  if (fs.existsSync(pureTest)) {
-    const rt = spawnSync(node, [pureTest], { encoding: 'utf8' });
-    add('test-pure-logic.mjs', rt.status === 0, rt.status === 0 ? '' : (rt.stdout || rt.stderr || '').trim().split('\n').slice(-3).join(' | '));
-  } else {
-    add('test-pure-logic.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
+  // 4. test suites (nếu tồn tại) — Issue #6 C2: một lệnh pnpm verify tổng hợp mọi gate.
+  const optionalSuites = [
+    'test-pure-logic.mjs',
+    'test-integration-orchestrator.mjs',
+    'test-integration-approval-gate.mjs',
+    'test-integration-review-runtime.mjs',
+    'test-effective-policy.mjs',
+    'test-review-phases.mjs',
+    'test-context-routing.mjs',
+    'test-tg-notify.mjs',
+    'test-protocol-drift.mjs',
+  ];
+  for (const suite of optionalSuites) {
+    const f = path.join(ROOT, 'scripts', suite);
+    if (!fs.existsSync(f)) { add(`${suite} (bỏ qua — chưa tồn tại)`, true, 'skip'); continue; }
+    const r = spawnSync(node, [f], { encoding: 'utf8' });
+    add(suite, r.status === 0, r.status === 0 ? '' : (r.stdout || r.stderr || '').trim().split('\n').filter((l) => /FAIL|Error|assert/i.test(l)).slice(-3).join(' | ') || (r.stderr || '').trim().split('\n').slice(-3).join(' | '));
   }
-  const intTest = path.join(ROOT, 'scripts', 'test-integration-orchestrator.mjs');
-  if (fs.existsSync(intTest)) {
-    const ri = spawnSync(node, [intTest], { encoding: 'utf8' });
-    add('test-integration-orchestrator.mjs', ri.status === 0, ri.status === 0 ? '' : (ri.stdout || ri.stderr || '').trim().split('\n').slice(-3).join(' | '));
-  } else {
-    add('test-integration-orchestrator.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
-  }
-  const gateTest = path.join(ROOT, 'scripts', 'test-integration-approval-gate.mjs');
-  if (fs.existsSync(gateTest)) {
-    const rg = spawnSync(node, [gateTest], { encoding: 'utf8' });
-    add('test-integration-approval-gate.mjs', rg.status === 0, rg.status === 0 ? '' : (rg.stdout || rg.stderr || '').trim().split('\n').slice(-3).join(' | '));
-  } else {
-    add('test-integration-approval-gate.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
-  }
-  const phaseTest = path.join(ROOT, 'scripts', 'test-review-phases.mjs');
-  if (fs.existsSync(phaseTest)) {
-    const rp = spawnSync(node, [phaseTest], { encoding: 'utf8' });
-    add('test-review-phases.mjs', rp.status === 0, rp.status === 0 ? '' : (rp.stdout || rp.stderr || '').trim().split('\n').slice(-3).join(' | '));
-  } else {
-    add('test-review-phases.mjs (bỏ qua — chưa tồn tại)', true, 'skip');
+
+  // 4b. git diff --check (whitespace errors / conflict markers trong thay đổi staged+unstaged).
+  {
+    const gd = spawnSync('git', ['diff', '--check'], { encoding: 'utf8', cwd: ROOT });
+    const ok = gd.status === 0;
+    add('git diff --check', ok, ok ? '' : (gd.stdout || gd.stderr || '').trim().split('\n').slice(0, 3).join(' | '));
   }
 
   // 5. behavior map: refresh + baseline compare (baseline thiếu -> skip, không fail)
