@@ -219,13 +219,19 @@ export function registerProject({ manifest, registry, registryPath = DEFAULT_REG
   return { ok: true, registry };
 }
 
-// Migration N->N+1 (up) và rollback (down). Reversible: down(up(original)) === original (lossless).
+// Migration 0.9 -> 1.0 (up) và 1.0 -> 0.9 (rollback). Reversible: down(up(original)) === original (lossless).
 // Rollback metadata = rollbackPlan versioned do up() phát hành, BẮT fingerprint của manifest sau up
 // và addedKeys bị chặn allowlist — down() không nhận danh sách key tùy ý (GPT-REV-073/075).
+// [GPT-REV-076] Path migration BỊ GIỚI HẠN CHÍNH XÁC 0.9 <-> 1.0; mọi path khác (vd 0.9->2.0, 1.0->2.0,
+// 2.0->1.0, nguồn/source không phải 0.9) fail-closed (UNSUPPORTED_MIGRATION_PATH). rollbackPlan.toVersion
+// phải khớp manifest.schemaVersion sau up; plan phải mang hướng chính xác 1.0 -> 0.9.
 // Không đọc/ghi/xóa __migrationAdded trên payload; extension field của user bảo toàn tuyệt đối.
 export const ROLLBACK_PLAN_VERSION = 1;
 // Duy nhất các key mà migration 0.9 -> 1.0 được phép thêm; mọi key khác trong plan là illegal.
 export const UPGRADE_ALLOWED_ADDED_KEYS = ['workspace', 'policy', 'verify', 'deploy', 'telegram', 'memory', 'allowedOverrides'];
+// [GPT-REV-076] Path migration duy nhất được hỗ trợ (fail-closed mọi path khác).
+export const MIGRATION_FROM_VERSION = '0.9';
+export const MIGRATION_TO_VERSION = '1.0';
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
 // ponytail: fingerprint nhạy thứ-tu-key JSON.stringify — đủ vì up tự sinh manifest; nâng canonical stringify nếu cần cross-serialization.
@@ -234,10 +240,14 @@ function rollbackPlanFingerprint(m, planCore) {
   return crypto.createHash('sha256').update(JSON.stringify({ manifest: m, ...planCore })).digest('hex');
 }
 
-export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION, rollbackPlan = null }) {
+export function migrateManifest({ manifest, toVersion = MIGRATION_TO_VERSION, rollbackPlan = null }) {
   const m = JSON.parse(JSON.stringify(manifest || {}));
-  const from = m.schemaVersion || '0.9';
+  const from = m.schemaVersion || MIGRATION_FROM_VERSION;
   if (compareVersion(toVersion, from) > 0) {
+    // [GPT-REV-076] UP CHỈ hỗ trợ path chính xác 0.9 -> 1.0. Mọi source/đích khác fail-closed.
+    if (toVersion !== MIGRATION_TO_VERSION || from !== MIGRATION_FROM_VERSION) {
+      return { ok: false, direction: 'up', reason: 'UNSUPPORTED_MIGRATION_PATH' };
+    }
     m.schemaVersion = toVersion;
     const addedKeys = [];
     const ensure = (key, value) => { if (!(key in m)) { m[key] = value; addedKeys.push(key); } };
@@ -250,6 +260,8 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     if (!Array.isArray(m.allowedOverrides)) { m.allowedOverrides = []; addedKeys.push('allowedOverrides'); }
     // Không ghi m.__migrationAdded (sẽ đè extension field). Trả rollbackPlan versioned + fingerprint-bound.
     const planCore = { fromVersion: from, toVersion, addedKeys: [...addedKeys] };
+    // [GPT-REV-076] rollbackPlan.toVersion phải khớp manifest.schemaVersion sau up.
+    if (planCore.toVersion !== m.schemaVersion) return { ok: false, direction: 'up', reason: 'ROLLBACK_PLAN_VERSION_MISMATCH' };
     return {
       ok: true,
       direction: 'up',
@@ -262,7 +274,11 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     };
   }
   if (compareVersion(toVersion, from) < 0) {
-    // Rollback CHỈ thực thi rollbackPlan do up() phát hành: đúng schema/version, đúng hướng,
+    // [GPT-REV-076] DOWN CHỈ hỗ trợ path chính xác 1.0 -> 0.9. Mọi source/đích khác fail-closed.
+    if (toVersion !== MIGRATION_FROM_VERSION || from !== MIGRATION_TO_VERSION) {
+      return { ok: false, direction: 'down', reason: 'UNSUPPORTED_MIGRATION_PATH' };
+    }
+    // Rollback CHỈ thực thi rollbackPlan do up() phát hành: đúng schema/version, đúng hướng (1.0->0.9),
     // khớp fingerprint manifest đầu vào, addedKeys ⊆ allowlist 0.9->1.0. Mọi vi phạm fail-closed,
     // input không bị mutate (mutation chỉ diễn ra trên clone sau khi mọi gate PASS).
     const bad = (reason, extra) => ({ ok: false, direction: 'down', reason, ...extra });
@@ -270,8 +286,10 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     if (rollbackPlan.planVersion !== ROLLBACK_PLAN_VERSION
       || typeof rollbackPlan.fromVersion !== 'string'
       || typeof rollbackPlan.toVersion !== 'string') return bad('ROLLBACK_PLAN_VERSION_INVALID');
-    if (rollbackPlan.fromVersion !== toVersion
-      || compareVersion(rollbackPlan.fromVersion, rollbackPlan.toVersion) >= 0) return bad('ROLLBACK_PLAN_DIRECTION_MISMATCH');
+    // [GPT-REV-076] hướng plan phải chính xác 1.0 -> 0.9: plan.toVersion (== 1.0) phải khớp manifest.schemaVersion
+    // hiện tại, plan.fromVersion (== 0.9) là đích rollback. Vi phạm -> DIRECTION_MISMATCH.
+    if (rollbackPlan.toVersion !== from
+      || rollbackPlan.fromVersion !== MIGRATION_FROM_VERSION) return bad('ROLLBACK_PLAN_DIRECTION_MISMATCH');
     const ak = rollbackPlan.addedKeys;
     if (!Array.isArray(ak) || ak.length === 0 || ak.some((k) => typeof k !== 'string' || k === '')) return bad('ROLLBACK_PLAN_KEYS_INVALID');
     const illegal = [...new Set(ak.filter((k) => !UPGRADE_ALLOWED_ADDED_KEYS.includes(k)))];
@@ -280,7 +298,7 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     const verifyCore = { fromVersion: rollbackPlan.fromVersion, toVersion: rollbackPlan.toVersion, addedKeys: ak };
     if (rollbackPlanFingerprint(m, verifyCore) !== rollbackPlan.fingerprint) return bad('ROLLBACK_PLAN_FINGERPRINT_MISMATCH');
     for (const k of new Set(ak)) delete m[k];
-    m.schemaVersion = rollbackPlan.fromVersion;
+    m.schemaVersion = MIGRATION_FROM_VERSION;
     return { ok: true, direction: 'down', manifest: m, removedKeys: [...new Set(ak)] };
   }
   return { ok: true, direction: 'none', manifest: m };

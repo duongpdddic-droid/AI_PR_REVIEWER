@@ -13,6 +13,7 @@ import {
   OWNERSHIP_MATRIX, isAllowedOverride, DEFAULT_REGISTRY_PATH,
   CANONICAL_POLICY_VERSION, SCHEMA_PATH,
   ROLLBACK_PLAN_VERSION, UPGRADE_ALLOWED_ADDED_KEYS,
+  MIGRATION_FROM_VERSION, MIGRATION_TO_VERSION,
 } from './project-registry.mjs';
 
 const checks = [];
@@ -265,6 +266,43 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   tru('NEG-T5 plan nguyên vẹn -> down ok', dOk.ok === true);
   eq('NEG-T5 down(up(original)) deep-equal tuyệt đối original', JSON.stringify(dOk.manifest), snapUp);
   eq('NEG source gốc 0.9 không bị down đụng tới', JSON.stringify(srcUp), snapUp);
+}
+
+// NEG [GPT-REV-076]: path migration bị giới hạn chính xác 0.9 <-> 1.0; mọi path khác fail-closed;
+// rollbackPlan.toVersion phải khớp manifest.schemaVersion (sau up = 1.0) và plan mang hướng 1.0 -> 0.9.
+{
+  // UP: chỉ chấp nhận nguồn 0.9, đích 1.0.
+  const up0_9 = migrateManifest({ manifest: { schemaVersion: '0.9', projectId: 'p-076a' }, toVersion: '1.0' });
+  tru('076 up 0.9->1.0 ok', up0_9.ok === true);
+  eq('076 good plan toVersion == 1.0 (khớp manifest.schemaVersion)', up0_9.rollbackPlan.toVersion, '1.0');
+  const up0_9_2 = migrateManifest({ manifest: { schemaVersion: '0.9', projectId: 'p-076b' }, toVersion: '2.0' });
+  falsy('076 up 0.9->2.0 (đích lạ) -> fail-closed', up0_9_2.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (đích 2.0)', up0_9_2.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  const up1_0 = migrateManifest({ manifest: { schemaVersion: '1.0', projectId: 'p-076c' }, toVersion: '1.0' });
+  tru('076 up nguồn 1.0, đích 1.0 -> none (đã ở đích, idempotent)', up1_0.ok === true && up1_0.direction === 'none');
+  const up0_8 = migrateManifest({ manifest: { schemaVersion: '0.8', projectId: 'p-076c2' }, toVersion: '1.0' });
+  falsy('076 up nguồn 0.8 (không phải 0.9) -> fail-closed', up0_8.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (nguồn 0.8)', up0_8.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  const up2_0 = migrateManifest({ manifest: { schemaVersion: '2.0', projectId: 'p-076d' }, toVersion: '1.0' });
+  falsy('076 up nguồn 2.0 -> fail-closed', up2_0.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (nguồn 2.0)', up2_0.reason, 'UNSUPPORTED_MIGRATION_PATH');
+
+  // DOWN: chỉ chấp nhận nguồn 1.0 (hiện tại), đích 0.9.
+  const dSrc2 = migrateManifest({ manifest: { schemaVersion: '2.0', projectId: 'p-076e' }, toVersion: '0.9' });
+  falsy('076 down nguồn 2.0 -> fail-closed', dSrc2.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (down nguồn 2.0)', dSrc2.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  // plan mang đích 2.0 (dù từ 1.0) -> DIRECTION_MISMATCH.
+  const dTo2 = migrateManifest({ manifest: up0_9.manifest, toVersion: '0.9', rollbackPlan: { ...up0_9.rollbackPlan, toVersion: '2.0' } });
+  falsy('076 down 1.0->2.0 (đích lạ) -> fail-closed', dTo2.ok);
+  eq('076 reason ROLLBACK_PLAN_DIRECTION_MISMATCH (đích 2.0)', dTo2.reason, 'ROLLBACK_PLAN_DIRECTION_MISMATCH');
+  // plan mang hướng 0.9->2.0 -> DIRECTION_MISMATCH.
+  const dPath0_9to2 = migrateManifest({ manifest: up0_9.manifest, toVersion: '0.9', rollbackPlan: { ...up0_9.rollbackPlan, fromVersion: '0.9', toVersion: '2.0' } });
+  falsy('076 down plan 0.9->2.0 -> fail-closed', dPath0_9to2.ok);
+  eq('076 reason ROLLBACK_PLAN_DIRECTION_MISMATCH (plan 0.9->2.0)', dPath0_9to2.reason, 'ROLLBACK_PLAN_DIRECTION_MISMATCH');
+  // plan hợp lệ path 1.0->0.9 vẫn down ok (lossless).
+  const dOk = migrateManifest({ manifest: up0_9.manifest, toVersion: '0.9', rollbackPlan: up0_9.rollbackPlan });
+  tru('076 down path 1.0->0.9 (plan đúng) ok', dOk.ok === true);
+  eq('076 down khôi phục schemaVersion 0.9', dOk.manifest.schemaVersion, '0.9');
 }
 
 // AC13: [GPT-REV-074] registerProject: input nguyên vẹn ở MỌI đường + persistence giữ extension field.
