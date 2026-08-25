@@ -17,6 +17,7 @@
 //   node scripts/autonomous-run.mjs --execute --loop --interval 120000
 //   node scripts/autonomous-run.mjs --no-aider      # bỏ qua bước coder LLM (chỉ verify hiện trạng)
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -37,6 +38,22 @@ const RECOVERY_MAX_ATTEMPTS = 3;
 // Working-context budget cho coder prompt (GPT-REV-064): bootstrap/invariants + selective
 // task context, enforce bằng compactTranscript; vượt (protected state quá lớn) → escalate.
 const CODER_CONTEXT_BUDGET_TOKENS = 6000;
+// GPT-REV-065: budget TỔNG startup harness-controlled (message + file --read inline),
+// cấu hình được; vượt phải escalate BLOCKED_CONTEXT_BUDGET, không im lặng gửi payload lớn.
+const CODER_STARTUP_BUDGET_TOKENS = Number(process.env.CODER_STARTUP_BUDGET_TOKENS) || 12000;
+// File --read (conventions) chỉ inline khi ≤ limit; lớn hơn → pointer, không --read.
+const CODER_READ_INLINE_LIMIT_TOKENS = Number(process.env.CODER_READ_INLINE_LIMIT_TOKENS) || 2000;
+
+/** GPT-REV-065: dedupe theo content hash — cùng nội dung trong 1 task không nạp lặp. */
+function dedupeByHash(entries) {
+  const seen = new Set();
+  return entries.filter((e) => {
+    const h = createHash('sha1').update(e.text).digest('hex');
+    if (seen.has(h)) return false;
+    seen.add(h);
+    return true;
+  });
+}
 
 function sleepSync(ms) {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -173,12 +190,12 @@ export function buildCoderContext({ issueNumber, issueBody, findings = [], budge
     selOverBudget = sel.overBudget === true;
   } catch { /* issue rỗng/không parse được → chỉ bootstrap + findings */ }
 
-  const entries = [
+  const entries = dedupeByHash([
     { kind: 'task', text: bootText },
     ...findings.map((f, i) => ({ kind: 'finding', text: `[FINDING ${i + 1}] ${String(f)}` })),
     ...(sel.skipped.length ? [{ kind: 'history', text: `[skipped sections do vượt budget]: ${sel.skipped.join(', ')}` }] : []),
     ...(sel.loaded.length ? [{ kind: 'history', text: sel.loaded.map((s) => `## ${s.name}\n${s.content}`).join('\n\n') }] : []),
-  ];
+  ]);
   // B1 — compact transcript về budget; protected (task/finding/Decision Gate/SHA/AC mở) giữ nguyên.
   const c = compactTranscript({ entries, budgetTokens });
   return {
@@ -187,20 +204,89 @@ export function buildCoderContext({ issueNumber, issueBody, findings = [], budge
     overBudget: c.overBudget || selOverBudget,
     totalTokens: c.totalTokens,
     skippedSections: sel.skipped,
+    loadedSections: sel.loaded.map((s) => s.name),
     preservedSpans: c.summary ? c.summary.preservedSpans : [],
     compactionEvent: c.compactionEvent,
   };
 }
 
-function runCoder(issueNumber, issueBody, ctxPrompt) {
+/**
+ * GPT-REV-065: thu thập unresolved findings/open AC từ authoritative GitHub comments.
+ * Trạng thái cuối của mỗi mã [GPT-REV-NNN] theo comment MỚI NHẤT: RESOLVED → bỏ,
+ * còn lại → protected entry dạng 1 dòng. GitHub evidence THẮNG memory. Degrade an toàn
+ * (lỗi gh/network → findings rỗng, source 'unavailable') — không block workflow.
+ */
+export function fetchUnresolvedFindings(issueNumber, io = {}) {
+  const repo = io.repo || REPO;
+  if (!repo) return { findings: [], source: 'unavailable' };
+  let raw;
+  try {
+    raw = io.ghFn
+      ? io.ghFn(['api', `repos/${repo}/issues/${String(issueNumber)}/comments`, '--paginate', '--slurp'])
+      : runQuiet('gh', ['api', `repos/${repo}/issues/${String(issueNumber)}/comments`, '--paginate', '--slurp']).out;
+  } catch {
+    return { findings: [], source: 'unavailable' };
+  }
+  let comments;
+  try { comments = JSON.parse(raw || '[]'); } catch { return { findings: [], source: 'unavailable' }; }
+  if (!Array.isArray(comments)) comments = [];
+  const latest = new Map();
+  for (const cm of comments) {
+    const body = String((cm && cm.body) || '');
+    for (const m of body.matchAll(/\[GPT-REV-(\d+)\][^\n]*/g)) {
+      latest.set(m[1], {
+        resolved: /RESOLVED/i.test(m[0]),
+        line: m[0].replace(/[*`]/g, '').trim().slice(0, 200),
+      });
+    }
+  }
+  const findings = [...latest.entries()]
+    .filter(([, v]) => !v.resolved)
+    .map(([id, v]) => `[UNRESOLVED GPT-REV-${id}] ${v.line}`);
+  return { findings, source: 'github' };
+}
+
+/**
+ * GPT-REV-065: đọc conventions coder để đo trước. Trả null nếu file không tồn tại/rỗng.
+ * io.readFile inject cho test.
+ */
+export function readConventions(io = {}) {
+  const p = io.conventionsPath || path.join(ROOT, '.agent', 'conventions-coder.md');
+  const readFile = io.readFile || ((f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''));
+  const text = String(readFile(p) || '');
+  return text ? { path: p, text, tokens: estimateTokens(text) } : null;
+}
+
+/**
+ * GPT-REV-065: startup capsule đo được — message (đã budget-enforce) + quyết định
+ * inline/pointer cho file --read. Conventions vượt inline limit → KHÔNG --read, chèn
+ * pointer ngắn vào prompt (coder tự đọc đúng phần cần khi thực thi).
+ */
+export function buildStartupCapsule({ ctx, conventions }) {
+  const loadReasons = [];
+  let readArgs = [];
+  let prompt = ctx.prompt;
+  if (!conventions) {
+    loadReasons.push('conventions: không tồn tại → bỏ qua');
+  } else if (conventions.tokens <= CODER_READ_INLINE_LIMIT_TOKENS) {
+    readArgs = ['--read', conventions.path];
+    loadReasons.push(`conventions inline (${conventions.tokens}t ≤ limit ${CODER_READ_INLINE_LIMIT_TOKENS}t)`);
+  } else {
+    prompt += `\n\n[CONVENTIONS POINTER] ${conventions.path} (~${conventions.tokens}t > inline limit ${CODER_READ_INLINE_LIMIT_TOKENS}t — đọc đúng phần cần khi thực thi, không nạp toàn bộ.)`;
+    loadReasons.push('conventions → pointer (vượt inline limit)');
+  }
+  const totalTokens = estimateTokens(prompt) + (readArgs.length ? conventions.tokens : 0);
+  return { prompt, readArgs, loadReasons, totalTokens };
+}
+
+function runCoder(issueNumber, issueBody, ctxPrompt, readArgs = []) {
   if (NO_AIDER) {
     log('--no-aider: bỏ qua bước coder LLM (chỉ verify hiện trạng branch).');
     return { ok: true, error: '' };
   }
-  const conventions = path.join(ROOT, '.agent', 'conventions-coder.md');
-  const readArgs = fs.existsSync(conventions) ? ['--read', conventions] : [];
   const msg = ctxPrompt || `Nhận Issue #${issueNumber}, triển khai code theo phạm vi và tiêu chí nghiệm thu trong issue, chỉ sửa đúng phạm vi được phép. Sau khi xong chạy \`node scripts/full-verify.mjs\` và đảm bảo PASS. Không tự merge, không tự commit (orchestrator sẽ commit), không deploy.\n\n--- ISSUE ---\n${issueBody || ''}`;
   try {
+    // GPT-REV-065: readArgs do startup capsule quyết định (inline ≤ limit, lớn → pointer).
     runInteractive(AIDER, [...readArgs, '--message', msg, '--yes-always', '--no-auto-commits'], ROOT);
     return { ok: true, error: '' };
   } catch (e) {
@@ -343,32 +429,62 @@ function processOneCycle({ dryRun }) {
     return { status: 'BLOCKED', issueNumber, detail: String(e.message) };
   }
 
-  // 3. Coder — bounded recovery thật + working-context budget (GPT-REV-064):
-  //    prompt coder đi qua buildCoderContext (bootstrap/invariants + selectiveLoad + compact);
-  //    'compact-then-retry' → retry DÙNG context đã compact mạnh hơn + ghi compaction telemetry.
+  // 3. Coder — bounded recovery thật + working-context budget (GPT-REV-064/065):
+  //    - unresolved findings từ GitHub comments → protected entries (GitHub thắng memory);
+  //    - startup capsule đo được TỔNG harness-controlled payload (message + --read inline);
+  //    - vượt CODER_STARTUP_BUDGET_TOKENS kể cả sau compact → BLOCKED_CONTEXT_BUDGET;
+  //    - 'compact-then-retry' → capsule nhỏ hơn thật + telemetry before/after.
   const issueBodyText = parsed.task?.body || '';
-  let activeCtx = buildCoderContext({ issueNumber, issueBody: issueBodyText });
+  let unresolved = { findings: [], source: 'unavailable' };
+  try { unresolved = fetchUnresolvedFindings(issueNumber); } catch { /* degrade: không block */ }
+  const conventions = readConventions();
+  let loadedMemoryCount = 0;
+  try { loadedMemoryCount = hooks.loadEvents().length; } catch { /* degrade */ }
+  const buildCtx = (budgetTokens) => buildCoderContext({
+    issueNumber, issueBody: issueBodyText, findings: unresolved.findings, budgetTokens,
+  });
+  const makeCapsule = (ctx) => {
+    const capsule = buildStartupCapsule({ ctx, conventions });
+    return { ctx, capsule };
+  };
+  let active = makeCapsule(buildCtx(CODER_CONTEXT_BUDGET_TOKENS));
   let coderOk = false;
   for (let attempt = 1; attempt <= RECOVERY_MAX_ATTEMPTS && !coderOk; attempt += 1) {
-    if (activeCtx.overBudget) {
-      // GPT-REV-064: protected/invariant state vượt budget kể cả sau compact → escalate,
-      // KHÔNG gửi nguyên context cho coder.
-      log(`Context vượt budget kể cả sau compact (${activeCtx.totalTokens} tokens) → escalate.`);
+    const { ctx, capsule } = active;
+    const overStartupBudget = capsule.totalTokens > CODER_STARTUP_BUDGET_TOKENS;
+    if (ctx.overBudget || overStartupBudget) {
+      // GPT-REV-064/065: protected/invariant state hoặc tổng startup vượt budget kể cả sau
+      // compact → escalate, KHÔNG im lặng gửi payload lớn cho coder.
+      log(`Context vượt budget (ctx=${ctx.totalTokens}t, startup=${capsule.totalTokens}t/${CODER_STARTUP_BUDGET_TOKENS}t) → escalate.`);
       hooks.recordEvent({
         taskId: `issue-${issueNumber}`, issue: issueNumber, attempt, errorClass: 'CONTEXT_OVERFLOW',
-        compactionEvent: activeCtx.compactionEvent, outcome: 'context-overbudget',
+        compactionEvent: ctx.compactionEvent, outcome: 'context-overbudget',
+        startupContextTokens: capsule.totalTokens,
+        beforeCompactTokens: null, afterCompactTokens: ctx.totalTokens,
       });
       hooks.recordObservation({
         kind: 'workflow-failure',
-        content: `Issue #${issueNumber}: coder context vượt budget ${CODER_CONTEXT_BUDGET_TOKENS} tokens kể cả khi compact.`,
+        content: `Issue #${issueNumber}: coder context vượt budget ${CODER_CONTEXT_BUDGET_TOKENS}/startup ${CODER_STARTUP_BUDGET_TOKENS} tokens kể cả khi compact.`,
         subjectKey: `issue-${issueNumber}-context-overbudget`,
         provenance: { task: `autonomous-run issue-${issueNumber}`, ts: new Date().toISOString() },
       });
       addIssueLabel(issueNumber, LABELS.blocked);
-      notifyTelegram('blocked', `#${issueNumber}`, 'blocked', 'Coder context vượt budget kể cả khi compact', 'Thu gọn issue/protected state hoặc tăng CODER_CONTEXT_BUDGET_TOKENS.');
-      return { status: 'BLOCKED_CONTEXT_OVERBUDGET', issueNumber };
+      notifyTelegram('blocked', `#${issueNumber}`, 'blocked', 'Coder context vượt budget kể cả khi compact (BLOCKED_CONTEXT_BUDGET)', 'Thu gọn issue/protected state hoặc tăng CODER_STARTUP_BUDGET_TOKENS.');
+      return { status: 'BLOCKED_CONTEXT_BUDGET', issueNumber };
     }
-    const c = runCoder(issueNumber, issueBodyText, activeCtx.prompt);
+    // GPT-REV-065: telemetry bắt buộc mỗi lần gửi startup payload cho coder.
+    hooks.recordEvent({
+      taskId: `issue-${issueNumber}`, issue: issueNumber, attempt, outcome: 'startup-context',
+      startupContextTokens: capsule.totalTokens,
+      loadedModules: ctx.loadedSections.length,
+      loadedSections: ctx.loadedSections,
+      loadedMemoryCount,
+      beforeCompactTokens: null, afterCompactTokens: ctx.totalTokens,
+      loadReasons: capsule.loadReasons,
+      findingsSource: unresolved.source, unresolvedFindingCount: unresolved.findings.length,
+      externalContextUnknown: !NO_AIDER, startupBudgetTokens: CODER_STARTUP_BUDGET_TOKENS,
+    });
+    const c = runCoder(issueNumber, issueBodyText, capsule.prompt, capsule.readArgs);
     if (c.ok) { coderOk = true; break; }
     const recPlan = hooks.recover({
       errorClass: classifyError(c.error),
@@ -380,18 +496,18 @@ function processOneCycle({ dryRun }) {
     });
     log(`Recovery vòng ${attempt}/${RECOVERY_MAX_ATTEMPTS} (${recPlan.action}): ${recPlan.reason}`);
     if (recPlan.action === 'compact-then-retry') {
-      // Retry với context ĐÃ compact thêm (budget giảm nửa) + telemetry compaction persist.
-      const shrunk = buildCoderContext({
-        issueNumber,
-        issueBody: issueBodyText,
-        budgetTokens: Math.max(1, Math.floor(CODER_CONTEXT_BUDGET_TOKENS / 2)),
-      });
+      // Retry với context ĐÃ compact thêm (budget giảm nửa) — capsule nhỏ hơn thật +
+      // telemetry before/after tokens persist (GPT-REV-065).
+      const shrunkCtx = buildCtx(Math.max(1, Math.floor(CODER_CONTEXT_BUDGET_TOKENS / 2)));
+      const shrunk = makeCapsule(shrunkCtx);
       hooks.recordEvent({
         taskId: `issue-${issueNumber}`, issue: issueNumber, attempt,
-        compactionEvent: shrunk.compactionEvent, outcome: 'context-compaction',
+        compactionEvent: shrunk.ctx.compactionEvent, outcome: 'context-compaction',
+        beforeCompactTokens: capsule.totalTokens, afterCompactTokens: shrunk.capsule.totalTokens,
+        startupContextTokens: shrunk.capsule.totalTokens,
       });
-      log(`Compact context cho retry: dropped=${shrunk.dropped}, totalTokens=${shrunk.totalTokens}, overBudget=${shrunk.overBudget}.`);
-      activeCtx = shrunk;
+      log(`Compact context cho retry: dropped=${shrunk.ctx.dropped}, startupTokens=${shrunk.capsule.totalTokens} (trước: ${capsule.totalTokens}), overBudget=${shrunk.ctx.overBudget}.`);
+      active = shrunk;
       sleepSync(recPlan.delayMs || 0);
       continue;
     }

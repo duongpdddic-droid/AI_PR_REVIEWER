@@ -71,6 +71,19 @@ write path, gồm `recover()`, đi qua duy nhất `recordEvent()`/`redactDeep()`
   trên section issue body + `compactTranscript()` enforce budget 6000 tokens) — **GPT-REV-064**;
   overBudget → escalate `BLOCKED_CONTEXT_OVERBUDGET` (không gửi nguyên context); action
   `compact-then-retry` → rebuild budget nửa + telemetry `outcome=context-compaction`.
+- **Startup capsule đo được** — **GPT-REV-065**: tổng payload harness-controlled (message +
+  file `--read` inline) đo bằng `buildStartupCapsule()`; conventions ≤2000t mới inline,
+  lớn hơn → pointer trong prompt (KHÔNG `--read` toàn file); vượt
+  `CODER_STARTUP_BUDGET_TOKENS` (env override, mặc định 12000) kể cả sau compact → escalate
+  `BLOCKED_CONTEXT_BUDGET`, không im lặng gửi payload lớn. Unresolved findings/open AC lấy từ
+  authoritative GitHub comments (`fetchUnresolvedFindings()`: verdict MỚI NHẤT của mỗi mã
+  `[GPT-REV-NNN]` thắng, RESOLVED bị loại, gh lỗi → degrade rỗng) truyền vào protected entries.
+  Dedupe content-hash (`sha1`) chặn nạp lặp cùng nội dung trong 1 task. Telemetry bắt buộc
+  mỗi lần gửi: `startupContextTokens`, `loadedModules`/`loadedSections`, `loadedMemoryCount`,
+  `beforeCompactTokens`/`afterCompactTokens` (cả nhánh compaction), `loadReasons`,
+  `findingsSource`; Aider tự nạp context ngoài khả năng đo → `externalContextUnknown=true`
+  (không tuyên bố đạt budget tổng khi chưa đo được). Benchmark INT: issue raw ~84k token →
+  startup 101 token, critical spans (SHA/Decision Gate/AC/scope) nguyên vẹn.
 - **Coder fail** → `classifyError()` → `hooks.recover()` (planRecovery bounded ≤3 attempt,
   AUTH_OR_CONFIG_ERROR escalate ngay không bypass) → retry/backoff theo plan; hết budget →
   blocked như cũ. Mỗi lần recover tự ghi event `outcome=recovery:<action>` + identity echo.

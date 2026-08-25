@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRuntimeHooks, defaultRuntimeDir } from './runtime-hooks.mjs';
-import { buildCoderContext } from './autonomous-run.mjs';
+import { buildCoderContext, buildStartupCapsule, fetchUnresolvedFindings, readConventions } from './autonomous-run.mjs';
 
 // GPT-REV-063: runtime state mặc định NGOÀI worktree. Test cô lập bằng runtimeDir tách
 // (path.join(root,'rt')) để không ghi vào ~/.agent-runtime thật.
@@ -299,6 +299,72 @@ test('INT.coder-context-budget: selective+compact vào execution path — retry 
     assert.equal(ev.compactionEvent.droppedCount, shrunk.dropped);
     assert.deepEqual(ev.compactionEvent.preservedSpans, [sha40]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------- GPT-REV-065
+test('INT.startup-budget-benchmark: issue ~50k token → startup harness-controlled ≤12k, critical state nguyên vẹn', () => {
+  const sha40 = 'fbe5b05111111111111111111111111111111111';
+  // Issue "thực tế" ~200k ký tự (~50k tokens ước lượng) — mô phỏng quan sát startup ~50k.
+  const pad = (n, tpl) => Array.from({ length: n }, (_, i) => tpl(i));
+  const bigBody = [
+    '## Phạm vi được phép',
+    'Chỉ sửa scripts/foo.mjs.',
+    '## Tiêu chí nghiệm thu',
+    '- [ ] full-verify PASS',
+    '## Lịch sử bình luận dài',
+    ...pad(1200, (i) => `Bình luận cũ ${i}: phân tích chi tiết lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud.`),
+    '## Bối cảnh nền',
+    ...pad(600, (i) => `Đoạn nền ${i}: ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.`),
+  ].join('\n');
+  const findings = [`Fix theo commit ${sha40}.`, 'Decision Gate: vượt scope thì dừng hỏi.'];
+
+  const ctx = buildCoderContext({ issueNumber: 65, issueBody: bigBody, findings });
+  const capsule = buildStartupCapsule({ ctx, conventions: null });
+  assert.equal(ctx.overBudget, false, 'ctx trong budget 6000 sau selective+compact');
+  assert.ok(capsule.totalTokens <= 12000, `startup ≤12k (thực tế ${capsule.totalTokens}t)`);
+  assert.ok(capsule.totalTokens < 3000, `startup giảm rõ rệt so với ~50k raw (thực tế ${capsule.totalTokens}t)`);
+  for (const span of [sha40, 'Decision Gate', 'Phạm vi được phép', 'Tiêu chí nghiệm thu']) {
+    assert.ok(capsule.prompt.includes(span), `critical span sống sót: ${span}`);
+  }
+  assert.ok(!capsule.prompt.includes('Bình luận cũ 1000'), 'issue history KHÔNG được nạp toàn bộ');
+});
+
+test('INT.unresolved-findings-retrieval: comments GitHub authoritative → protected; RESOLVED bị loại; degrade an toàn', () => {
+  const comments = JSON.stringify([
+    { body: '[GPT-REV-065]: OPEN — thiếu telemetry.' },
+    { body: '- `[GPT-REV-064]`: **RESOLVED** — wiring OK.\n- `[GPT-REV-063]`: RESOLVED.' },
+    { body: '### [GPT-REV-066] Important — vấn đề còn mở' },
+  ]);
+  const r = fetchUnresolvedFindings(65, { repo: 'o/r', ghFn: () => comments });
+  assert.equal(r.source, 'github');
+  assert.ok(r.findings.some((f) => f.startsWith('[UNRESOLVED GPT-REV-065]')), '065 OPEN → unresolved');
+  assert.ok(r.findings.some((f) => f.startsWith('[UNRESOLVED GPT-REV-066]')), '066 OPEN → unresolved');
+  assert.ok(!r.findings.some((f) => f.includes('GPT-REV-064')), '064 RESOLVED (verdict mới nhất) → loại');
+  assert.ok(!r.findings.some((f) => f.includes('GPT-REV-063')), '063 RESOLVED → loại');
+  // Findings unresolved vào capsule ở vị trí protected.
+  const ctx = buildCoderContext({ issueNumber: 65, issueBody: '## Phạm vi\nSửa foo.', findings: r.findings, budgetTokens: 400 });
+  assert.ok(ctx.prompt.includes('[UNRESOLVED GPT-REV-065]'), 'finding unresolved nằm trong prompt coder');
+  // Degrade: gh fail → findings rỗng, không ném.
+  const bad = fetchUnresolvedFindings(65, { repo: 'o/r', ghFn: () => { throw new Error('network'); } });
+  assert.deepEqual(bad, { findings: [], source: 'unavailable' });
+});
+
+test('INT.conventions-inline-vs-pointer: nhỏ → --read inline; lớn → pointer, KHÔNG --read; dedupe bỏ trùng lặp', () => {
+  const small = readConventions({ conventionsPath: '/tmp/small.md', readFile: () => '# Quy tắc ngắn\nChỉ sửa phạm vi được phép.' });
+  const c1 = buildStartupCapsule({ ctx: { prompt: 'PROMPT', totalTokens: 10 }, conventions: small });
+  assert.deepEqual(c1.readArgs, ['--read', '/tmp/small.md'], 'nhỏ → inline --read');
+
+  const bigText = Array.from({ length: 400 }, (_, i) => `Quy tắc ${i}: giải thích dài dòng về chuẩn code viết thường dùng nhiều từ để vượt giới hạn token nội tuyến cho phép của startup capsule.`).join('\n');
+  const big = readConventions({ conventionsPath: '/tmp/big.md', readFile: () => bigText });
+  const c2 = buildStartupCapsule({ ctx: { prompt: 'PROMPT', totalTokens: 10 }, conventions: big });
+  assert.deepEqual(c2.readArgs, [], 'lớn → KHÔNG --read');
+  assert.ok(c2.prompt.includes('[CONVENTIONS POINTER] /tmp/big.md'), 'pointer thay thế inline');
+  assert.ok(c2.totalTokens < big.tokens, 'payload đo được nhỏ hơn nhiều so với inline toàn bộ file');
+
+  // Dedupe content-hash: entry trùng text chỉ giữ 1 lần trong compact input.
+  const dupBody = '## Phạm vi được phép\nA.\n## Phạm vi được phép (copy)\nA.';
+  const ctx = buildCoderContext({ issueNumber: 65, issueBody: `${dupBody}\n${dupBody}`, budgetTokens: 500 });
+  assert.equal(ctx.overBudget, false);
 });
 
 console.log(`\nruntime-hooks integration: ${passed} PASS${process.exitCode ? ' (có FAIL)' : ''}`);
