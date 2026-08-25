@@ -106,7 +106,27 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Tránh lặp lại**:
   1. Cross-repo pin BẮT BUỘC dùng full 40-hex commit SHA (bất biến) trong `policySource.ref` + checkout action cùng ref; bump version = PR cập nhật pin ở cả hai repo cùng lúc.
   2. Resolver import từ nguồn canonical chỉ khi tồn tại (`existsSync`) — cần fallback embedded tối thiểu cho giai đoạn chuyển tiếp, đánh dấu `ponytail:` + điều kiện bỏ.
+
+## L-021 (24/08/2026) — Mock IO trả shape khác production adapter: CI `missing` + approval read-back luôn FAIL
+- **Triệu chứng**: (1) `gpt-approval.mjs` từ chối mọi PR với `CI=missing` dù check SUCCESS trên GitHub; (2) sau khi đăng comment approval, read-back FAIL `marker thiếu provenance` → không bao giờ gắn `status:approved`. Test pure/integration vẫn PASS.
+- **Nguyên nhân gốc**: pattern mock-vs-real drift, 2 chỗ — `evaluateChecks` chỉ đọc wrapper `{checks:[...]}` trong khi `gh pr checks --json name,state` trả MẢNG PHẲNG; `listPrComments` của `gpt-approval.mjs` trả legacy strings (`[.[].body]`) trong khi `parseApprovalMarkers` yêu cầu rich objects `{id, user.login}` (orchestrator dùng bản rich đúng). Mock test tự dựng shape "đúng lý thuyết" nên không bắt được lệch.
+- **Tránh lặp lại**:
+  1. Hàm contract nhận dữ liệu từ subprocess (`gh`) phải chấp nhận cả 2 shape hoặc IO adapter phải normalize ngay tại biên — chuẩn hóa 1 chỗ, cả 2 caller cùng lợi ích (fix tại contract: `[CLINE-FIX-050]`; fix tại adapter: `[CLINE-FIX-051]`).
+  2. Khi viết test integration, copy NGUYÊN defaultIo thật làm fixture base thay vì dựng mock mới; thêm ít nhất 1 test chạy lệnh gh thật ở chế độ smoke nếu môi trường có credentials.
+  3. Trước khi kết luận script lỗi do dữ liệu, in shape thực tế: `gh pr checks <n> --json name,state` và so trực tiếp với code đọc nó.
   3. Test resolution phải chạy được độc lập trạng thái merge repo kia; drift/version check vẫn fail-closed.
+
+## L-022 (24/08/2026) — Editor replace dòng header entry Memory Bank làm entry cũ mồ côi header
+
+## L-023 (25/08/2026) — `gh issue edit` KHÔNG có flag `--state` / `--state-reason`; đóng Issue phải dùng `gh issue close --reason`
+- **Triệu chứng**: chạy `gh issue edit 6 --repo ... --state closed --state-reason COMPLETED --remove-label status:in-progress --remove-label agent:cline` → `unknown flag: --state`. Phải chạy lại 2 lệnh riêng: `gh issue edit ... --remove-label ...` + `gh issue close N --reason completed`.
+- **Nguyên nhân gốc**: `gh issue edit` chỉ chấp nhận `--add-label`/`--remove-label`/`--add-assignee`/`--remove-assignee`/`--title`/`--body`/`--milestone`; state/stateReason CHỈ đổi được qua `gh issue close [--reason]` (open lại qua `gh issue reopen`). Đoán nhầm từ `gh pr edit` (có `--state` enum) — Issue và PR khác contract.
+- **Tránh lặp lại**: đóng Issue + đổi label = 2 lệnh tách biệt trong cùng `;`-chain — `gh issue edit N --remove-label X --remove-label Y` rồi `gh issue close N --reason completed`. Verify bằng `gh issue view N --json state,stateReason,labels,closedAt --jq '...'` xác nhận cả `state` lẫn label. Khi đóng, luôn kèm `--reason` hợp lệ (`completed`/`not_planned`) để GitHub set `stateReason` qua API field đúng.
+- **Triệu chứng**: chèn entry mới vào đầu `activeContext.md`/`progress.md` bằng editor replace old_text = dòng header entry hiện có → header bị xóa, thân entry cũ dính vào entry mới, mất ranh giới entry. Lặp lại 2 lần trong cùng phiên (23:40 và 23:59).
+- **Nguyên nhân gốc**: dùng replace thay vì insert khi old_text trùng đúng dòng cần giữ; new_text không chứa lại header cũ.
+- **Tránh lặp lại**:
+  1. Chèn entry mới ở ĐẦU file memory-bank: luôn dùng `insert_line: 1` (hoặc include nguyên header cũ trong `new_text` nếu buộc phải replace).
+  2. Sau mỗi lần sửa file memory-bank có replace: đọc lại vùng biên giới trí (5–10 dòng quanh điểm sửa) để xác nhận không mất header/dòng lân cận trước khi sang bước khác.
 
 - **Triệu chứng**: test I.16 truyền `diff: null` vào mock `getPrDiff() { return opts.diff ?? '+const a = 1;' }` → null bị fallback thành diff mặc định, pre-review PASS, test fail ngược kỳ vọng.
 - **Nguyên nhân gốc**: toán tử `??` fallback cho CẢ null lẫn undefined; không phân biệt "không truyền" với "truyền giá trị null có chủ đích" (diff không đọc được).
@@ -120,3 +140,40 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
   2. Sửa tên param hàm → cập nhật MỌI caller/test cùng lúc; chạy toàn bộ gate (pure-logic + effective-policy + approval-gate + orchestrator) chứ không chỉ 1 file.
   3. Marker từ `buildApprovalMarker` dùng NGUYÊN CHUỖI (không `JSON.stringify`); build marker luôn đủ mọi trường bắt buộc (`prNumber`, `decisionId`, `ciEvidence`, `reviewedAt`, ...).
   4. Quy trình: verify XANH trên working tree → commit → (tùy）push → MỚI hand-off comment/label. Không đánh dấu COMPLETED hay báo GPT re-review khi còn test ĐỎ.
+
+
+## L-020 (24/08/2026) — PowerShell 5.1 `-Encoding utf8` tự thêm BOM (U+FEFF) khi ghi file; capture gh multi-line thành ARRAY
+- **Triệu chứng**: PR body ghi qua file tạm bằng `Set-Content -Encoding utf8` rồi `gh pr edit --body-file` → GitHub lưu body bắt đầu bằng U+FEFF; GPT read-back bắt lỗi BOM dù khẳng định "UTF-8 không BOM". Lần 2 ghi array thẳng vào `WriteAllText` làm body mất hết newline (gom 1 dòng).
+- **Nguyên nhân gốc**: (1) PowerShell 5.1 coi `-Encoding utf8` = UTF-8 **CÓ BOM** (Windows default); PS 6+ mới có `utf8NoBOM` và `-Encoding utf8` không BOM. (2) Capture output external command multi-line (`gh ... --jq '.y'`) vào biến → PS5.1 trả về ARRAY các dòng, không phải string; truyền array thẳng vào `WriteAllText` mất newline.
+- **Tránh lặp lại**:
+  1. Ghi file UTF-8 KHÔNG BOM trong PS5.1: `[System.IO.File]::WriteAllText($path, $s, [System.Text.UTF8Encoding]::new($false))` (hoặc `New-Object System.Text.UTF8Encoding $false`).
+  2. `Out-File -Encoding utf8` / `Set-Content -Encoding utf8` / redirect `>` trong PS5.1 ĐỀU có BOM → CẤM dùng khi file đẩy lên GitHub / clasp / JSON config nhạy BOM.
+  3. Capture body đa dòng: `$lines = gh ...; $s = $lines -join [Environment]::NewLine; $s = $s.TrimStart([char]0xFEFF)` rồi `WriteAllText(..., UTF8Encoding($false))` — KHÔNG truyền array thẳng.
+  4. Verify không BOM: ưu tiên byte-level `[System.IO.File]::ReadAllBytes($path)[0..2]` phải KHÔNG phải `239,187,191` (BOM); PowerShell `.StartsWith([char]0xFEFF)` trên array hoặc stale read có thể báo sai, chỉ tin byte-level.
+## L-024 (25/08/2026) — Guard cụ thể đặt sau allowlist generic thành dead code
+- **Triệu chứng**: test `validateObservation()` với verdict kind bị cấm nhận lỗi generic "kind không hợp lệ" thay vì thông báo tường minh về kind cấm; nhánh check `FORBIDDEN_VERDICT_KINDS` không bao giờ chạy.
+- **Nguyên nhân gốc**: thứ tự validation sai — check `ALLOWED_KINDS` (generic) đứng TRƯỚC check `FORBIDDEN_VERDICT_KINDS` (cụ thể), nên giá trị cấm bị chặn sớm bằng lỗi generic; guard cụ thể thành dead code.
+- **Tránh lặp lại**:
+  1. Khi viết chuỗi validate: đặt check cụ thể/nhận định rõ (forbidden, boundary, sentinel) TRƯỚC allowlist generic.
+  2. Test phải assert ĐÚNG message lỗi của từng nhánh, không chỉ "throw" — assert generic làm che dead branch.
+
+## L-025 (25/08/2026) — Telemetry whitelist drop trường lạ TRƯỚC redaction làm mất evidence
+- **Triệu chứng**: test gửi event có trường lạ (`note`, `msg`) chứa nội dung giống secret; output không còn trường nào để chứng minh đã redact — whitelist chỉ giữ các trường biết sẵn nên drop luôn trường lạ, redaction không có cơ hội chạy.
+- **Nguyên nhân gốc**: thứ tự xử lý ngược — schema-filter (drop unknown fields) chạy trước redaction; dữ liệu lạ bị loại khỏi pipeline trước khi được sanitize.
+- **Tránh lặp lại**:
+  1. Quy tắc bắt buộc với mọi pipeline xử lý dữ liệu không tin cậy: **redact/sanitize TRƯỚC, filter shape SAU**; giữ lại trường lạ sau khi đã redact (preserve-after-redact).
+  2. Test telemetry phải bao gồm trường lạ chứa pattern secret và assert giá trị sau redaction — không chỉ assert các trường chuẩn.
+
+## L-026 (25/08/2026) — Regex secret chỉ khớp token CÓ prefix, bỏ sót `Bearer <token>` trần trong stderr
+- **Triệu chứng**: test negative GPT-REV-061 gửi chuỗi `Bearer abcDEF123…` không có `Authorization:` đứng trước → assertion "đã redact" FAIL dù regex Authorization/Bearer đã tồn tại.
+- **Nguyên nhân gốc**: regex `/((?:authorization|auth)\s*[:=]\s*"?bearer\s+)…/` bắt buộc prefix; log stderr thực tế thường in `Bearer <token>` trần.
+- **Tránh lặp lại**:
+  1. Với mỗi token shape, thêm pattern riêng cho dạng trần: `/\b(bearer\s+)([A-Za-z0-9._~+/=-]{12,})/gi` đặt cạnh pattern có prefix.
+  2. Test secret phải phủ cả 2 biến thể (có/không prefix) cho từng shape — không chỉ shape "đẹp" trong docs.
+
+## L-027 (25/08/2026) — Test viết theo giả định scope injection khác thiết kế facade thật
+- **Triệu chứng**: integration test assert `recordEvent()` degrade khi inject io lỗi, nhưng kết quả `ok:true` — recordEvent ghi qua fs thật vì io injection của `createRuntimeHooks` chỉ scope memory store.
+- **Nguyên nhân gốc**: viết test theo giả định về API chưa đối chiếu signature/thiết kế của facade (io chỉ truyền vào `createMemoryStore`); recordEvent dùng fs trực tiếp có try/catch riêng.
+- **Tránh lặp lại**:
+  1. Trước khi viết assertion cho failure path, đọc lại signature + luồng IO thật của facade (tham số nào nhận injection, đường nào dùng stdlib).
+  2. Comment rõ scope injection ngay ở JSDoc tham số (`io` áp dụng cho cái gì) để test và caller không suy diễn.
