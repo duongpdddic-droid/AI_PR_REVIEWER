@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 export const SUPPORTED_SCHEMA_VERSION = '1.0';
 export const MIN_SCHEMA_VERSION = '1.0';
@@ -12,7 +13,8 @@ export const MIN_SCHEMA_VERSION = '1.0';
 // Machine-local registry path (NGOÀI worktree, ngoài Git).
 export const DEFAULT_REGISTRY_DIR = path.join(os.homedir(), '.ai-pr-reviewer');
 export const DEFAULT_REGISTRY_PATH = path.join(DEFAULT_REGISTRY_DIR, 'registry.json');
-export const SCHEMA_PATH = new URL('./project-manifest-schema.json', import.meta.url).pathname;
+export const SCHEMA_URL = new URL('./project-manifest-schema.json', import.meta.url);
+export const SCHEMA_PATH = fileURLToPath(SCHEMA_URL);
 
 // Ownership matrix: mỗi capability có ĐÚNG MỘT canonical owner.
 export const OWNERSHIP_MATRIX = [
@@ -43,6 +45,8 @@ const SECRET_PATTERNS = [
   /(mongodb|postgres|mysql|redis):\/\/[^\s:]+:[^\s@]+@/i,
 ];
 // Absolute machine path patterns (fail-closed: không commit path máy).
+const SECRET_KEY_RE = /(token|secret|password|apikey|privatekey)/i;
+
 const ABSOLUTE_PATH_PATTERNS = [/^[A-Za-z]:[\\/]/, /^\/(?:home|Users|root|mnt|var|etc|tmp)\b/, /^~[\\/]/];
 
 function scanStrings(value, patterns) {
@@ -55,7 +59,17 @@ function scanStrings(value, patterns) {
   walk(value);
   return hits;
 }
-export function scanForSecrets(value) { return scanStrings(value, SECRET_PATTERNS); }
+export function scanForSecrets(value) {
+  const hits = [];
+  const walk = (v, key) => {
+    if (typeof key === 'string' && SECRET_KEY_RE.test(key)) hits.push(`secret-key:${key}`);
+    if (typeof v === 'string') { for (const p of SECRET_PATTERNS) if (p.test(v)) hits.push(v); }
+    else if (Array.isArray(v)) v.forEach((it) => walk(it));
+    else if (v && typeof v === 'object') for (const [k, val] of Object.entries(v)) walk(val, k);
+  };
+  walk(value);
+  return hits;
+}
 export function scanForAbsolutePaths(value) { return scanStrings(value, ABSOLUTE_PATH_PATTERNS); }
 
 export function compareVersion(a, b) {
@@ -89,9 +103,40 @@ export function validateManifest(manifest, opts = {}) {
   const abs = scanForAbsolutePaths(m);
   if (abs.length) errors.push('CONTAINS_ABSOLUTE_PATH:' + abs.length);
   if (m.schemaVersion && compareVersion(m.schemaVersion, minV) < 0) errors.push('STALE_SCHEMA:' + m.schemaVersion);
+  if (m.schemaVersion && compareVersion(m.schemaVersion, SUPPORTED_SCHEMA_VERSION) > 0) errors.push('UNSUPPORTED_SCHEMA_VERSION:' + m.schemaVersion);
   if (Array.isArray(m.allowedOverrides))
     for (const k of m.allowedOverrides) if (!isAllowedOverride(k)) errors.push('OVERRIDE_NOT_ALLOWED:' + k);
+  const schema = loadSchema();
+  if (schema) errors.push(...validateAgainstSchema(m, schema));
   return { ok: errors.length === 0, errors, manifest: m };
+}
+
+function loadSchema() {
+  try { return JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8')); } catch { return null; }
+}
+
+// Thực thi JSON Schema (subset được schema dùng): required, type, pattern, enum, minLength, nested required, array items enum.
+function validateAgainstSchema(m, schema) {
+  const errs = [];
+  for (const k of (schema.required || [])) if (!(k in m)) errs.push('SCHEMA_MISSING_' + String(k).toUpperCase());
+  const props = schema.properties || {};
+  for (const [k, def] of Object.entries(props)) {
+    if (!(k in m)) continue;
+    const v = m[k];
+    if (def.type === 'object') {
+      if (typeof v !== 'object' || v === null || Array.isArray(v)) { errs.push('SCHEMA_TYPE_' + k.toUpperCase()); continue; }
+      for (const rk of (def.required || [])) if (!(rk in v)) errs.push('SCHEMA_MISSING_' + k.toUpperCase() + '_' + String(rk).toUpperCase());
+    }
+    if (def.type === 'array' && Array.isArray(v) && def.items && def.items.enum) {
+      for (const it of v) if (!def.items.enum.includes(it)) errs.push('SCHEMA_ENUM_' + k.toUpperCase() + '_ITEM');
+    }
+    if (typeof v === 'string') {
+      if (def.pattern && !new RegExp(def.pattern).test(v)) errs.push('SCHEMA_PATTERN_' + k.toUpperCase());
+      if (def.enum && !def.enum.includes(v)) errs.push('SCHEMA_ENUM_' + k.toUpperCase());
+      if (def.minLength && v.length < def.minLength) errs.push('SCHEMA_MINLEN_' + k.toUpperCase());
+    }
+  }
+  return errs;
 }
 
 export function loadRegistry({ registryPath = DEFAULT_REGISTRY_PATH } = {}) {
@@ -115,7 +160,11 @@ export function detectConflicts({ registry, manifest }) {
   const conflicts = [];
   const projects = (registry && registry.projects) || [];
   for (const p of projects) {
-    if (p.projectId && manifest.projectId && p.projectId === manifest.projectId) conflicts.push({ type: 'projectId', value: manifest.projectId });
+    if (p.projectId && manifest.projectId && p.projectId === manifest.projectId) {
+      // Cùng project (update/idempotent): chỉ conflict nếu repository (identity) khác -> collision.
+      if (p.repository !== manifest.repository) conflicts.push({ type: 'projectId', value: manifest.projectId });
+      continue;
+    }
     if (p.repository && manifest.repository && p.repository === manifest.repository) conflicts.push({ type: 'repository', value: manifest.repository });
     if (p.telegram && manifest.telegram && p.telegram.route && manifest.telegram.route && p.telegram.route === manifest.telegram.route) conflicts.push({ type: 'telegramRoute', value: manifest.telegram.route });
     if (p.workspace && manifest.workspace && p.workspace.workspaceId && manifest.workspace.workspaceId && p.workspace.workspaceId === manifest.workspace.workspaceId) conflicts.push({ type: 'workspaceId', value: manifest.workspace.workspaceId });
@@ -161,13 +210,8 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     return { ok: true, direction: 'up', manifest: m };
   }
   if (compareVersion(toVersion, from) < 0) {
-    const down = {
-      schemaVersion: toVersion,
-      projectId: m.projectId,
-      repository: m.repository,
-      projectType: m.projectType,
-      workspace: { workspaceId: m.workspace && m.workspace.workspaceId },
-    };
+    // Rollback thực sự: giữ nguyên mọi trường dữ liệu, chỉ đổi marker schemaVersion.
+    const down = { ...m, schemaVersion: toVersion };
     return { ok: true, direction: 'down', manifest: down };
   }
   return { ok: true, direction: 'none', manifest: m };

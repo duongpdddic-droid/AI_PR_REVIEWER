@@ -118,6 +118,33 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   tru('AC9 roundtrip load', reloaded.projects.length === 1 && reloaded.projects[0].projectId === 'ai-pr-reviewer');
 }
 
+// AC10: idempotent re-registration + secret-in-key + unsupported version + route uniqueness + rollback preserves data.
+{
+  const reg = { schemaVersion: '1.0', projects: [] };
+  const m1 = load('ai-pr-reviewer.json');
+  const r1 = registerProject({ manifest: m1, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/duongpdddic-droid/AI_PR_REVIEWER.git' });
+  tru('AC10 register lần 1', r1.ok);
+  const r2 = registerProject({ manifest: m1, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/duongpdddic-droid/AI_PR_REVIEWER.git' });
+  tru('AC10 register lại cùng project -> idempotent', r2.ok);
+  const withApiKey = { ...m1, apiKey: 'sk-1234567890abcdef' };
+  tru('AC10 phát hiện secret trong key apiKey', scanForSecrets(withApiKey).length >= 1);
+  falsy('AC10 manifest có key apiKey -> reject', validateManifest(withApiKey).ok);
+  const withBotToken = { ...m1, botToken: 'AKIAIOSFODNN7EXAMPLE' };
+  tru('AC10 phát hiện secret trong key botToken', scanForSecrets(withBotToken).length >= 1);
+  const future = { ...m1, schemaVersion: '2.0' };
+  falsy('AC10 schemaVersion tương lai -> reject', validateManifest(future).ok);
+  const other = { ...load('generic.json'), projectId: 'other-proj', repository: 'other/proj', telegram: { route: 'dm-boss' }, workspace: { workspaceId: 'other-ws' } };
+  const rc = registerProject({ manifest: other, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/other/proj.git' });
+  falsy('AC10 different project cùng route -> conflict', rc.ok);
+  const stale = load('stale-schema.json');
+  const up = migrateManifest({ manifest: stale, toVersion: '1.0' });
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9' });
+  eq('AC10 rollback direction', down.direction, 'down');
+  tru('AC10 rollback giữ policy', Boolean(down.manifest.policy));
+  tru('AC10 rollback giữ telegram', Boolean(down.manifest.telegram));
+  eq('AC10 rollback schemaVersion', down.manifest.schemaVersion, '0.9');
+}
+
 const pass = checks.filter((c) => c.ok).length;
 for (const c of checks) if (!c.ok) console.log('FAIL', c.name, '=>', JSON.stringify(c.got), 'want', JSON.stringify(c.want));
 console.log(`\nTổng: ${pass}/${checks.length} PASS`);
