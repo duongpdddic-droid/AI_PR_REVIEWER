@@ -1,13 +1,16 @@
 # Progress (AI_PR_REVIEWER)
 
-## 25/08/2026 09:35 — Issue #9 REV-2: fix 3 finding GPT review PR #10 — IN PROGRESS (chuẩn bị push)
+## 25/08/2026 09:35 — Issue #9 REV-2: fix 3 finding GPT review PR #10 — COMPLETED (chờ review vòng 2)
 
 - [x] [GPT-REV-060]: `overBudget` fail-closed cho mọi trường hợp vượt (`compactTranscript`, `selectiveLoad`); test âm §9–§11 → 11 PASS.
 - [x] [GPT-REV-061]: `redactDeep()` đệ quy + guards (depth/cycle/node); `recordExecutionEvent` redact mọi giá trị; regex Bearer trần; test §11–§13 → 13 PASS.
 - [x] [GPT-REV-059]: default IO fs thật (`fsJsonlIo`) + cấm stored giả; `runtime-hooks.mjs` facade; wire vào `autonomous-run.mjs` (coder bounded recovery, verify telemetry, observation, consolidate); integration `test-runtime-hooks.mjs` 7 PASS.
 - [x] Audit matrix module-version 2 — sửa claim sai, thêm Runtime wiring section.
 - [x] Verify: **full-verify 89/89 PASS exit 0**; smoke dry-run autonomous-run OK.
-- [ ] Push + comment `[CLINE-FIX-*]` trên PR #10 + labels về `status:review-requested`.
+- [x] Commit `35b04cc` (code) + `4de5149` (memory bank); push `05e12cf..4de5149`; CI verify PASS tại HEAD `4de5149bf24a3b19d1fa6d135052e55747e7d0b5`.
+- [x] Comment `[CLINE-FIX-059]/[CLINE-FIX-060]/[CLINE-FIX-061]` trên PR #10 (issuecomment-5404377568).
+- [x] Labels PR read-back: `agent:cline` + `status:review-requested` tại HEAD mới (orchestrator sẽ pre-review lại). Không gửi Telegram riêng: idempotency key `…::done::review-requested` đã SENT vòng trước, orchestrator notify sau mutation của nó.
+- [ ] CHỜ: pre-review + GPT review vòng 2 → approval qua `gpt-approval.mjs` (user-relay) → user merge.
 
 ## 25/08/2026 08:36 — Issue #9: agent harness selective upgrade → PR #10 bàn giao GPT review — COMPLETED (chờ review)
 
