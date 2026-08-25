@@ -177,3 +177,9 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Tránh lặp lại**:
   1. Trước khi viết assertion cho failure path, đọc lại signature + luồng IO thật của facade (tham số nào nhận injection, đường nào dùng stdlib).
   2. Comment rõ scope injection ngay ở JSDoc tham số (`io` áp dụng cho cái gì) để test và caller không suy diễn.
+## L-029 (25/08/2026) — Test phát hiện xung đột phải seed registry bằng entity CÙNG identity gây xung đột trước khi assert
+
+- **Triệu chứng**: test AC9 gọi `registerProject(duplicate-id)` (projectId `ai-pr-reviewer`) trên registry vừa chứa `qlda-dtxd` → mong đợi conflict nhưng `res.ok === true` (đăng ký thành công, không phát hiện trùng). `pnpm verify` báo 1 FAIL.
+- **Nguyên nhân gốc**: `detectConflicts` so projectId của manifest với TỪNG project đã có trong registry; registry seed bằng project KHÁC id nên không trùng. Fixture `duplicate-id` chỉ "trùng" khi registry đã chứa chính `ai-pr-reviewer`.
+- **Tránh lặp lại**: khi viết test phát hiện xung đột (duplicate id/route/workspace), seed registry trước bằng entity CÙNG identity gây xung đột (register `ai-pr-reviewer.json` trước, rồi `duplicate-id.json` mới conflict). Đừng dùng fixture duplicate với registry seed id khác.
+

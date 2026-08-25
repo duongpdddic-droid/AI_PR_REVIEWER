@@ -267,3 +267,12 @@
 ## Trạng thái
 IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR vì worktree còn file chưa commit (preflight fail-closed đúng). Để chạy execute thật: commit/đẩy công việc hiện tại hoặc dùng workspace sạch.
 ## 24/08/2026 22:54 — Issue #6 giai đoạn AI_PR_REVIEWER: PR #8 bàn giao CI PASS (context router fail-closed + 9 module + verify gates C2). pnpm verify 67/67; CI run 32747426537 SUCCESS @ 1056971a. Chờ GPT review; còn phần QLDA_DTXD (branch/PR riêng). Đồng thời: đóng #5 COMPLETED, #2 NOT_PLANNED (SPEC-SUPERSEDED), #6 claimed.
+## 25/08/2026 20:06 — Issue #14: Project Registry + versioned project manifest — IN PROGRESS (bàn giao GPT review)
+
+- [x] Claim #14 (`agent:cline` + `status:in-progress`); branch `feat/issue-14-project-registry` từ `origin/main` (fbfd2ff).
+- [x] Deliver: `scripts/project-manifest-schema.json` (schema versioned, fail-closed thiếu repo identity); `scripts/project-registry.mjs` (validate/registry/conflict/remote/register/migrate/owner); 6 fixtures; `.agent/project.json` mẫu.
+- [x] `scripts/test-project-registry.mjs` 32/32 PASS (AC1–AC9); đăng ký vào full-verify `optionalSuites`.
+- [x] `pnpm verify` **94/94 PASS exit 0**.
+- [ ] Commit + push; mở Draft PR `Ref #14`; handoff GPT (`agent:gpt` + `status:review-requested`).
+- [ ] CHỜ: GPT review; approval qua `gpt-approval.mjs` (user-relay) → user merge. Không merge/deploy.
+
