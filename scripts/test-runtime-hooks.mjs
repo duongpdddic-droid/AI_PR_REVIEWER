@@ -451,6 +451,33 @@ test('REV66.degrade-unavailable: gh throw / JSON hỏng / non-array → github-u
   assert.deepEqual(fetchUnresolvedFindings(66, { repo: 'o/r', ghFn: () => '[]' }), { findings: [], source: 'github-comments-empty' });
 });
 
+test('REV68.gh-ok-flag-authoritative: gh exit!=0 (ok:false) → KHÔNG tin stdout, fail-closed github-unavailable (tránh xác định sai OPEN/RESOLVED từ comment thiếu)', () => {
+  // JSON HỢP LỆ + có finding OPEN, nhưng gh exit!=0 (partial pagination / auth / rate-limit) → vẫn unavailable.
+  const validArray = JSON.stringify([{ id: 1, created_at: '2026-08-25T00:00:00Z', body: '[GPT-REV-068] OPEN — chưa fix.' }]);
+  assert.deepEqual(
+    fetchUnresolvedFindings(68, { repo: 'o/r', ghFn: () => ({ out: validArray, ok: false }) }),
+    { findings: [], source: 'github-unavailable' },
+    'ok:false + JSON hợp lệ vẫn phải unavailable (không tin partial)',
+  );
+  // JSON MỘT PHẦN (truncated) + exit!=0 → unavailable (parse thành công nhưng không được tin).
+  assert.deepEqual(
+    fetchUnresolvedFindings(68, { repo: 'o/r', ghFn: () => ({ out: '[{"id":1,"body":"[GPT-REV-068] OPEN', ok: false }) }),
+    { findings: [], source: 'github-unavailable' },
+    'ok:false + partial JSON vẫn unavailable',
+  );
+  // ok:true → parse bình thường (gh thành công).
+  const r = fetchUnresolvedFindings(68, { repo: 'o/r', ghFn: () => ({ out: validArray, ok: true }) });
+  assert.equal(r.source, 'github-comments');
+  assert.ok(r.findings.some((f) => f.startsWith('[UNRESOLVED GPT-REV-068]')), 'ok:true → finding OPEN được parse');
+});
+
+test('REV68.ghFn-string-implies-ok: ghFn trả string (legacy) vẫn ok:true → parse bình thường', () => {
+  const validArray = JSON.stringify([{ id: 9, created_at: '2026-08-25T00:00:00Z', body: '[GPT-REV-068] OPEN.' }]);
+  const r = fetchUnresolvedFindings(68, { repo: 'o/r', ghFn: () => validArray });
+  assert.equal(r.source, 'github-comments');
+  assert.ok(r.findings.some((f) => f.includes('GPT-REV-068')), 'string ghFn tương đương ok:true');
+});
+
 test('REV66.independent-codes-and-empty-source: verdict độc lập từng mã; thành công không mã nào → github-comments-empty', () => {
   const pages = JSON.stringify([
     [{ id: 701, created_at: '2026-08-25T01:00:00Z', body: '[GPT-REV-080] OPEN.\n[GPT-REV-081] OPEN.' }],

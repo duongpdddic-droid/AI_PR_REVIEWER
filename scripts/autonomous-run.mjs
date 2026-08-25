@@ -318,13 +318,26 @@ export function fetchUnresolvedFindings(issueNumber, io = {}) {
   const repo = io.repo || REPO;
   if (!repo) return { findings: [], source: 'github-unavailable' };
   let raw;
+  let ok = true;
   try {
-    raw = io.ghFn
-      ? io.ghFn(['api', `repos/${repo}/issues/${String(issueNumber)}/comments`, '--paginate', '--slurp'])
-      : runQuiet('gh', ['api', `repos/${repo}/issues/${String(issueNumber)}/comments`, '--paginate', '--slurp']).out;
+    if (io.ghFn) {
+      // ghFn trả string (tương đương ok:true) HOẶC { out, ok } để test cờ ok (GPT-REV-068).
+      const res = io.ghFn(['api', `repos/${repo}/issues/${String(issueNumber)}/comments`, '--paginate', '--slurp']);
+      if (typeof res === 'string') { raw = res; ok = true; }
+      else if (res && typeof res === 'object') { raw = res.out; ok = res.ok !== false; }
+      else { raw = String(res); ok = true; }
+    } else {
+      const r = runQuiet('gh', ['api', `repos/${repo}/issues/${String(issueNumber)}/comments`, '--paginate', '--slurp']);
+      raw = r.out;
+      ok = r.ok;
+    }
   } catch {
     return { findings: [], source: 'github-unavailable' };
   }
+  // GPT-REV-068: gh exit !=0 (partial pagination / auth / rate-limit / network) → KHÔNG tin stdout,
+  // kể cả khi JSON parse được một phần → fail-closed github-unavailable (không xác định sai OPEN/RESOLVED
+  // từ comment thiếu). Phải kiểm tra TRƯỚC JSON.parse vì partial JSON vẫn parse thành công.
+  if (!ok) return { findings: [], source: 'github-unavailable' };
   let parsed;
   try { parsed = JSON.parse(raw || '[]'); } catch { return { findings: [], source: 'github-unavailable' }; }
   // Top-level JSON phải là mảng (flat legacy hoặc nested pages). Object/number bất thường =

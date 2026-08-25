@@ -108,7 +108,7 @@ tự ghép prompt/`--read` riêng). `fetchUnresolvedFindings()` parse đúng nes
 | **Compact-then-retry** — sau `compact-then-retry` recovery | `invocationKind='compact-retry'`; `retryBudget` = nửa budget, reuse context compact NHỎ HƠN, spans còn | Cùng budget (budget đã giảm nửa) | Có | `outcome='startup-context'`, `beforeCompactTokens`/`afterCompactTokens`, `invocationKind` | `REV67.compact-retry-shrunk` |
 | **Blocked (over-budget)** — mọi path vượt budget kể cả sau compact | `blocked=true` → executor trả `{called:false, blocked:true, error:'BLOCKED_CONTEXT_BUDGET'}` TRƯỚC khi chạm runner | Fail-closed tuyệt đối: model KHÔNG được gọi | n/a (không gửi payload) | `outcome='startup-context-blocked'`, `overBudget=true`, `modelCalled=false` | `REV67.over-budget-blocked-no-model` |
 | **Cross-entry dedupe** | `message` sau `dedupeLinesAcross()` — cùng dòng ở issue/findings/memory chỉ 1 lần | Không đổi (dedupe giảm token) | n/a | `loadReasons` ghi selective retrieval | `REV67.cross-entry-dedupe` |
-| **Findings parse (authoritative)** | `findingsSource` truyền vào capsule protected entry | n/a | n/a | `findingsSource` trong event | `REV66.*` (8 case) + `INT.unresolved-findings-retrieval` |
+| **Findings parse (authoritative)** | `findingsSource` truyền vào capsule protected entry; **GPT-REV-068**: kiểm tra cờ `ok` từ `runQuiet('gh',…)` — `!ok` (gh exit≠0, partial pagination/auth/rate-limit) → fail-closed `github-unavailable` TRƯỚC khi parse, KHÔNG tin JSON một phần → không xác định sai OPEN/RESOLVED từ comment thiếu | n/a | n/a | `findingsSource` trong event | `REV66.*` (8 case) + `INT.unresolved-findings-retrieval` + `REV68.*` (2 case) |
 
 Ranh giới an toàn:
 - Policy/CI/approval gates KHÔNG đổi; memory bị chặn lưu verdict loại authoritative
