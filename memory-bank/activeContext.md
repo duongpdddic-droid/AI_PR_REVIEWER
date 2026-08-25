@@ -17,15 +17,16 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp).
 9. [ ] Dừng chờ GPT review (không merge/deploy).
 
 ## Bước hiện tại
-Đang bàn giao GPT review.
+Đã sửa 5 finding GPT-REV-069..073, re-handoff PR #16 (HEAD 0cc5827), chờ GPT re-review.
 
 ## Bằng chứng thực thi
 - `scripts/project-manifest-schema.json`: schema versioned, `repository` required + pattern `^[\w.-]+/[\w.-]+$`.
-- `scripts/project-registry.mjs`: `validateManifest` fail-closed (`MISSING_REPO_IDENTITY`/`CONTAINS_SECRET`/`CONTAINS_ABSOLUTE_PATH`/`STALE_SCHEMA`/`OVERRIDE_NOT_ALLOWED`); `detectConflicts` (projectId/repository/telegramRoute/workspaceId); `assertWorkspaceRemote`; `registerProject`; `migrateManifest` (up/down); `assertSingleOwner`; `registryOutsideWorktree`.
-- `scripts/fixtures/project-registry/*.json`: 6 fixtures theo AC.
-- `scripts/test-project-registry.mjs`: 32/32 PASS (AC1–AC9).
-- `.agent/project.json`: manifest chuẩn repo này (valid qua `validateManifest`).
-- `pnpm verify` 94/94 PASS exit 0.
+- `scripts/project-registry.mjs`: `validateManifest` fail-closed (`MISSING_REPO_IDENTITY`/`CONTAINS_SECRET`/`CONTAINS_ABSOLUTE_PATH`/`STALE_SCHEMA`/`UNSUPPORTED_SCHEMA_VERSION` + JSON Schema enforcement); `scanForSecrets` quét cả key camelCase; `detectConflicts` (idempotent cho cùng projectId+repo); `registerProject`; `migrateManifest` (up/down giữ nguyên trường); `assertSingleOwner`; `registryOutsideWorktree`.
+- `scripts/fixtures/project-registry/*.json`: 6 fixtures; qlda-dtxd route `dm-boss-qlda`, policy pin `2026-08-23.7`.
+- `scripts/test-project-registry.mjs`: 43/43 PASS (AC1–AC10).
+- `.agent/project.json`: manifest chuẩn repo này (policy pin `2026-08-23.7`).
+- `pnpm verify` 94/94 PASS exit 0; `full-verify` 94/94.
+- PR #16 comment `issuecomment-5411484124` (`[CLINE-FIX-069..073]`); HEAD `0cc582757c4cf425b07da2fc4e90955ef432c746`.
 
 ## Quyết định
 - Registry machine-local tại `~/.ai-pr-reviewer/registry.json` (ngoài worktree/Git).
@@ -38,4 +39,4 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp).
 - [ ] Chưa xây CLI init/sync/doctor (#12/#13/#15 — Bố cấm đồng thời).
 
 ## Bước tiếp theo
-Push branch, mở Draft PR, handoff GPT. Sau approval GPT → user merge (không tự merge/deploy).
+Chờ GPT re-review tại PR #16 (HEAD 0cc5827). Sau approval GPT qua `gpt-approval.mjs` (user-relay) → user merge. Không tự merge/deploy.

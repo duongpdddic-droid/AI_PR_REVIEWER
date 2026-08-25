@@ -1,5 +1,17 @@
 # Progress (AI_PR_REVIEWER)
 
+## 25/08/2026 23:40 — Issue #14: fix GPT-REV-069..073 (re-review vòng 2) — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-069]: pin policy version canonical `2026-08-23.7` trong ai-pr-reviewer.json, qlda-dtxd.json, .agent/project.json.
+- [x] [GPT-REV-070]: `validateManifest` thực thi JSON Schema (required/pattern/enum/minLength/nested) làm single source of truth; reject schema tương lai (UNSUPPORTED_SCHEMA_VERSION).
+- [x] [GPT-REV-071]: `scanForSecrets` quét cả key camelCase (apiKey/botToken/accessToken) -> reject.
+- [x] [GPT-REV-072]: `registerProject` idempotent (re-register cùng projectId+repo = no-op); QLDA fixture route `dm-boss-qlda` (distinct).
+- [x] [GPT-REV-073]: down migration giữ nguyên mọi trường (true rollback, không mất data).
+- [x] `scripts/test-project-registry.mjs` 43/43 PASS (thêm AC10: idempotency, secret-in-key, future schema, route uniqueness, rollback preserves data).
+- [x] `pnpm verify` **94/94 PASS exit 0**; `full-verify` 94/94.
+- [x] Commit `0cc5827`, push origin `feat/issue-14-project-registry`; comment `[CLINE-FIX-069..073]` (issuecomment-5411484124); PR #16 labels `agent:gpt`+`status:review-requested`; Issue #14 `status:review-requested`.
+- [ ] CHỜ: GPT re-review vòng 2; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
+
 ## 25/08/2026 12:20 — Issue #9 REV-4: fix GPT-REV-065 startup context PR #10 — COMPLETED (chờ review vòng 4)
 
 - [x] Startup capsule đo được (`buildStartupCapsule()`): message + `--read` inline; conventions >2000t → pointer, không `--read`; budget tổng fail-closed `CODER_STARTUP_BUDGET_TOKENS=12000` → vượt escalate `BLOCKED_CONTEXT_BUDGET`.
