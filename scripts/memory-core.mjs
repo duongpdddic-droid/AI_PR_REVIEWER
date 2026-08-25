@@ -11,6 +11,8 @@
 // Stale-memory: resolveState() — mâu thuẫn memory vs evidence GitHub → GitHub thắng.
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // Loại bản ghi bị cấm lưu như verdict (chỉ được lưu dạng pointer).
 export const FORBIDDEN_VERDICT_KINDS = new Set(['ci-verdict', 'approval', 'merge-authorization']);
@@ -40,15 +42,39 @@ export function validateObservation(obs) {
 }
 
 /**
+ * IO stdlib thật cho JSONL (GPT-REV-059): readFileSync/appendFileSync qua node:fs.
+ * readFile thiếu file (ENOENT) → null (store rỗng, không crash); append tự tạo thư mục cha.
+ * Dùng làm default của createMemoryStore — test vẫn inject io mock được.
+ */
+export function fsJsonlIo() {
+  return {
+    readFile(file) {
+      try { return fs.readFileSync(file, 'utf8'); } catch (e) {
+        if (e && e.code === 'ENOENT') return null;
+        throw e;
+      }
+    },
+    appendFile(file, data) {
+      fs.mkdirSync(path.dirname(String(file)), { recursive: true });
+      fs.appendFileSync(file, data, 'utf8');
+    },
+  };
+}
+
+/**
  * Tạo memory store JSONL trên một file. IO inject được để test.
+ * Default IO = fs thật (fsJsonlIo) — append LUÔN ghi byte; KHÔNG bao giờ no-op mà vẫn
+ * báo stored:true (GPT-REV-059). Khi io không cung cấp hàm ghi → stored:false.
  * load() khoan dung: dòng hỏng → bỏ qua + warning (graceful degradation, không chết cả store).
  */
-export function createMemoryStore({ file, io = {} }) {
-  const readFile = io.readFile || (() => null);
-  const appendFile = io.appendFile || (() => {});
+export function createMemoryStore({ file, io } = {}) {
+  const impl = io || fsJsonlIo();
+  const readFile = typeof impl.readFile === 'function' ? impl.readFile : null;
+  const appendFile = typeof impl.appendFile === 'function' ? impl.appendFile : null;
   const warnings = [];
 
   function load() {
+    if (!readFile) return [];
     const raw = readFile(file);
     if (raw == null || raw === '') return [];
     const out = [];
@@ -72,6 +98,7 @@ export function createMemoryStore({ file, io = {} }) {
     try {
       const v = validateObservation(obs);
       if (!v.ok) return { stored: false, reason: v.error };
+      if (!appendFile) return { stored: false, reason: 'no-storage-io' };
       const record = { ...obs, ts: obs.ts || (obs.provenance && obs.provenance.ts) };
       appendFile(file, `${JSON.stringify(record)}\n`);
       return { stored: true, record };

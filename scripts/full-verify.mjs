@@ -101,6 +101,7 @@ try {
     'test-context-manager.mjs',
     'test-memory-core.mjs',
     'test-error-recovery.mjs',
+    'test-runtime-hooks.mjs',
     'test-tg-notify.mjs',
     'test-protocol-drift.mjs',
   ];

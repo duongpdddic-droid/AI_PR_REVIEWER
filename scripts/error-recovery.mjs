@@ -95,6 +95,8 @@ export function planRecovery(input) {
 const SECRET_RES = [
   /(gh[pousr]_)[A-Za-z0-9]{16,}/g, // GitHub tokens
   /sk-[A-Za-z0-9_-]{8,}/g, // OpenAI-style keys
+  /((?:authorization|auth)"?\s*[:=]\s*"?bearer\s+)[A-Za-z0-9._~+/=-]+/gi, // Authorization: Bearer <token>
+  /\b(bearer\s+)([A-Za-z0-9._~+/=-]{12,})/gi, // "Bearer <token>" trần (stderr/log thô)
   /((?:api[_-]?key|apikey|token|secret|password)"?\s*[:=]\s*)["']?[^"'\s,};]+/gi, // key=value shapes
 ];
 
@@ -105,16 +107,55 @@ export function redactSecrets(text) {
   return s;
 }
 
+// Guards redact đệ quy (GPT-REV-061): không treo vì cycle, không phình log vì quá sâu/quá lớn.
+const MAX_REDACT_DEPTH = 6;
+const MAX_REDACT_NODES = 500;
+const REDACT_TRUNCATED = '[TRUNCATED]';
+
+/**
+ * Redact secret ĐỆ QUY trên mọi string trong object/array lồng nhau.
+ * Guard: depth ≤ MAX_REDACT_DEPTH, tổng node ≤ MAX_REDACT_NODES, circular ref → '[Circular]'.
+ * Không ném với input bất kỳ (null/primitive trả nguyên/redact chuỗi).
+ */
+export function redactDeep(value, depth = 0, seen = null, counter = { nodes: 0 }) {
+  try {
+    if (typeof value === 'string') return redactSecrets(value);
+    if (value === null || typeof value !== 'object') return value;
+    if (depth >= MAX_REDACT_DEPTH) return REDACT_TRUNCATED;
+    if (seen && seen.has(value)) return '[Circular]';
+    if (counter.nodes > MAX_REDACT_NODES) return REDACT_TRUNCATED;
+    const nextSeen = new Set(seen || []);
+    nextSeen.add(value);
+    if (Array.isArray(value)) {
+      const out = [];
+      for (const item of value) {
+        counter.nodes += 1;
+        if (counter.nodes > MAX_REDACT_NODES) { out.push(REDACT_TRUNCATED); break; }
+        out.push(redactDeep(item, depth + 1, nextSeen, counter));
+      }
+      return out;
+    }
+    const out = {};
+    for (const k of Object.keys(value)) {
+      counter.nodes += 1;
+      if (counter.nodes > MAX_REDACT_NODES) { out[k] = REDACT_TRUNCATED; continue; }
+      out[k] = redactDeep(value[k], depth + 1, nextSeen, counter);
+    }
+    return out;
+  } catch {
+    return REDACT_TRUNCATED; // fail-safe: telemetry không bao giờ làm hỏng caller
+  }
+}
+
 /**
  * Ghi 1 execution/recovery event đã redact (pure — caller tự lưu vào store).
  * Trường: taskId/issue/pr/ref, provider/model (nếu runtime cung cấp), attempt, errorClass,
  * toolFailure, compactionEvent, fallbackEvent, manualIntervention, outcome, durationMs, ts.
  */
 export function recordExecutionEvent(prevEvents, evt) {
-  const clean = {};
-  for (const k of Object.keys(evt || {})) {
-    clean[k] = typeof evt[k] === 'string' ? redactSecrets(evt[k]) : evt[k];
-  }
+  // GPT-REV-061: redact ĐỆ QUY mọi giá trị (kể cả object/array lồng như toolFailure.stderr),
+  // không chỉ string top-level — secret trong cấu trúc lồng nhau không được ghi ra log.
+  const clean = redactDeep(evt || {});
   const record = {
     taskId: clean.taskId ?? null,
     issue: clean.issue ?? null,

@@ -84,8 +84,9 @@ export function compactTranscript({ entries, budgetTokens }) {
     summary = { kind: 'compacted-summary', text: parts.join('\n'), preservedSpans: spans };
   }
 
-  // Budget check cuối: nếu cả protected còn vượt → vẫn trả về đủ protected (không drop),
-  // nhưng báo overBudget để caller escalate thay vì im lặng mất state.
+  // Budget check cuối: nếu còn vượt (kể cả chỉ do tombstone summary hoặc protected entry)
+  // → vẫn trả đủ kết quả nhưng overBudget=true BẤT KỂ loại entry, để caller escalate
+  // thay vì im lặng nhận là budget-enforced (GPT-REV-060).
   const totalTokens = estimateTokens(kept.map((e) => e.text).join('\n'))
     + (summary ? estimateTokens(summary.text) : 0);
 
@@ -94,7 +95,7 @@ export function compactTranscript({ entries, budgetTokens }) {
     dropped: dropped.length,
     summary,
     totalTokens,
-    overBudget: totalTokens > budgetTokens && kept.some(isProtectedEntry),
+    overBudget: totalTokens > budgetTokens,
     compactionEvent: summary ? { droppedCount: dropped.length, preservedSpans: summary.preservedSpans } : null,
   };
 }
@@ -132,5 +133,7 @@ export function selectiveLoad({ index, neededTags, budgetTokens, loader }) {
   for (const inv of invariants) loadOne(inv, true); // invariant luôn tải, không bị budget chặn
   for (const c of candidates) loadOne(c, false);
 
-  return { loaded, skipped, totalTokens: used };
+  // GPT-REV-060: invariants vượt budget vẫn được bảo toàn, nhưng phải báo trạng thái
+  // để caller escalate/compact tiếp — kết quả không bao giờ im lặng nhận là enforced.
+  return { loaded, skipped, totalTokens: used, overBudget: used > budgetTokens };
 }

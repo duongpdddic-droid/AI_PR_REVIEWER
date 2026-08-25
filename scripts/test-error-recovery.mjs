@@ -117,5 +117,56 @@ test('G.telemetry: redact secrets + summarize theo provider/model', () => {
   assert.equal(Object.keys(sum).length, 2);
 });
 
+// 11. GPT-REV-061: secret trong object lồng nhau phải bị redact (không chỉ string top-level).
+test('G.redact-nested-object: toolFailure.stderr chứa Bearer token → redact đệ quy', () => {
+  const token = 'ghp_A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6';
+  const evs = recordExecutionEvent([], {
+    taskId: 'issue-9', issue: 9, errorClass: 'PROVIDER_ERROR',
+    toolFailure: { stderr: `Authorization: Bearer ${token}`, exitCode: 1 },
+    compactionEvent: { preservedSpans: ['password=hunter2secretval'], droppedCount: 3 },
+    fallbackEvent: { to: { provider: 'p', model: 'm' }, note: 'auth "Bearer sk-XYZABCDEF12345678"' },
+  });
+  const s = JSON.stringify(evs);
+  assert.ok(!s.includes(token), 'GitHub token lồng trong object đã redact');
+  assert.ok(!s.includes('hunter2secretval'), 'secret dạng key=value trong object lồng redact');
+  assert.ok(!s.includes('sk-XYZABCDEF12345678'), 'OpenAI-style key trong nested note redact');
+  assert.ok(s.includes('[REDACTED]'), 'marker redact hiện diện');
+  // Cấu trúc object được bảo toàn (chỉ giá trị nhạy cảm bị thay).
+  const rec = evs[0];
+  assert.equal(rec.toolFailure.exitCode, 1, 'field không nhạy cảm giữ nguyên');
+  assert.deepEqual(rec.fallbackEvent.to, { provider: 'p', model: 'm' });
+});
+
+// 12. GPT-REV-061: array lồng nhau + unknown evidence field cũng redact.
+test('G.redact-array-unknown-field: mảng object chứa secret → redact hết', () => {
+  const evs = recordExecutionEvent([], {
+    errorClass: 'TIMEOUT',
+    evidenceLogs: [{ msg: 'Bearer abcDEF123ghiJKL456' }, { msg: 'clean line' }, ['nested ghp_QRSTUVWXYZ0123456789abcdefghij']],
+  });
+  const s = JSON.stringify(evs);
+  assert.ok(!s.includes('Bearer abcDEF123ghiJKL456'));
+  assert.ok(!s.includes('ghp_QRSTUVWXYZ0123'));
+  assert.ok(s.includes('clean line'), 'giá trị sạch giữ nguyên');
+});
+
+// 13. GPT-REV-061: circular input KHÔNG treo/không ném; oversized input bị cắt.
+test('edge.redact-guards: circular → [Circular]; depth/node vượt → [TRUNCATED]', () => {
+  const a = { name: 'self', note: 'token ghp_CIRCULARTEST000000000000000000000' };
+  a.self = a;
+  const out = recordExecutionEvent([], { errorClass: 'UNKNOWN', weirdField: a });
+  const s = JSON.stringify(out);
+  assert.ok(!s.includes('ghp_CIRCULARTEST'), 'secret qua circular path vẫn redact');
+  assert.ok(s.includes('[Circular]'), 'cycle bị đánh dấu, không treo');
+  // Deep nesting vượt depth guard.
+  let deep = { v: 'sk-DEEPSECRETKET12345678' };
+  for (let i = 0; i < 10; i += 1) deep = { w: deep };
+  const deepOut = JSON.stringify(recordExecutionEvent([], { deep }));
+  assert.ok(deepOut.includes('[TRUNCATED]') || !deepOut.includes('sk-DEEPSECRET'), 'depth guard hoạt động');
+  // Oversize: > MAX_REDACT_NODES node.
+  const many = { list: Array.from({ length: 600 }, (_, i) => ({ i: String(i), t: `tok${i}` })) };
+  const bigOut = JSON.stringify(recordExecutionEvent([], { many }));
+  assert.ok(bigOut.includes('[TRUNCATED]'), 'oversized input bị cắt để không phình log');
+});
+
 console.log(`\nerror-recovery: ${passed} PASS${process.exitCode ? ' (có FAIL)' : ''}`);
 

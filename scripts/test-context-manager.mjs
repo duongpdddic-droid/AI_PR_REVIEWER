@@ -109,5 +109,47 @@ test('unit.extract-protected-spans', () => {
   assert.ok(spans.some((s) => s.startsWith('Decision Gate')));
 });
 
+// 9. GPT-REV-060 negative: unprotected-only transcript, tombstone summary đẩy vượt budget
+//    → overBudget=true (không phụ thuộc có protected entry).
+test('edge.unprotected-summary-over-budget: summary đẩy vượt budget vẫn báo overBudget', () => {
+  // 2 entries history thuần (không protected): 1 vừa khít budget, 1 bị drop → summary cộng thêm.
+  const bigText = 'x'.repeat(200); // ~50 tokens
+  const r = compactTranscript({
+    entries: [
+      { kind: 'history', text: bigText },
+      { kind: 'history', text: `${bigText} dropped part` }, // bị drop vì tràn → sinh tombstone
+    ],
+    budgetTokens: 50,
+  });
+  assert.equal(r.dropped, 1, 'entry thứ 2 bị compact');
+  assert.ok(r.summary, 'có tombstone summary');
+  assert.ok(r.totalTokens > 50, `totalTokens=${r.totalTokens} phải vượt budget`);
+  assert.equal(r.overBudget, true, 'overBudget=true dù KHÔNG có protected entry');
+});
+
+// 10. GPT-REV-060 negative: nhiều invariants vượt budget → vẫn bảo toàn nhưng báo overBudget.
+test('edge.invariants-over-budget: invariants giữ nguyên + overBudget=true để escalate', () => {
+  const inv = (n) => ({ name: `_inv${n}`, invariant: true, tags: [], content: 'I'.repeat(100) });
+  const index = [inv(1), inv(2), inv(3)];
+  const r = selectiveLoad({ index, neededTags: ['coder'], budgetTokens: 10 });
+  assert.equal(r.loaded.length, 3, 'mọi invariant vẫn được tải');
+  assert.ok(r.overBudget === true, 'overBudget=true — caller phải escalate/compact tiếp');
+  assert.ok(r.totalTokens > 10);
+});
+
+// 11. GPT-REV-060: kết quả không bao giờ im lặng nhận là budget-enforced khi vượt.
+test('edge.never-silent-over-budget: mọi trường hợp vượt đều có cờ', () => {
+  const cases = [
+    compactTranscript({ entries: [{ kind: 'decision-gate', text: 'Decision Gate: ' + 'y'.repeat(300) }], budgetTokens: 5 }),
+    compactTranscript({ entries: [{ kind: 'history', text: 'z'.repeat(400) }], budgetTokens: 5 }),
+    selectiveLoad({ index: [{ name: 'i', invariant: true, tags: [], content: 'w'.repeat(80) }], neededTags: ['x'], budgetTokens: 4 }),
+  ];
+  for (const r of cases) {
+    if (r.totalTokens > (r.kept ? 5 : 4)) {
+      assert.equal(r.overBudget, true, `totalTokens=${r.totalTokens} nhưng overBudget sai`);
+    }
+  }
+});
+
 console.log(`\ncontext-manager: ${passed} PASS${process.exitCode ? ' (có FAIL)' : ''}`);
 

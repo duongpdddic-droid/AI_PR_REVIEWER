@@ -1,6 +1,6 @@
 # Audit Matrix — Issue #9 (Nâng cấp Agent Harness có chọn lọc)
 
-module-version: 1
+module-version: 2 (REV-2 sau GPT review PR #10 — GPT-REV-059/060/061)
 
 Ngày audit: 25/08/2026. Cơ sở: source `AI_PR_REVIEWER` tại HEAD sau Issue #6 (`7a6dc78`→`fbe5b05`),
 Issue #9, `.github/ai-review-policy.json`, `docs/AGENT_HANDOFF_PROTOCOL.md`.
@@ -46,15 +46,33 @@ token trước/sau compact. Không đặt con số cải thiện giả định (
 ## Kiến trúc minimal chốt
 
 3 module pure-core (Node stdlib, injectable IO, cùng phong cách `context-router.mjs`/`review-contract.mjs`)
-+ 3 test file assert-based (không framework):
++ 1 facade runtime + 4 test file assert-based (không framework):
 
 ```text
 scripts/context-manager.mjs   — compactTranscript() + selectiveLoad() (B1/B2)
-scripts/memory-core.mjs       — createMemoryStore/appendObservation/consolidateMemories/
+scripts/memory-core.mjs       — createMemoryStore/fsJsonlIo/consolidateMemories/
                                 retrieveMemories/resolveState/withGracefulDegradation (C1–C5)
 scripts/error-recovery.mjs    — classifyError/planRecovery/recordExecutionEvent/
-                                summarizeByProvider/redactSecrets (D/G)
+                                summarizeByProvider/redactSecrets/redactDeep (D/G)
+scripts/runtime-hooks.mjs     — createRuntimeHooks(): facade nối 3 module vào execution path
+scripts/autonomous-run.mjs    — WIRED: coder bounded recovery (hooks.recover) +
+                                verify-fail telemetry + session-summary observation + consolidate
 ```
+
+## Runtime wiring (REV-2 — GPT-REV-059)
+
+Các primitive KHÔNG còn là thư viện rời: `createRuntimeHooks({ rootDir })` tạo persistence
+thật tại `<root>/.agent/runtime/{observations.jsonl,events.jsonl}` qua `fsJsonlIo()` (node:fs).
+Điểm nối trong `autonomous-run.mjs` (`processOneCycle`, chỉ nhánh execute):
+- **Coder fail** → `classifyError()` → `hooks.recover()` (planRecovery bounded ≤3 attempt,
+  AUTH_OR_CONFIG_ERROR escalate ngay không bypass) → retry/backoff theo plan; hết budget →
+  blocked như cũ. Mỗi lần recover tự ghi event `outcome=recovery:<action>` + identity echo.
+- **Verify FAIL mỗi vòng** → `hooks.recordEvent({errorClass, outcome:'verify-fail'})`.
+- **BLOCKED_VERIFY / CODER_FAILED** → observation `workflow-failure` vào store.
+- **DONE** → observation `session-summary` + `consolidateMemory()` (bounded, atomic rewrite).
+- Storage lỗi → mọi hook degrade ({ok:false}), KHÔNG bao giờ block workflow.
+Integration test: `test-runtime-hooks.mjs` (temp dir; chứng minh restart/load lại được, event
+được lưu, failure không block workflow, recovery sinh telemetry giữ identity).
 
 Ranh giới an toàn:
 - Policy/CI/approval gates KHÔNG đổi; memory bị chặn lưu verdict loại authoritative
@@ -67,18 +85,18 @@ Ranh giới an toàn:
 
 | AC (Issue #9) | Implementation | Test | Evidence |
 |---|---|---|---|
-| B1 compact không mất state quan trọng | `compactTranscript()` (`context-manager.mjs`): PROTECTED_KINDS + protected spans (full SHA 40 hex, `[LOCAL-REV-n]`/`[CLINE-FIX-n]`/`GPT-REV-n`, Decision Gate) trích nguyên văn vào tombstone summary; AC mở `- [ ]` protect cả entry | `test-context-manager.mjs` §1–§5: finding ID + full SHA sống sót; policy-invariant/decision-gate giữ nguyên văn; entry chứa AC mở được giữ; budget enforced; protected vượt budget → `overBudget=true` escalate | `node scripts/test-context-manager.mjs` → 8 PASS; `node scripts/full-verify.mjs` → 84/84 PASS, exit 0 |
-| B2 progressive disclosure | `selectiveLoad()` tag-driven; invariant luôn tải (không bị budget chặn); candidate hết budget → skipped | test §6–§7: chỉ tải tag liên quan; invariant luôn tải kể cả budget=5; fail-closed `BLOCKED_BUDGET_INVALID` | như trên |
+| B1 compact không mất state quan trọng | `compactTranscript()` (`context-manager.mjs`): PROTECTED_KINDS + protected spans (full SHA 40 hex, `[LOCAL-REV-n]`/`[CLINE-FIX-n]`/`GPT-REV-n`, Decision Gate) trích nguyên văn vào tombstone summary; AC mở `- [ ]` protect cả entry; **overBudget=true cho MỌI trường hợp vượt budget (GPT-REV-060)** | `test-context-manager.mjs` §1–§5 + §9–§11 âm: summary đẩy vượt budget vẫn overBudget; mọi case vượt đều có cờ | `node scripts/test-context-manager.mjs` → 11 PASS; `node scripts/full-verify.mjs` → 89/89 PASS, exit 0 |
+| B2 progressive disclosure | `selectiveLoad()` tag-driven; invariant luôn tải (không bị budget chặn); candidate hết budget → skipped; **trả `overBudget` khi invariants vượt để caller escalate (GPT-REV-060)** | test §6–§7 + §10: invariant luôn tải kể cả budget=5 và báo overBudget; fail-closed `BLOCKED_BUDGET_INVALID` | như trên |
 | B3 long-task không mất unresolved findings | Thuật toán duyệt mới→cũ, protected không drop; summary ghi evidence compaction `[compacted N entries …]` | test §1 fixture 81 entries có `[LOCAL-REV-003]` giữa transcript dài | như trên |
 | C1 memory không fake CI verdict/approval | `validateObservation()`: cấm kind `ci-verdict`/`approval`/`merge-authorization` (check TRƯỚC ALLOWED_KINDS — lỗi tường minh riêng); cho phép kind `pointer` tham chiếu URL/SHA | `test-memory-core.mjs` §2: 3 kind cấm đều bị từ chối kèm thông điệp "cấm lưu"; pointer hợp lệ | `node scripts/test-memory-core.mjs` → 10 PASS |
-| C2 append không hỏng workflow | `createMemoryStore().append()` không ném; storage failure → `{stored:false, reason:'storage-failure: …'}` | test §3–§4: thiếu provenance/ts → stored:false; IO fail (EACCES/EDISK) → graceful | như trên |
+| C2 append không hỏng workflow | `createMemoryStore().append()` không ném; **default IO = `fsJsonlIo()` ghi byte thật (GPT-REV-059); io thiếu hàm ghi → `stored:false, reason:'no-storage-io'` — KHÔNG còn no-op báo stored giả**; storage failure → `{stored:false, reason:'storage-failure: …'}` | test §3–§4: thiếu provenance/ts → stored:false; IO fail (EACCES/EDISK) → graceful; integration INT.observation-persists + INT.no-silent-store chứng minh ghi thật + sống qua restart | như trên |
 | C4 consolidation bounded | `consolidateMemories()`: supersede theo subjectKey (mới thắng), dedupe contentKey (chuẩn hoá hoa/thường + khoảng trắng), cap maxEntries bỏ cũ nhất | test §6: supersede/dedupe/cap 50→10; §7 retrieval precision fixture (top hit đúng chủ đề, query lệch → rỗng) | như trên |
 | Stale memory: GitHub thắng | `resolveState()`: authoritativeEvidence != null → source 'github', `memoryWasStale` phát hiện lệch | test §8: memory claim "approved" vs evidence "OPEN" → GitHub thắng | như trên |
 | Memory lỗi không chết harness | `withGracefulDegradation()`: async throw → `{ok:false, degraded:true, fallbackValue}` | test §9 (IIFE async): wrapper trả degraded:true, happy path value 42 | như trên |
-| D taxonomy đầy đủ | `classifyError()`: 9 lớp canonical (RATE_LIMIT/TIMEOUT/PROVIDER_ERROR/EMPTY_RESPONSE/INVALID_TOOL_CALL/CONTEXT_OVERFLOW/REPEATED_REASONING/AUTH_OR_CONFIG_ERROR/UNKNOWN) | `test-error-recovery.mjs` §1–§2: injection 429/ETIMEDOUT/502/rỗng/unknown-tool/context-length/401/lạ | `node scripts/test-error-recovery.mjs` → 10 PASS |
-| Recovery bounded + không round-robin mù | `planRecovery()`: maxAttempts mặc định 3; AUTH_OR_CONFIG escalate ngay; CONTEXT_OVERFLOW/REPEATED_REASONING → compact-then-retry rồi escalate; RATE_LIMIT backoff exponential cap 60s; fallback chỉ khi chain tường minh + chưa thử + `policyGate.passing===true`; identity echo nguyên vẹn mọi nhánh | test §3–§9: retry-exhaustion; no-blind-round-robin; fallback-policy-gate; identity-survives (4 nhánh); auth escalate ngay; chain cạn chặn lặp | như trên |
-| G telemetry structured, redact secret | `recordExecutionEvent()` (schema cố định + trường lạ giữ sau redact), `redactSecrets()` (GitHub token/sk-key/key=value shapes), `summarizeByProvider()` thống kê theo provider/model | test §10: token `ghp_…` và `sk-…` biến thành `[REDACTED]`; counts đúng theo model/outcome | như trên |
-| Verify gate tổng | 3 suite đăng ký vào `optionalSuites` trong `full-verify.mjs` | — | `node scripts/full-verify.mjs` → **84/84 PASS, exit 0** |
+| D taxonomy đầy đủ | `classifyError()`: 9 lớp canonical (RATE_LIMIT/TIMEOUT/PROVIDER_ERROR/EMPTY_RESPONSE/INVALID_TOOL_CALL/CONTEXT_OVERFLOW/REPEATED_REASONING/AUTH_OR_CONFIG_ERROR/UNKNOWN) | `test-error-recovery.mjs` §1–§2: injection 429/ETIMEDOUT/502/rỗng/unknown-tool/context-length/401/lạ | `node scripts/test-error-recovery.mjs` → 13 PASS |
+| Recovery bounded + không round-robin mù | `planRecovery()`: maxAttempts mặc định 3; AUTH_OR_CONFIG escalate ngay; CONTEXT_OVERFLOW/REPEATED_REASONING → compact-then-retry rồi escalate; RATE_LIMIT backoff exponential cap 60s; fallback chỉ khi chain tường minh + chưa thử + `policyGate.passing===true`; identity echo nguyên vẹn mọi nhánh; **CHẠY THẬT trong `autonomous-run.mjs` qua `hooks.recover()` (GPT-REV-059)** | test §3–§9 + integration `test-runtime-hooks.mjs` INT.recovery-*: recovery sinh telemetry, identity giữ nguyên, AUTH fail-closed không fallback | như trên |
+| G telemetry structured, redact secret | `recordExecutionEvent()` (schema cố định + trường lạ giữ sau redact), **`redactDeep()` đệ quy object/array có depth/cycle/node guard (GPT-REV-061)**, `redactSecrets()` (GitHub token/sk-key/Bearer trần/key=value shapes), `summarizeByProvider()` thống kê theo provider/model | test §10–§13: secret lồng trong `toolFailure.stderr`/array/unknown field bị redact hết; circular → `[Circular]` không treo; oversized → `[TRUNCATED]`; integration INT.event-redacted-on-disk chứng minh trên đĩa không còn secret gốc | như trên |
+| Verify gate tổng | **4 suite** đăng ký vào `optionalSuites` trong `full-verify.mjs` | — | `node scripts/full-verify.mjs` → **89/89 PASS, exit 0** |
 
 Đo đạc fixture (không con số giả định): compact giữ trong budget với state được bảo toàn;
 telemetry baseline 0 record → schema record có sẵn để runtime dùng.

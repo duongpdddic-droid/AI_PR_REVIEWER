@@ -28,6 +28,15 @@ import {
   LABELS,
   AGENTS,
 } from './autonomous-core.mjs';
+import { classifyError } from './error-recovery.mjs';
+import { createRuntimeHooks } from './runtime-hooks.mjs';
+
+// Budget attempt recovery cho coder (bounded — planRecovery quyết retry/escalate).
+const RECOVERY_MAX_ATTEMPTS = 3;
+
+function sleepSync(ms) {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 const ROOT = process.cwd();
 const NODE = process.execPath;
@@ -105,31 +114,33 @@ function runVerify(cwd = ROOT) {
 function runCoder(issueNumber, issueBody) {
   if (NO_AIDER) {
     log('--no-aider: bỏ qua bước coder LLM (chỉ verify hiện trạng branch).');
-    return true;
+    return { ok: true, error: '' };
   }
   const conventions = path.join(ROOT, '.agent', 'conventions-coder.md');
   const readArgs = fs.existsSync(conventions) ? ['--read', conventions] : [];
   const msg = `Nhận Issue #${issueNumber}, triển khai code theo phạm vi và tiêu chí nghiệm thu trong issue, chỉ sửa đúng phạm vi được phép. Sau khi xong chạy \`node scripts/full-verify.mjs\` và đảm bảo PASS. Không tự merge, không tự commit (orchestrator sẽ commit), không deploy.\n\n--- ISSUE ---\n${issueBody || ''}`;
   try {
     runInteractive(AIDER, [...readArgs, '--message', msg, '--yes-always', '--no-auto-commits'], ROOT);
-    return true;
+    return { ok: true, error: '' };
   } catch (e) {
-    log(`Aider coder lỗi: ${String((e && e.message) || e)}`);
-    return false;
+    const error = String((e && e.message) || e);
+    log(`Aider coder lỗi: ${error}`);
+    return { ok: false, error };
   }
 }
 
 function runFixCoder(issueNumber, findingSummary) {
-  if (NO_AIDER) return true;
+  if (NO_AIDER) return { ok: true, error: '' };
   const conventions = path.join(ROOT, '.agent', 'conventions-coder.md');
   const readArgs = fs.existsSync(conventions) ? ['--read', conventions] : [];
   const msg = `Sửa các lỗi verify trên issue #${issueNumber} (tóm tắt: ${findingSummary}) rồi chạy \`node scripts/full-verify.mjs\` cho PASS. Không tự merge, không tự commit.`;
   try {
     runInteractive(AIDER, [...readArgs, '--message', msg, '--yes-always', '--no-auto-commits'], ROOT);
-    return true;
+    return { ok: true, error: '' };
   } catch (e) {
-    log(`Aider fix lỗi: ${String((e && e.message) || e)}`);
-    return false;
+    const error = String((e && e.message) || e);
+    log(`Aider fix lỗi: ${error}`);
+    return { ok: false, error };
   }
 }
 
@@ -232,6 +243,10 @@ function processOneCycle({ dryRun }) {
   const issueNumber = parsed.number;
   log(`Đã claim Issue #${issueNumber} (base ${parsed.baseSha || '?'}).`);
 
+  // Hooks runtime (GPT-REV-059): memory/observation/recovery/telemetry chạy THẬT trong chu kỳ.
+  // Mọi hook tự degrade — lỗi persistence KHÔNG bao giờ block workflow.
+  const hooks = createRuntimeHooks({ rootDir: ROOT });
+
   // 2. Tạo task branch.
   let branch;
   try {
@@ -244,10 +259,32 @@ function processOneCycle({ dryRun }) {
     return { status: 'BLOCKED', issueNumber, detail: String(e.message) };
   }
 
-  // 3. Coder.
-  const coderOk = runCoder(issueNumber, parsed.task?.body || '');
+  // 3. Coder — bounded recovery thật: classify error → planRecovery → retry/backoff theo plan,
+  //    AUTH_OR_CONFIG_ERROR escalate ngay (không bypass auth); hết budget → blocked như cũ.
+  let coderOk = false;
+  for (let attempt = 1; attempt <= RECOVERY_MAX_ATTEMPTS && !coderOk; attempt += 1) {
+    const c = runCoder(issueNumber, parsed.task?.body || '');
+    if (c.ok) { coderOk = true; break; }
+    const recPlan = hooks.recover({
+      errorClass: classifyError(c.error),
+      attempts: attempt,
+      maxAttempts: RECOVERY_MAX_ATTEMPTS,
+      identity: { role: 'coder' },
+      taskId: `issue-${issueNumber}`,
+      issue: issueNumber,
+    });
+    log(`Recovery vòng ${attempt}/${RECOVERY_MAX_ATTEMPTS} (${recPlan.action}): ${recPlan.reason}`);
+    if (recPlan.action === 'escalate-blocked') break;
+    sleepSync(recPlan.delayMs || 0);
+  }
   if (!coderOk) {
-    log('Coder thất bại.');
+    log('Coder thất bại sau bounded recovery.');
+    hooks.recordObservation({
+      kind: 'workflow-failure',
+      content: `Coder thất bại cho issue #${issueNumber} sau bounded recovery (${RECOVERY_MAX_ATTEMPTS} attempt).`,
+      subjectKey: `issue-${issueNumber}-coder-failure`,
+      provenance: { task: `autonomous-run issue-${issueNumber}`, ts: new Date().toISOString() },
+    });
     addIssueLabel(issueNumber, LABELS.blocked);
     notifyTelegram('test-fail', `#${issueNumber}`, 'blocked', 'Aider coder thất bại', 'Kiểm tra cấu hình aider rồi chạy lại.');
     return { status: 'CODER_FAILED', issueNumber };
@@ -260,16 +297,33 @@ function processOneCycle({ dryRun }) {
     finalVerify = runVerify();
     log(`Verify vòng ${round}: ${finalVerify.ok ? 'PASS' : 'FAIL'} (${summarizeVerify(finalVerify.out)})`);
     if (finalVerify.ok) break;
+    // Telemetry thật (GPT-REV-059): mỗi verify FAIL được classify + ghi event.
+    hooks.recordEvent({
+      taskId: `issue-${issueNumber}`,
+      issue: issueNumber,
+      attempt: round,
+      errorClass: classifyError(String(finalVerify.out || '').slice(-2000)),
+      outcome: 'verify-fail',
+    });
     const decision = planReview({ verifyOk: false, round });
     if (decision.action === 'block') {
       log('Đã đạt giới hạn vòng fix mà vẫn FAIL → chuyển blocked.');
+      hooks.recordObservation({
+        kind: 'workflow-failure',
+        content: `Verify vẫn FAIL sau ${round} vòng fix cho issue #${issueNumber}.`,
+        subjectKey: `issue-${issueNumber}-verify-blocked`,
+        provenance: { task: `autonomous-run issue-${issueNumber}`, ts: new Date().toISOString() },
+      });
       addIssueLabel(issueNumber, LABELS.blocked);
       postComment(issueNumber, `❌ Sau ${round} vòng fix, verify vẫn FAIL:\n\`\`\`\n${finalVerify.out}\n\`\`\``);
       notifyTelegram('test-fail', `#${issueNumber}`, 'blocked', `Verify vẫn FAIL sau ${round} vòng`, 'Xem lại scope/issue hoặc can thiệp thủ công.');
       return { status: 'BLOCKED_VERIFY', issueNumber, round };
     }
     const findingSummary = summarizeVerify(finalVerify.out);
-    runFixCoder(issueNumber, findingSummary);
+    const fixRes = runFixCoder(issueNumber, findingSummary);
+    if (!fixRes.ok) {
+      hooks.recordEvent({ taskId: `issue-${issueNumber}`, issue: issueNumber, attempt: round, errorClass: classifyError(fixRes.error), outcome: 'fix-coder-fail' });
+    }
     round += 1;
   }
 
@@ -301,6 +355,16 @@ function processOneCycle({ dryRun }) {
   postComment(issueNumber, `✅ Đã triển khai, verify PASS, draft PR #${prNumber} bàn giao GPT review.\nCloses #${issueNumber}`);
 
   notifyTelegram('done', `#${issueNumber}`, 'status:ready-for-gpt-review', `Verify PASS, draft PR #${prNumber}`, 'GPT review, sau đó người dùng merge PR.');
+
+  // Session-summary observation + consolidate bounded (GPT-REV-059): persistence chạy thật.
+  hooks.recordObservation({
+    kind: 'session-summary',
+    content: `Issue #${issueNumber} → PR #${prNumber} bàn giao GPT review sau ${round} vòng fix. Verify PASS.`,
+    subjectKey: `issue-${issueNumber}-session`,
+    tags: ['issue', 'pr-handoff'],
+    provenance: { task: `autonomous-run issue-${issueNumber}`, ts: new Date().toISOString() },
+  });
+  hooks.consolidateMemory();
 
   log(`Hoàn tất Issue #${issueNumber} → PR #${prNumber} (review-requested, chờ GPT).`);
   return { status: 'DONE', issueNumber, prNumber, prUrl, round };
