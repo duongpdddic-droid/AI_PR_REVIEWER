@@ -1,5 +1,54 @@
 # Progress (AI_PR_REVIEWER)
 
+## 25/08/2026 09:35 — Issue #9 REV-2: fix 3 finding GPT review PR #10 — IN PROGRESS (chuẩn bị push)
+
+- [x] [GPT-REV-060]: `overBudget` fail-closed cho mọi trường hợp vượt (`compactTranscript`, `selectiveLoad`); test âm §9–§11 → 11 PASS.
+- [x] [GPT-REV-061]: `redactDeep()` đệ quy + guards (depth/cycle/node); `recordExecutionEvent` redact mọi giá trị; regex Bearer trần; test §11–§13 → 13 PASS.
+- [x] [GPT-REV-059]: default IO fs thật (`fsJsonlIo`) + cấm stored giả; `runtime-hooks.mjs` facade; wire vào `autonomous-run.mjs` (coder bounded recovery, verify telemetry, observation, consolidate); integration `test-runtime-hooks.mjs` 7 PASS.
+- [x] Audit matrix module-version 2 — sửa claim sai, thêm Runtime wiring section.
+- [x] Verify: **full-verify 89/89 PASS exit 0**; smoke dry-run autonomous-run OK.
+- [ ] Push + comment `[CLINE-FIX-*]` trên PR #10 + labels về `status:review-requested`.
+
+## 25/08/2026 08:36 — Issue #9: agent harness selective upgrade → PR #10 bàn giao GPT review — COMPLETED (chờ review)
+
+- [x] Triển khai primitive chọn lọc: `scripts/error-recovery.mjs` (taxonomy + `planRecovery` + telemetry redact/record/summarize), cùng các primitive context/memory theo audit matrix `docs/issue9-audit-matrix.md` (12 dòng mapping AC → impl/test/evidence).
+- [x] 3 suite assert-based mới (28 case): `test-context-manager.mjs`, `test-memory-core.mjs`, `test-error-recovery.mjs`; đăng ký `optionalSuites` trong `full-verify.mjs`.
+- [x] Fix 2 bug code thật: thứ tự guard `validateObservation()` (L-024); preserve-sau-redact trong `recordExecutionEvent()` (L-025).
+- [x] Verify: unit 28/28 PASS; **full-verify 84/84 PASS exit 0**.
+- [x] Commit `feat(harness): selective upgrade primitives B1/B2, C1-C5, D/G (Issue #9)` HEAD `05e12cf…`; push branch `feat/issue-9-agent-harness-selective-upgrade`.
+- [x] PR #10 mở `Closes #9`, labels `agent:gpt` + `status:review-requested` (read-back remote OK); Issue #9 → `status:review-requested`; CI verify PASS tại HEAD.
+- [ ] CHỜ: GPT review PR #10 → approval qua `gpt-approval.mjs` (user-relay) → user merge.
+
+
+## 24/08/2026 23:59 — Merge PR #8 vào main (Issue #6 control-plane) — COMPLETED
+
+- [x] Preflight trước merge: HEAD PR = `c1bfdbf…` khớp remote branch (0 commit mới); marker approval hợp lệ tại HEAD; CI SUCCESS; labels OK; `MERGEABLE`.
+- [x] Mark ready for review (`gh pr ready 8`), HEAD không đổi.
+- [x] Squash merge: commit `7a6dc7882da0c0d4ea6c815b1cc02601dc5c2b62`, mergedAt `2026-08-24T16:58:06Z`, state MERGED.
+- [x] Xóa nhánh remote `feat/issue-6-context-modules-verify` sau khi xác nhận tree nhánh ≡ main (`git diff --stat` rỗng).
+- [x] CI hậu merge: run "Verify CI" trên main tại `7a6dc78` — success/completed.
+- [x] Local: checkout main + pull đồng bộ `7a6dc78`.
+- [x] Issue #6 đóng COMPLETED: 25/08/2026 02:18 — `gh issue close 6 --reason completed` exit 0; read-back `state=CLOSED`, `stateReason=COMPLETED`, `closedAt=2026-08-24T23:58:16Z`, labels trống. Comment tổng kết #5403085760 đăng (mapping 19 AC → file/test + deliverables PR #8 + PR #47). closedByPRs rỗng (đúng — comment đã trỏ).
+
+## 24/08/2026 23:40 — Review + APPROVE PR #8 (Issue #6 control-plane) — COMPLETED (chờ user merge)
+
+- [x] Review độc lập toàn diff PR #8: 0 Critical/Important; 2 Suggestion không chặn.
+- [x] `[CLINE-FIX-050]` commit `a8fb31b00cb6df98bbc615d6f140d68613cedd84`: `evaluateChecks` chấp nhận mảng phẳng `gh pr checks --json` (+3 assert). Root cause: shape mock-vs-real → mọi PR thật `CI=missing`.
+- [x] `[CLINE-FIX-051]` commit `c1bfdbf9f028aa264a348d7fd973589cccb7346b`: `gpt-approval.mjs#listPrComments` trả rich objects cho provenance read-back. Trước đó approval không bao giờ hoàn tất.
+- [x] Mỗi fix: `pnpm verify` 67/67 PASS + CI SUCCESS tại HEAD mới + pre-review marker `PRE_REVIEW_PASS` mới.
+- [x] APPROVED qua `scripts/gpt-approval.mjs --payload-file` exit 0: HEAD `c1bfdbf`, policy `2026-08-23.7`, decision `gpt-relay-20260824-pr8-headc1bfdbf`; labels `agent:gpt` + `status:approved`; CI verify SUCCESS; secret scan 0 findings.
+- [x] L-021 ghi consolidatedLearnings.md (mock-vs-real IO shape drift).
+- [ ] CHỜ USER: merge PR #8 (vẫn draft); QLDA_DTXD E5/E6 chưa triển khai theo chỉ thị.
+
+## 24/08/2026 10:36 — Merge PR #42 (Phần B Issue #2, QLDA_DTXD) — COMPLETED
+
+- [x] PR #42 (`docs(issue-2): sync ai-review-policy 2026-08-23.7 + REV-ISSUE-2 handoff contract (phan B)`) merged vào `main` QLDA_DTXD via `gh pr merge --squash` (exit 0); `mergedAt:2026-08-24T03:34:28Z`.
+- [x] GPT approved (decision `GPT-DEC-PR42-A9DDC24-20260824`; CI #125 `Verify code and data` SUCCESS) tại HEAD `a9ddc243fe3e0f60f8081bd4af74bc8a0097c029`. `[GPT-REV-047/050]` CLOSED.
+- [x] main HEAD mới: `d7baff87bdfbba80beca8b5dd8cb06e18517811f`.
+- [x] BOM fix (L-020): body ghi UTF-8 không BOM qua `.NET UTF8Encoding($false)`; read-back `isBOMbytes=False`.
+- [x] Phần B Issue #2 hoàn tất tại QLDA_DTXD; Issue #2 tổng thể phụ thuộc Phần A (AI_PR_REVIEWER #4 đã merge tại `7262a86`, policy `2026-08-23.7`).
+
+
 ## 24/08/2026 — Vá lỗ hổng allowlist actor giả marker `agent:gpt` (GPT-REV-049) — COMPLETED (verify xanh sau corrective)
 
 - [x] [GPT-REV-049] PR AI_PR_REVIEWER#4, commit `8f81c36` + corrective commit: `isApprovalValid` bắt buộc `authorLogin ∈ ctx.gptApprovers` fail-closed `UNAUTHORIZED_ACTOR`; policy `authority.gptApprovers: ["duongpdddic-droid"]`; thread `gptApprovers`/`localApprovers` qua `effectiveApproval`→`planPhaseActivation`/`planApprovalDrift`/`performApproval`; `validatePolicy` bắt buộc `gptApprovers`+`localApprovers` non-empty. Sửa JSON dư dấu phẩy + test param `approvers`→`gptApprovers` + marker thiếu `prNumber`.
@@ -197,3 +246,4 @@
 
 ## Trạng thái
 IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR vì worktree còn file chưa commit (preflight fail-closed đúng). Để chạy execute thật: commit/đẩy công việc hiện tại hoặc dùng workspace sạch.
+## 24/08/2026 22:54 — Issue #6 giai đoạn AI_PR_REVIEWER: PR #8 bàn giao CI PASS (context router fail-closed + 9 module + verify gates C2). pnpm verify 67/67; CI run 32747426537 SUCCESS @ 1056971a. Chờ GPT review; còn phần QLDA_DTXD (branch/PR riêng). Đồng thời: đóng #5 COMPLETED, #2 NOT_PLANNED (SPEC-SUPERSEDED), #6 claimed.
