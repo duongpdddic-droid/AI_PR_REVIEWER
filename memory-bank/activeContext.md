@@ -1,3 +1,19 @@
+## 25/08/2026 12:20 (ACT) — Issue #9 REV-4: fix GPT-REV-065 startup context trên PR #10
+
+- **Mục tiêu**: [GPT-REV-065] Important — startup ~50k token/task; budget 6000 chỉ đo message; thiếu unresolved findings vào capsule, telemetry tổng, dedupe, benchmark before/after.
+- **Kế hoạch & trạng thái**:
+  1. [x] `buildStartupCapsule()`: đo TỔNG payload harness-controlled (message + `--read` inline); conventions ≤2000t mới inline, lớn → pointer KHÔNG `--read`.
+  2. [x] Budget tổng fail-closed `CODER_STARTUP_BUDGET_TOKENS` (env, mặc định 12000); vượt → escalate `BLOCKED_CONTEXT_BUDGET` + label blocked + Telegram.
+  3. [x] `fetchUnresolvedFindings()`: comments GitHub authoritative, verdict MỚI NHẤT mỗi mã `[GPT-REV-NNN]` thắng; RESOLVED loại; gh lỗi degrade rỗng. Wire thật trong executeIssue.
+  4. [x] `dedupeByHash()` sha1 — cùng content không nạp lặp trong 1 task.
+  5. [x] Telemetry `outcome=startup-context`: `startupContextTokens`, `loadedModules`/`loadedSections`, `loadedMemoryCount`, `beforeCompactTokens`/`afterCompactTokens`, `loadReasons`, `findingsSource`; aider tự nạp → `externalContextUnknown=true`.
+  6. [x] Benchmark INT: issue raw ~337k ký tự (~84k tokens) → startup **101 tokens** (≤12k, giảm ~99.9%); critical spans nguyên vẹn; history không nạp toàn bộ; retry nhỏ hơn. Thêm 2 test retrieval/dedupe-pointer.
+  7. [x] Verify: test-runtime-hooks **13/13 PASS**; full-verify **89/89 PASS exit 0**; CI Verify CI success HEAD `260ab3d15af63314694afff142c0a0d9d8dbf2df`.
+  8. [x] Bàn giao: commit `260ab3d` push; comment `[CLINE-FIX-065]` (issuecomment-5405750436); labels read-back `agent:cline`+`status:review-requested`. Audit matrix đồng bộ section Startup capsule.
+- **Bước tiếp theo**: chờ orchestrator pre-review + GPT review vòng 4 tại HEAD `260ab3d`; approval qua `gpt-approval.mjs` (user-relay) → user merge. Không merge/deploy.
+
+---
+
 ## 25/08/2026 09:35 (ACT) — Issue #9 REV-2: fix 3 finding GPT review PR #10 (GPT-REV-059/060/061)
 
 - **Mục tiêu**: xử lý 3 finding Important từ GPT review PR #10 tại HEAD `05e12cf…`; sửa trên cùng PR, KHÔNG mở PR mới.

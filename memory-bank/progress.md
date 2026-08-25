@@ -1,5 +1,14 @@
 # Progress (AI_PR_REVIEWER)
 
+## 25/08/2026 12:20 — Issue #9 REV-4: fix GPT-REV-065 startup context PR #10 — COMPLETED (chờ review vòng 4)
+
+- [x] Startup capsule đo được (`buildStartupCapsule()`): message + `--read` inline; conventions >2000t → pointer, không `--read`; budget tổng fail-closed `CODER_STARTUP_BUDGET_TOKENS=12000` → vượt escalate `BLOCKED_CONTEXT_BUDGET`.
+- [x] `fetchUnresolvedFindings()` — unresolved `[GPT-REV-*]` từ comments GitHub (verdict mới nhất thắng) vào protected entries; RESOLVED loại; degrade an toàn.
+- [x] Dedupe sha1 + telemetry `startup-context` đầy đủ (`startupContextTokens`, `loadedModules`, `loadedMemoryCount`, before/after compact, `loadReasons`, `externalContextUnknown`).
+- [x] Benchmark: raw ~84k tokens → startup **101 tokens**; critical spans nguyên vẹn; retry nhỏ hơn.
+- [x] Verify: test-runtime-hooks 13/13; full-verify 89/89 exit 0; CI success HEAD `260ab3d15af63314694afff142c0a0d9d8dbf2df`.
+- [x] Bàn giao: commit `260ab3d`, comment `[CLINE-FIX-065]` (issuecomment-5405750436), labels read-back `agent:cline`+`status:review-requested`.
+
 ## 25/08/2026 11:25 — Issue #9 REV-3: fix GPT-REV-062/063/064 PR #10 — COMPLETED (chờ review vòng 3)
 
 - [x] [GPT-REV-062]: `recover()` đi qua duy nhất `recordEvent()`/`redactDeep()`; secret lồng `identity`/`fallbackChain` không lên đĩa (`INT.recover-redacts-identity` PASS).
