@@ -208,9 +208,9 @@ export function registerProject({ manifest, registry, registryPath = DEFAULT_REG
   if (conflicts.length) return { ok: false, stage: 'conflict', conflicts };
   const rc = assertWorkspaceRemote({ manifest, actualRemote, canonicalRemote });
   if (!rc.ok) return { ok: false, stage: 'remote', ...rc };
-  // Sau khi remote khớp mới mutate: clone + strip transient marker rồi save.
+  // Sau khi remote khớp: deep-clone và lưu NGUYÊN clone. Không strip bất kỳ extension field nào
+  // (schema additionalProperties:true -> __migrationAdded có thể là dữ liệu extension hợp lệ — GPT-REV-073).
   const clean = JSON.parse(JSON.stringify(manifest));
-  delete clean.__migrationAdded; // phòng vệ: marker migration đã chuyển sang result, không nằm trên manifest.
   registry.projects = registry.projects || [];
   const idx = registry.projects.findIndex((p) => p.projectId === clean.projectId);
   if (idx >= 0) registry.projects[idx] = clean; else registry.projects.push(clean);
@@ -219,8 +219,9 @@ export function registerProject({ manifest, registry, registryPath = DEFAULT_REG
 }
 
 // Migration N->N+1 (up) và rollback (down). Reversible: down(up(original)) === original (lossless).
-// Marker thêm-key KHÔNG gắn lên manifest (tránh đè extension field cùng tên — GPT-REV-073);
-// trả về trong result, down nhận `added` để rollback xác định.
+// Metadata rollback CHỈ truyền ngoài payload qua result.added; down nhận `added` TƯỜNG MINH,
+// không bao giờ đọc/đoán metadata từ tên field trong manifest (additionalProperties:true ->
+// __migrationAdded là extension field hợp lệ, cấm đè/xóa theo tên — GPT-REV-073).
 export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION, added = null }) {
   const m = JSON.parse(JSON.stringify(manifest || {}));
   const from = m.schemaVersion || '0.9';
@@ -239,13 +240,14 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     return { ok: true, direction: 'up', manifest: m, added: addedKeys };
   }
   if (compareVersion(toVersion, from) < 0) {
-    // Rollback thực sự: gỡ field up đã thêm, giữ nguyên data gốc, chỉ đổi marker schemaVersion.
-    const keysToRemove = Array.isArray(added) ? added
-      : (Array.isArray(m.__migrationAdded) ? m.__migrationAdded : []);
-    for (const k of keysToRemove) delete m[k];
-    delete m.__migrationAdded;
+    // Rollback: CHỈ gỡ đúng các key do up trả về qua tham số `added` (validate + dedupe).
+    // Fail-closed khi thiếu/không hợp lệ — không đoán metadata từ tên field trong manifest.
+    if (!Array.isArray(added) || added.some((k) => typeof k !== 'string' || k === '')) {
+      return { ok: false, direction: 'down', reason: 'ROLLBACK_METADATA_REQUIRED' };
+    }
+    for (const k of [...new Set(added)]) delete m[k];
     m.schemaVersion = toVersion;
-    return { ok: true, direction: 'down', manifest: m };
+    return { ok: true, direction: 'down', manifest: m, removed: [...new Set(added)] };
   }
   return { ok: true, direction: 'none', manifest: m };
 }

@@ -174,38 +174,97 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   tru('AC11 schema file hợp lệ (guard)', schemaOk);
 }
 
-// AC12: [GPT-REV-073] extension field __migrationAdded KHÔNG bị migrate đè/mất.
+// AC12: [GPT-REV-073] round-trip up->down lossless, extension field cùng tên metadata KHÔNG bị mất.
 {
-  const withExt = {
+  const source = {
     schemaVersion: '0.9', projectId: 'ext-proj', repository: 'ext/proj',
     workspace: { workspaceId: 'ext-ws' }, projectType: 'product',
     policy: { version: CANONICAL_POLICY_VERSION }, verify: { adapter: 'pnpm-verify' },
     deploy: { capability: false, humanAuthorization: true },
     telegram: { route: 'default' }, memory: { provider: 'claude-mem', namespace: 'ext-proj' },
     __migrationAdded: { note: 'extension metadata gốc' },
+    customExtension: { enabled: true, items: ['a', 'b'] },
   };
-  const up = migrateManifest({ manifest: withExt, toVersion: '1.0' });
-  eq('AC12 extension field __migrationAdded giữ nguyên sau up', JSON.stringify(up.manifest.__migrationAdded), JSON.stringify({ note: 'extension metadata gốc' }));
-  tru('AC12 input manifest không bị mutate', '__migrationAdded' in withExt);
+  const originalJson = JSON.stringify(source);
+  const up = migrateManifest({ manifest: source, toVersion: '1.0' });
+  tru('AC12 up ok', up.ok === true);
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', added: up.added });
+  tru('AC12 down ok', down.ok === true);
+  eq('AC12 input không mutate sau up+down', JSON.stringify(source), originalJson);
+  eq('AC12 down(up(original)) deep-equal tuyệt đối với original', JSON.stringify(down.manifest), originalJson);
+  eq('AC12 __migrationAdded giữ nguyên object extension ban đầu',
+    JSON.stringify(down.manifest.__migrationAdded), JSON.stringify({ note: 'extension metadata gốc' }));
+  eq('AC12 customExtension giữ nguyên',
+    JSON.stringify(down.manifest.customExtension), JSON.stringify({ enabled: true, items: ['a', 'b'] }));
+  falsy('AC12 up không nhúng metadata rollback theo tên field', up.added.includes('__migrationAdded'));
+  eq('AC12 mọi key up thêm đều nằm trong added (không key ẩn)',
+    Object.keys(up.manifest).length, Object.keys(source).length + up.added.length);
 }
 
-// AC13: [GPT-REV-074] registerProject KHÔNG mutate input trước/sau remote verify.
+// Negative rollback: down thiếu/không hợp lệ `added` -> fail-closed ROLLBACK_METADATA_REQUIRED.
+{
+  const src = { schemaVersion: '1.0', projectId: 'rb-proj', customField: { v: 1 } };
+  const snap = JSON.stringify(src);
+  const d1 = migrateManifest({ manifest: src, toVersion: '0.9' });
+  falsy('NEG down không truyền added -> fail-closed', d1.ok);
+  eq('NEG reason ROLLBACK_METADATA_REQUIRED', d1.reason, 'ROLLBACK_METADATA_REQUIRED');
+  eq('NEG direction down', d1.direction, 'down');
+  const d2 = migrateManifest({ manifest: src, toVersion: '0.9', added: ['customField', 42] });
+  falsy('NEG added chứa phần tử non-string -> fail-closed', d2.ok);
+  eq('NEG added sai -> ROLLBACK_METADATA_REQUIRED', d2.reason, 'ROLLBACK_METADATA_REQUIRED');
+  eq('NEG payload đầu vào không bị xóa/sửa', JSON.stringify(src), snap);
+  // dedupe: added trùng key chỉ xóa 1 lần, vẫn lossless.
+  const srcUp = { schemaVersion: '0.9', projectId: 'rb-proj-2', customField: { v: 2 } };
+  const snapUp = JSON.stringify(srcUp);
+  const upD = migrateManifest({ manifest: srcUp, toVersion: '1.0' });
+  tru('NEG dedupe setup up ok', upD.ok === true);
+  const d3 = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', added: [...upD.added, ...upD.added] });
+  tru('NEG dedupe added -> down ok', d3.ok === true);
+  eq('NEG dedupe added vẫn lossless', JSON.stringify(d3.manifest), snapUp);
+}
+
+// AC13: [GPT-REV-074] registerProject: input nguyên vẹn ở MỌI đường + persistence giữ extension field.
 {
   const reg = { schemaVersion: '1.0', projects: [] };
-  const m = {
+  const base = {
     schemaVersion: '1.0', projectId: 'mut-proj', repository: 'mut/proj',
     workspace: { workspaceId: 'mut-ws' }, projectType: 'product',
     policy: { version: CANONICAL_POLICY_VERSION }, verify: { adapter: 'pnpm-verify' },
     deploy: { capability: false, humanAuthorization: true },
     telegram: { route: 'default' }, memory: { provider: 'claude-mem', namespace: 'mut-proj' },
-    __migrationAdded: ['policy'],
+    __migrationAdded: { note: 'extension hợp lệ' },
+    customExtension: { keep: true },
   };
-  const r = registerProject({ manifest: m, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/evil/repo.git' });
-  falsy('AC13 remote lệch -> reject', r.ok);
-  tru('AC13 input không bị delete marker trước remote', m.__migrationAdded !== undefined);
-  const r2 = registerProject({ manifest: m, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/mut/proj.git' });
+  const snapBase = JSON.stringify(base);
+  // validation failure: input không mutate.
+  const badVal = JSON.parse(snapBase); delete badVal.repository;
+  const snapBadVal = JSON.stringify(badVal);
+  const rv = registerProject({ manifest: badVal, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/mut/proj.git' });
+  falsy('AC13 validation failure -> reject', rv.ok);
+  eq('AC13 input không mutate khi validation fail', JSON.stringify(badVal), snapBadVal);
+  // conflict: input không mutate.
+  const regDup = { schemaVersion: '1.0', projects: [JSON.parse(snapBase)] };
+  const mConflict = JSON.parse(snapBase); mConflict.projectId = 'other-proj'; mConflict.telegram = { route: 'default' };
+  const snapConflict = JSON.stringify(mConflict);
+  const rc2 = registerProject({ manifest: mConflict, registry: regDup, registryPath: tmpPath, actualRemote: 'https://github.com/other/proj.git' });
+  falsy('AC13 conflict telegramRoute -> reject', rc2.ok);
+  eq('AC13 input không mutate khi conflict', JSON.stringify(mConflict), snapConflict);
+  // remote mismatch: input không mutate.
+  const mRemote = JSON.parse(snapBase);
+  const rr = registerProject({ manifest: mRemote, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/evil/repo.git' });
+  falsy('AC13 remote lệch -> reject', rr.ok);
+  eq('AC13 input không mutate khi remote mismatch', JSON.stringify(mRemote), snapBase);
+  // registration thành công: input không mutate + persisted giữ nguyên extension field.
+  const r2 = registerProject({ manifest: base, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/mut/proj.git' });
   tru('AC13 remote đúng -> ok', r2.ok);
-  tru('AC13 input không bị mutate sau register (clone before save)', m.__migrationAdded !== undefined);
+  eq('AC13 input không mutate sau register thành công', JSON.stringify(base), snapBase);
+  const loaded = loadRegistry({ registryPath: tmpPath });
+  const saved = loaded.projects.find((p) => p.projectId === 'mut-proj');
+  tru('AC13 persisted tìm thấy project', Boolean(saved));
+  eq('AC13 persisted __migrationAdded nguyên vẹn',
+    JSON.stringify(saved.__migrationAdded), JSON.stringify({ note: 'extension hợp lệ' }));
+  eq('AC13 persisted customExtension nguyên vẹn',
+    JSON.stringify(saved.customExtension), JSON.stringify({ keep: true }));
 }
 
 const pass = checks.filter((c) => c.ok).length;
