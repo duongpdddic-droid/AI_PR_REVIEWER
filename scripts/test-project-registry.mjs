@@ -10,6 +10,7 @@ import {
   loadRegistry, saveRegistry, detectConflicts, assertWorkspaceRemote,
   registerProject, migrateManifest, assertSingleOwner, registryOutsideWorktree,
   OWNERSHIP_MATRIX, isAllowedOverride, DEFAULT_REGISTRY_PATH,
+  CANONICAL_POLICY_VERSION, SCHEMA_PATH,
 } from './project-registry.mjs';
 
 const checks = [];
@@ -138,11 +139,35 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   falsy('AC10 different project cùng route -> conflict', rc.ok);
   const stale = load('stale-schema.json');
   const up = migrateManifest({ manifest: stale, toVersion: '1.0' });
+  tru('AC10 up direction', up.direction === 'up');
   const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9' });
   eq('AC10 rollback direction', down.direction, 'down');
-  tru('AC10 rollback giữ policy', Boolean(down.manifest.policy));
-  tru('AC10 rollback giữ telegram', Boolean(down.manifest.telegram));
   eq('AC10 rollback schemaVersion', down.manifest.schemaVersion, '0.9');
+  // [GPT-REV-073] round-trip lossless: down(up(original)) === original.
+  eq('AC10 rollback khôi phục nguyên bản (lossless)', JSON.stringify(down.manifest), JSON.stringify(stale));
+}
+
+// AC11: [GPT-REV-069] gate policy version đối chiếu canonical; [GPT-REV-070] schema nested fail-closed.
+{
+  const ROOT = path.resolve(DIR, '..');
+  const canonical = JSON.parse(readFileSync(path.join(ROOT, '.github', 'ai-review-policy.json'), 'utf8'));
+  eq('AC11 canonical policyVersion khớp hằng CANONICAL_POLICY_VERSION', canonical.policyVersion, CANONICAL_POLICY_VERSION);
+  const badPV = { ...load('ai-pr-reviewer.json'), policy: { pin: 'ai-review-policy.json', version: '2026-08-22.6' } };
+  const r = validateManifest(badPV);
+  falsy('AC11 policy version lệch canonical -> reject', r.ok);
+  tru('AC11 sinh POLICY_VERSION_MISMATCH', r.errors.some((e) => e.startsWith('POLICY_VERSION_MISMATCH')));
+  tru('AC11 policy version đúng canonical -> pass', validateManifest(load('ai-pr-reviewer.json')).ok);
+  // nested required: thiếu policy.version -> schema reject.
+  const noPolVer = { ...load('ai-pr-reviewer.json') }; delete noPolVer.policy.version;
+  const r2 = validateManifest(noPolVer);
+  tru('AC11 nested thiếu policy.version -> SCHEMA_MISSING_POLICY_VERSION', r2.errors.includes('SCHEMA_MISSING_POLICY_VERSION'));
+  // nested type: telegram.route phải là string.
+  const badTel = { ...load('ai-pr-reviewer.json'), telegram: { route: 123 } };
+  const r3 = validateManifest(badTel);
+  tru('AC11 nested telegram.route sai type -> SCHEMA_TYPE_TELEGRAM', r3.errors.some((e) => e.startsWith('SCHEMA_TYPE_TELEGRAM')));
+  // schema file hợp lệ (guard không corrupt -> không rơi vào MANIFEST_SCHEMA_UNAVAILABLE).
+  const schemaOk = (() => { try { JSON.parse(readFileSync(SCHEMA_PATH, 'utf8')); return true; } catch { return false; } })();
+  tru('AC11 schema file hợp lệ (guard)', schemaOk);
 }
 
 const pass = checks.filter((c) => c.ok).length;

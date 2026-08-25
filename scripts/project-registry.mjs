@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 
 export const SUPPORTED_SCHEMA_VERSION = '1.0';
 export const MIN_SCHEMA_VERSION = '1.0';
+// Canonical policy version — single source of truth = .github/ai-review-policy.json#policyVersion.
+// Manifest phải pin đúng version này (gate POLICY_VERSION_MISMATCH). Không drift.
+export const CANONICAL_POLICY_VERSION = '2026-08-23.7';
 
 // Machine-local registry path (NGOÀI worktree, ngoài Git).
 export const DEFAULT_REGISTRY_DIR = path.join(os.homedir(), '.ai-pr-reviewer');
@@ -93,7 +96,10 @@ export function validateManifest(manifest, opts = {}) {
     errors.push('MISSING_REPO_IDENTITY');
   if (!m.workspace || typeof m.workspace !== 'object' || !m.workspace.workspaceId) errors.push('MISSING_WORKSPACE_ID');
   if (!m.projectType) errors.push('MISSING_PROJECT_TYPE');
+  // [GPT-REV-069] Gate: policy manifest phải pin đúng canonical policy version (fail-closed).
+  const canonicalPV = opts.canonicalPolicyVersion || CANONICAL_POLICY_VERSION;
   if (!m.policy || !m.policy.version) errors.push('MISSING_POLICY_PIN');
+  else if (m.policy.version !== canonicalPV) errors.push('POLICY_VERSION_MISMATCH:' + m.policy.version);
   if (!m.verify || !m.verify.adapter) errors.push('MISSING_VERIFY_ADAPTER');
   if (!m.deploy || typeof m.deploy.humanAuthorization !== 'boolean') errors.push('MISSING_DEPLOY_AUTHZ');
   if (!m.telegram || !m.telegram.route) errors.push('MISSING_TELEGRAM_ROUTE');
@@ -106,37 +112,50 @@ export function validateManifest(manifest, opts = {}) {
   if (m.schemaVersion && compareVersion(m.schemaVersion, SUPPORTED_SCHEMA_VERSION) > 0) errors.push('UNSUPPORTED_SCHEMA_VERSION:' + m.schemaVersion);
   if (Array.isArray(m.allowedOverrides))
     for (const k of m.allowedOverrides) if (!isAllowedOverride(k)) errors.push('OVERRIDE_NOT_ALLOWED:' + k);
-  const schema = loadSchema();
+  // [GPT-REV-070] JSON Schema enforcement — fail-closed: schema lỗi/mất -> reject (không silent-skip).
+  let schema = null;
+  try { schema = loadSchema(); } catch (e) { errors.push('MANIFEST_SCHEMA_UNAVAILABLE:' + ((e && e.code) || 'parse')); }
   if (schema) errors.push(...validateAgainstSchema(m, schema));
   return { ok: errors.length === 0, errors, manifest: m };
 }
 
+// Fail-closed: ném nếu schema file thiếu/không parse được (không trả null).
 function loadSchema() {
-  try { return JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8')); } catch { return null; }
+  return JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
 }
 
-// Thực thi JSON Schema (subset được schema dùng): required, type, pattern, enum, minLength, nested required, array items enum.
-function validateAgainstSchema(m, schema) {
+// Thực thi JSON Schema đệ quy: required, type, pattern, enum, minLength, nested object/array (đầy đủ).
+function validateAgainstSchema(root, schema) {
   const errs = [];
-  for (const k of (schema.required || [])) if (!(k in m)) errs.push('SCHEMA_MISSING_' + String(k).toUpperCase());
-  const props = schema.properties || {};
-  for (const [k, def] of Object.entries(props)) {
-    if (!(k in m)) continue;
-    const v = m[k];
-    if (def.type === 'object') {
-      if (typeof v !== 'object' || v === null || Array.isArray(v)) { errs.push('SCHEMA_TYPE_' + k.toUpperCase()); continue; }
-      for (const rk of (def.required || [])) if (!(rk in v)) errs.push('SCHEMA_MISSING_' + k.toUpperCase() + '_' + String(rk).toUpperCase());
-    }
-    if (def.type === 'array' && Array.isArray(v) && def.items && def.items.enum) {
-      for (const it of v) if (!def.items.enum.includes(it)) errs.push('SCHEMA_ENUM_' + k.toUpperCase() + '_ITEM');
-    }
-    if (typeof v === 'string') {
-      if (def.pattern && !new RegExp(def.pattern).test(v)) errs.push('SCHEMA_PATTERN_' + k.toUpperCase());
-      if (def.enum && !def.enum.includes(v)) errs.push('SCHEMA_ENUM_' + k.toUpperCase());
-      if (def.minLength && v.length < def.minLength) errs.push('SCHEMA_MINLEN_' + k.toUpperCase());
-    }
-  }
+  validateNode(root, schema, '', errs);
   return errs;
+}
+function validateNode(value, def, path, errs) {
+  if (!def) return;
+  const name = path ? path.toUpperCase() : 'ROOT';
+  if (def.type === 'object') {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) { errs.push('SCHEMA_TYPE_' + name); return; }
+    for (const rk of (def.required || [])) if (!(rk in value)) errs.push('SCHEMA_MISSING_' + (path ? path.toUpperCase() + '_' : '') + String(rk).toUpperCase());
+    const props = def.properties || {};
+    for (const [pk, pdef] of Object.entries(props)) {
+      if (!(pk in value)) continue;
+      validateNode(value[pk], pdef, path ? path + '.' + pk : pk, errs);
+    }
+    return;
+  }
+  if (def.type === 'array') {
+    if (!Array.isArray(value)) { errs.push('SCHEMA_TYPE_' + name); return; }
+    if (def.items) for (const it of value) validateNode(it, def.items, path, errs);
+    return;
+  }
+  if (def.type === 'string') {
+    if (typeof value !== 'string') { errs.push('SCHEMA_TYPE_' + name); return; }
+    if (def.pattern && !new RegExp(def.pattern).test(value)) errs.push('SCHEMA_PATTERN_' + name);
+    if (def.enum && !def.enum.includes(value)) errs.push('SCHEMA_ENUM_' + name);
+    if (def.minLength && value.length < def.minLength) errs.push('SCHEMA_MINLEN_' + name);
+    return;
+  }
+  if (def.type && typeof value !== def.type) errs.push('SCHEMA_TYPE_' + name);
 }
 
 export function loadRegistry({ registryPath = DEFAULT_REGISTRY_PATH } = {}) {
@@ -181,6 +200,7 @@ export function assertWorkspaceRemote({ manifest, actualRemote, canonicalRemote 
 }
 
 export function registerProject({ manifest, registry, registryPath = DEFAULT_REGISTRY_PATH, actualRemote, canonicalRemote }) {
+  delete manifest.__migrationAdded; // strip transient marker (nếu manifest là kết quả migrate)
   const v = validateManifest(manifest);
   if (!v.ok) return { ok: false, stage: 'validate', errors: v.errors };
   const conflicts = detectConflicts({ registry, manifest });
@@ -194,26 +214,33 @@ export function registerProject({ manifest, registry, registryPath = DEFAULT_REG
   return { ok: true, registry };
 }
 
-// Migration N->N+1 (up) và rollback (down).
+// Migration N->N+1 (up) và rollback (down). Reversible: down(up(original)) === original (lossless).
 export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION }) {
   const m = JSON.parse(JSON.stringify(manifest || {}));
   const from = m.schemaVersion || '0.9';
   if (compareVersion(toVersion, from) > 0) {
     m.schemaVersion = toVersion;
-    if (!m.workspace) m.workspace = { workspaceId: m.projectId || 'unknown' };
-    if (!m.policy) m.policy = { version: 'current' };
-    if (!m.verify) m.verify = { adapter: 'pnpm-verify' };
-    if (!m.deploy) m.deploy = { capability: false, humanAuthorization: true };
-    if (!m.telegram) m.telegram = { route: 'default' };
-    if (!m.memory) m.memory = { provider: 'claude-mem', namespace: m.projectId || 'unknown' };
-    if (!Array.isArray(m.allowedOverrides)) m.allowedOverrides = [];
+    const added = [];
+    const ensure = (key, value) => { if (!(key in m)) { m[key] = value; added.push(key); } };
+    ensure('workspace', { workspaceId: m.projectId || 'unknown' });
+    ensure('policy', { version: CANONICAL_POLICY_VERSION });
+    ensure('verify', { adapter: 'pnpm-verify' });
+    ensure('deploy', { capability: false, humanAuthorization: true });
+    ensure('telegram', { route: 'default' });
+    ensure('memory', { provider: 'claude-mem', namespace: m.projectId || 'unknown' });
+    if (!Array.isArray(m.allowedOverrides)) { m.allowedOverrides = []; added.push('allowedOverrides'); }
+    // Ghi nhận field được thêm để down gỡ bỏ (round-trip lossless). Trường transient, không lưu registry.
+    if (added.length) m.__migrationAdded = added;
     return { ok: true, direction: 'up', manifest: m };
   }
   if (compareVersion(toVersion, from) < 0) {
-    // Rollback thực sự: giữ nguyên mọi trường dữ liệu, chỉ đổi marker schemaVersion.
-    const down = { ...m, schemaVersion: toVersion };
-    return { ok: true, direction: 'down', manifest: down };
+    // Rollback thực sự: gỡ field up đã thêm, giữ nguyên data gốc, chỉ đổi marker schemaVersion.
+    if (Array.isArray(m.__migrationAdded)) for (const k of m.__migrationAdded) delete m[k];
+    delete m.__migrationAdded;
+    m.schemaVersion = toVersion;
+    return { ok: true, direction: 'down', manifest: m };
   }
+  delete m.__migrationAdded;
   return { ok: true, direction: 'none', manifest: m };
 }
 
