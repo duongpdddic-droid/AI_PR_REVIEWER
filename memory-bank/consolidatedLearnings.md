@@ -193,3 +193,9 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
   3. `registerProject` idempotent: cùng projectId+repository = update no-op (skip self trong detectConflicts); chỉ conflict khi identity (repository) khác hoặc resource (route/workspace) trùng giữa project KHÁC.
   4. Migration down phải preserve mọi trường (chỉ đổi marker version), không drop data.
   5. Fixture/manifest pin version phải theo canonical (`2026-08-23.7`), không hardcode `.1`.
+
+## L-031 (25/08/2026) — Schema/file loader phải fail-closed (throw), không trả null bị skip
+- **Triệu chứng**: GPT re-review vòng 2 (GPT-REV-070) bắt: `loadSchema()` trả `null` khi schema file thiếu/corrupt, rồi `if (schema)` bỏ qua hoàn toàn schema validation → "schema lỗi/mất bị bỏ qua"; nested validation cũng chưa đệ quy đầy đủ.
+- **Nguyên nhân gốc**: loader trả null thay vì ném; caller coi null = "không có schema để check" thay vì "không thể validate".
+- **Tránh lặp lại**: mọi loader phụ thuộc file ngoài (schema/policy/config) phải NÉM lỗi khi đọc/parse fail; caller bắt và chuyển thành error reject (VD `MANIFEST_SCHEMA_UNAVAILABLE`) — fail-closed tuyệt đối, không silent-skip. Validation schema viết đệ quy duyệt mọi cấp nested (type/pattern/enum/minLength).
+

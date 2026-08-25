@@ -1,3 +1,13 @@
+## 25/08/2026 21:28 — Issue #14: fix GPT-REV-069/070/073 (re-review vòng 3) — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-069]: gate policy canonical — `CANONICAL_POLICY_VERSION=''2026-08-23.7''`; `validateManifest` reject `POLICY_VERSION_MISMATCH` khi `policy.version` lệch canonical.
+- [x] [GPT-REV-070]: `loadSchema()` fail-closed (throw khi file thiếu/corrupt → `MANIFEST_SCHEMA_UNAVAILABLE`); `validateAgainstSchema` viết lại đệ quy validate type/pattern/enum/minLength nested đầy đủ.
+- [x] [GPT-REV-073]: `migrateManifest` reversible lossless — `up` ghi nhận field added, `down` gỡ → `down(up(original)) === original`.
+- [x] Fixtures generic.json/duplicate-id.json pin canonical `2026-08-23.7`; migration default `policy.version = CANONICAL_POLICY_VERSION`.
+- [x] `scripts/test-project-registry.mjs` 50/50 PASS (thêm AC11 gate + nested fail-closed; strengthen AC10 round-trip).
+- [x] `pnpm verify` **94/94 PASS exit 0**; `full-verify` 94/94.
+- [x] Commit `e79e975`, push origin `feat/issue-14-project-registry`; comment `[CLINE-FIX-069..073]`; PR #16 labels `agent:gpt`+`status:review-requested`; HEAD `e79e9750b84868ab61e7efe004a9573c4472f5ee`.
+- [ ] CHỜ: GPT re-review vòng 3; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
 # Progress (AI_PR_REVIEWER)
 
 ## 25/08/2026 23:40 — Issue #14: fix GPT-REV-069..073 (re-review vòng 2) — COMPLETED (chờ GPT re-review)
