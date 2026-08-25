@@ -1,5 +1,13 @@
 # Progress (AI_PR_REVIEWER)
 
+## 25/08/2026 11:25 — Issue #9 REV-3: fix GPT-REV-062/063/064 PR #10 — COMPLETED (chờ review vòng 3)
+
+- [x] [GPT-REV-062]: `recover()` đi qua duy nhất `recordEvent()`/`redactDeep()`; secret lồng `identity`/`fallbackChain` không lên đĩa (`INT.recover-redacts-identity` PASS).
+- [x] [GPT-REV-063]: runtime persistence mặc định ngoài worktree `~/.agent-runtime/<basename>-<sha1-12(rootDir)>/`; `commitAndPush()` unstage `.agent/runtime`; test chứng minh `git status --porcelain` sạch + persist qua restart.
+- [x] [GPT-REV-064]: `buildCoderContext()` wire bootstrap/invariants + `selectiveLoad()` + `compactTranscript()` (budget 6000) vào coder execution; overBudget → escalate `BLOCKED_CONTEXT_OVERBUDGET`; `compact-then-retry` rebuild budget nửa + telemetry compaction persist.
+- [x] Verify: test-runtime-hooks 10/10; **full-verify 89/89 PASS exit 0**; smoke dry-run OK; CI Verify CI success HEAD `025e66b7a0db8d2b351778d380014f7e69112031`.
+- [x] Bàn giao: commit `025e66b`, comment `[CLINE-FIX-062..064]` (issuecomment-5405139219), labels read-back `agent:cline`+`status:review-requested`. Archive activeContext >5 entry → taskHistory.md.
+
 ## 25/08/2026 09:35 — Issue #9 REV-2: fix 3 finding GPT review PR #10 — COMPLETED (chờ review vòng 2)
 
 - [x] [GPT-REV-060]: `overBudget` fail-closed cho mọi trường hợp vượt (`compactTranscript`, `selectiveLoad`); test âm §9–§11 → 11 PASS.
