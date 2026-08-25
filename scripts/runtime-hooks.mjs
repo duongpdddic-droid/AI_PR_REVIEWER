@@ -6,15 +6,25 @@
 //   - recover(): classify + planRecovery + TỰ ghi telemetry event (recovery sinh telemetry,
 //     identity echo nguyên vẹn); policy fail-closed giữ nguyên trong planRecovery.
 //   - recordEvent(): redact đệ quy rồi append events.jsonl; lỗi → degraded:true.
-// Persistence: <root>/.agent/runtime/{observations.jsonl,events.jsonl} — sống qua restart
-// (integration test chứng minh load lại được sau khi tạo instance mới).
+// Persistence (GPT-REV-063): MẶC ĐỊNH NGOÀI Git worktree —
+//   <homedir>/.agent-runtime/<basename>-<sha1-12(cwd)>/{observations,events}.jsonl
+//   → git add -A không bao giờ nhặt được runtime state; override bằng {runtimeDir} khi test.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { planRecovery, recordExecutionEvent } from './error-recovery.mjs';
 import { consolidateMemories, createMemoryStore } from './memory-core.mjs';
 
-export function createRuntimeHooks({ rootDir = process.cwd(), io } = {}) {
-  const dir = path.join(rootDir, '.agent', 'runtime');
+/** Thư mục runtime mặc định NGOÀI worktree (GPT-REV-063): ổn định theo rootDir, sống qua restart. */
+export function defaultRuntimeDir(rootDir) {
+  const base = path.basename(String(rootDir || 'workspace')) || 'workspace';
+  const key = `${base}-${crypto.createHash('sha1').update(String(rootDir)).digest('hex').slice(0, 12)}`;
+  return path.join(os.homedir(), '.agent-runtime', key);
+}
+
+export function createRuntimeHooks({ rootDir = process.cwd(), runtimeDir, io } = {}) {
+  const dir = runtimeDir || defaultRuntimeDir(rootDir);
   const memPath = path.join(dir, 'observations.jsonl');
   const evPath = path.join(dir, 'events.jsonl');
   const store = createMemoryStore({ file: memPath, io });
@@ -84,32 +94,31 @@ export function createRuntimeHooks({ rootDir = process.cwd(), io } = {}) {
   }
 
   /**
-   * Recovery path thật: classify + planRecovery (pure) rồi TỰ ghi telemetry event
-   * (outcome=recovery:<action>, identity echo nguyên vẹn). Plan trả về cho caller hành động;
-   * policy fail-closed nằm trong planRecovery — facade không tự mở nhánh fallback.
+   * Recovery path thật: classify + planRecovery (pure) rồi ghi telemetry QUA recordEvent()
+   * (GPT-REV-062: duy nhất một sanitizer/schema writer — KHÔNG appendJsonl event thô).
+   * outcome=recovery:<action>, identity echo nguyên vẹn (đã redact); policy fail-closed
+   * nằm trong planRecovery — facade không tự mở nhánh fallback.
    */
   function recover(input) {
     const errorClass = input && input.errorClass;
     const plan = planRecovery(input);
-    try {
-      appendJsonl(evPath, {
-        taskId: (input && input.taskId) ?? null,
-        issue: (input && input.issue) ?? null,
-        provider: (input && input.identity && input.identity.provider) ?? null,
-        model: (input && input.identity && input.identity.model) ?? null,
-        attempt: Number(input && input.attempts) || 0,
-        errorClass: errorClass ?? null,
-        toolFailure: null,
-        compactionEvent: null,
-        fallbackEvent: plan.action === 'fallback-model' ? { to: plan.nextTarget } : null,
-        manualIntervention: false,
-        outcome: `recovery:${plan.action}`,
-        durationMs: null,
-        ts: new Date().toISOString(),
-        note: plan.reason,
-        identity: (input && input.identity) || {},
-      });
-    } catch { /* telemetry lỗi không block recovery decision */ }
+    // Telemetry lỗi không block recovery decision (recordEvent tự degrade, không ném).
+    recordEvent({
+      taskId: (input && input.taskId) ?? null,
+      issue: (input && input.issue) ?? null,
+      provider: (input && input.identity && input.identity.provider) ?? null,
+      model: (input && input.identity && input.identity.model) ?? null,
+      attempt: Number(input && input.attempts) || 0,
+      errorClass: errorClass ?? null,
+      toolFailure: null,
+      compactionEvent: null,
+      fallbackEvent: plan.action === 'fallback-model' ? { to: plan.nextTarget } : null,
+      manualIntervention: false,
+      outcome: `recovery:${plan.action}`,
+      durationMs: null,
+      note: plan.reason,
+      identity: (input && input.identity) || {},
+    });
     return plan;
   }
 

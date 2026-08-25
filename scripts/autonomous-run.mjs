@@ -30,9 +30,13 @@ import {
 } from './autonomous-core.mjs';
 import { classifyError } from './error-recovery.mjs';
 import { createRuntimeHooks } from './runtime-hooks.mjs';
+import { compactTranscript, selectiveLoad, estimateTokens } from './context-manager.mjs';
 
 // Budget attempt recovery cho coder (bounded — planRecovery quyết retry/escalate).
 const RECOVERY_MAX_ATTEMPTS = 3;
+// Working-context budget cho coder prompt (GPT-REV-064): bootstrap/invariants + selective
+// task context, enforce bằng compactTranscript; vượt (protected state quá lớn) → escalate.
+const CODER_CONTEXT_BUDGET_TOKENS = 6000;
 
 function sleepSync(ms) {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -111,14 +115,91 @@ function runVerify(cwd = ROOT) {
   return { ok: r.ok, out: r.out };
 }
 
-function runCoder(issueNumber, issueBody) {
+/**
+ * Chia issue body thành các section (theo heading `#`) để progressive disclosure.
+ * Tag suy từ keyword heading: ac/scope/test/background — section 'scope' là invariant
+ * (phạm vi bắt buộc, selectiveLoad luôn tải). Không có heading → 1 section background duy nhất.
+ */
+export function indexIssueSections(issueBody) {
+  const text = String(issueBody || '');
+  const tagFor = (heading) => {
+    const s = String(heading || '').toLowerCase();
+    const tags = [];
+    if (/accept|nghiệm thu|tiêu chí|criteria/.test(s)) tags.push('ac');
+    if (/scope|phạm vi|allowed|được phép|không được thay đổi/.test(s)) tags.push('scope');
+    if (/test|verify|kiểm thử|bằng chứng|evidence/.test(s)) tags.push('test');
+    if (!tags.length) tags.push('background');
+    return tags;
+  };
+  const sections = [];
+  let cur = { name: '(intro)', tags: ['background'], lines: [] };
+  for (const line of text.split('\n')) {
+    const m = /^#{1,6}\s+(.+)$/.exec(line);
+    if (m) { sections.push(cur); cur = { name: m[1].trim(), tags: tagFor(m[1]), lines: [] }; }
+    else cur.lines.push(line);
+  }
+  sections.push(cur);
+  return sections
+    .map((s) => ({ name: s.name, tags: s.tags, content: s.lines.join('\n').trim() }))
+    .filter((s) => s.content)
+    .map((s) => ({ ...s, invariant: s.tags.includes('scope') }));
+}
+
+const CODER_BOOTSTRAP = [
+  'INVARIANT: Không tự merge PR; không clasp push/deploy; không tự commit (orchestrator commit); policy gate fail-closed.',
+];
+
+/**
+ * Xây prompt coder theo working-context budget (GPT-REV-064):
+ *   bootstrap/invariants + findings + selectiveLoad(issue sections) rồi compactTranscript.
+ * overBudget=true khi protected/invariants vượt budget → caller PHẢI escalate,
+ * không gửi nguyên context (GPT-REV-060 semantics áp cho context budget).
+ */
+export function buildCoderContext({ issueNumber, issueBody, findings = [], budgetTokens = CODER_CONTEXT_BUDGET_TOKENS }) {
+  const bootText = [
+    `Nhận Issue #${issueNumber}. Chỉ sửa đúng phạm vi được phép. Sau khi xong chạy \`node scripts/full-verify.mjs\` và đảm bảo PASS. Không tự merge, không tự commit, không deploy.`,
+    ...CODER_BOOTSTRAP,
+  ].join('\n');
+  // B2 — progressive disclosure trên index section của issue body.
+  let sel = { loaded: [], skipped: [] };
+  let selOverBudget = false;
+  try {
+    const remaining = Math.max(1, budgetTokens - estimateTokens(bootText));
+    sel = selectiveLoad({
+      index: indexIssueSections(issueBody),
+      neededTags: ['ac', 'scope', 'test'],
+      budgetTokens: remaining,
+    });
+    selOverBudget = sel.overBudget === true;
+  } catch { /* issue rỗng/không parse được → chỉ bootstrap + findings */ }
+
+  const entries = [
+    { kind: 'task', text: bootText },
+    ...findings.map((f, i) => ({ kind: 'finding', text: `[FINDING ${i + 1}] ${String(f)}` })),
+    ...(sel.skipped.length ? [{ kind: 'history', text: `[skipped sections do vượt budget]: ${sel.skipped.join(', ')}` }] : []),
+    ...(sel.loaded.length ? [{ kind: 'history', text: sel.loaded.map((s) => `## ${s.name}\n${s.content}`).join('\n\n') }] : []),
+  ];
+  // B1 — compact transcript về budget; protected (task/finding/Decision Gate/SHA/AC mở) giữ nguyên.
+  const c = compactTranscript({ entries, budgetTokens });
+  return {
+    prompt: c.kept.map((e) => e.text).join('\n\n') + (c.summary ? `\n\n${c.summary.text}` : ''),
+    dropped: c.dropped,
+    overBudget: c.overBudget || selOverBudget,
+    totalTokens: c.totalTokens,
+    skippedSections: sel.skipped,
+    preservedSpans: c.summary ? c.summary.preservedSpans : [],
+    compactionEvent: c.compactionEvent,
+  };
+}
+
+function runCoder(issueNumber, issueBody, ctxPrompt) {
   if (NO_AIDER) {
     log('--no-aider: bỏ qua bước coder LLM (chỉ verify hiện trạng branch).');
     return { ok: true, error: '' };
   }
   const conventions = path.join(ROOT, '.agent', 'conventions-coder.md');
   const readArgs = fs.existsSync(conventions) ? ['--read', conventions] : [];
-  const msg = `Nhận Issue #${issueNumber}, triển khai code theo phạm vi và tiêu chí nghiệm thu trong issue, chỉ sửa đúng phạm vi được phép. Sau khi xong chạy \`node scripts/full-verify.mjs\` và đảm bảo PASS. Không tự merge, không tự commit (orchestrator sẽ commit), không deploy.\n\n--- ISSUE ---\n${issueBody || ''}`;
+  const msg = ctxPrompt || `Nhận Issue #${issueNumber}, triển khai code theo phạm vi và tiêu chí nghiệm thu trong issue, chỉ sửa đúng phạm vi được phép. Sau khi xong chạy \`node scripts/full-verify.mjs\` và đảm bảo PASS. Không tự merge, không tự commit (orchestrator sẽ commit), không deploy.\n\n--- ISSUE ---\n${issueBody || ''}`;
   try {
     runInteractive(AIDER, [...readArgs, '--message', msg, '--yes-always', '--no-auto-commits'], ROOT);
     return { ok: true, error: '' };
@@ -155,6 +236,9 @@ function commitAndPush(branch, issueNumber) {
     return true;
   }
   git(['add', '-A']);
+  // GPT-REV-063: runtime state KHÔNG được vào commit — runtime mặc định nằm ngoài worktree
+  // (~/.agent-runtime); unstage phòng hờ vùng legacy <repo>/.agent/runtime nếu còn sót.
+  runQuiet('git', ['reset', '-q', '--', '.agent/runtime', '.agent/runtime/']);
   git(['commit', '-m', `feat: implement issue #${issueNumber}`]);
   git(['push', '-u', 'origin', branch]);
   return true;
@@ -259,11 +343,32 @@ function processOneCycle({ dryRun }) {
     return { status: 'BLOCKED', issueNumber, detail: String(e.message) };
   }
 
-  // 3. Coder — bounded recovery thật: classify error → planRecovery → retry/backoff theo plan,
-  //    AUTH_OR_CONFIG_ERROR escalate ngay (không bypass auth); hết budget → blocked như cũ.
+  // 3. Coder — bounded recovery thật + working-context budget (GPT-REV-064):
+  //    prompt coder đi qua buildCoderContext (bootstrap/invariants + selectiveLoad + compact);
+  //    'compact-then-retry' → retry DÙNG context đã compact mạnh hơn + ghi compaction telemetry.
+  const issueBodyText = parsed.task?.body || '';
+  let activeCtx = buildCoderContext({ issueNumber, issueBody: issueBodyText });
   let coderOk = false;
   for (let attempt = 1; attempt <= RECOVERY_MAX_ATTEMPTS && !coderOk; attempt += 1) {
-    const c = runCoder(issueNumber, parsed.task?.body || '');
+    if (activeCtx.overBudget) {
+      // GPT-REV-064: protected/invariant state vượt budget kể cả sau compact → escalate,
+      // KHÔNG gửi nguyên context cho coder.
+      log(`Context vượt budget kể cả sau compact (${activeCtx.totalTokens} tokens) → escalate.`);
+      hooks.recordEvent({
+        taskId: `issue-${issueNumber}`, issue: issueNumber, attempt, errorClass: 'CONTEXT_OVERFLOW',
+        compactionEvent: activeCtx.compactionEvent, outcome: 'context-overbudget',
+      });
+      hooks.recordObservation({
+        kind: 'workflow-failure',
+        content: `Issue #${issueNumber}: coder context vượt budget ${CODER_CONTEXT_BUDGET_TOKENS} tokens kể cả khi compact.`,
+        subjectKey: `issue-${issueNumber}-context-overbudget`,
+        provenance: { task: `autonomous-run issue-${issueNumber}`, ts: new Date().toISOString() },
+      });
+      addIssueLabel(issueNumber, LABELS.blocked);
+      notifyTelegram('blocked', `#${issueNumber}`, 'blocked', 'Coder context vượt budget kể cả khi compact', 'Thu gọn issue/protected state hoặc tăng CODER_CONTEXT_BUDGET_TOKENS.');
+      return { status: 'BLOCKED_CONTEXT_OVERBUDGET', issueNumber };
+    }
+    const c = runCoder(issueNumber, issueBodyText, activeCtx.prompt);
     if (c.ok) { coderOk = true; break; }
     const recPlan = hooks.recover({
       errorClass: classifyError(c.error),
@@ -274,6 +379,22 @@ function processOneCycle({ dryRun }) {
       issue: issueNumber,
     });
     log(`Recovery vòng ${attempt}/${RECOVERY_MAX_ATTEMPTS} (${recPlan.action}): ${recPlan.reason}`);
+    if (recPlan.action === 'compact-then-retry') {
+      // Retry với context ĐÃ compact thêm (budget giảm nửa) + telemetry compaction persist.
+      const shrunk = buildCoderContext({
+        issueNumber,
+        issueBody: issueBodyText,
+        budgetTokens: Math.max(1, Math.floor(CODER_CONTEXT_BUDGET_TOKENS / 2)),
+      });
+      hooks.recordEvent({
+        taskId: `issue-${issueNumber}`, issue: issueNumber, attempt,
+        compactionEvent: shrunk.compactionEvent, outcome: 'context-compaction',
+      });
+      log(`Compact context cho retry: dropped=${shrunk.dropped}, totalTokens=${shrunk.totalTokens}, overBudget=${shrunk.overBudget}.`);
+      activeCtx = shrunk;
+      sleepSync(recPlan.delayMs || 0);
+      continue;
+    }
     if (recPlan.action === 'escalate-blocked') break;
     sleepSync(recPlan.delayMs || 0);
   }

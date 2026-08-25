@@ -62,8 +62,15 @@ scripts/autonomous-run.mjs    — WIRED: coder bounded recovery (hooks.recover) 
 ## Runtime wiring (REV-2 — GPT-REV-059)
 
 Các primitive KHÔNG còn là thư viện rời: `createRuntimeHooks({ rootDir })` tạo persistence
-thật tại `<root>/.agent/runtime/{observations.jsonl,events.jsonl}` qua `fsJsonlIo()` (node:fs).
+thật NGOÀI worktree tại `<homedir>/.agent-runtime/<basename>-<sha1-12(rootDir)>/{observations.jsonl,events.jsonl}`
+qua `fsJsonlIo()` (node:fs) — **GPT-REV-063**: runtime state không bao giờ bị `git add -A`
+nhặt vào commit hay làm dirty worktree; override bằng `{runtimeDir}` (test). Mọi telemetry
+write path, gồm `recover()`, đi qua duy nhất `recordEvent()`/`redactDeep()` — **GPT-REV-062**.
 Điểm nối trong `autonomous-run.mjs` (`processOneCycle`, chỉ nhánh execute):
+- **Coder prompt** → `buildCoderContext()` (bootstrap/invariants + `selectiveLoad()` theo tag
+  trên section issue body + `compactTranscript()` enforce budget 6000 tokens) — **GPT-REV-064**;
+  overBudget → escalate `BLOCKED_CONTEXT_OVERBUDGET` (không gửi nguyên context); action
+  `compact-then-retry` → rebuild budget nửa + telemetry `outcome=context-compaction`.
 - **Coder fail** → `classifyError()` → `hooks.recover()` (planRecovery bounded ≤3 attempt,
   AUTH_OR_CONFIG_ERROR escalate ngay không bypass) → retry/backoff theo plan; hết budget →
   blocked như cũ. Mỗi lần recover tự ghi event `outcome=recovery:<action>` + identity echo.
