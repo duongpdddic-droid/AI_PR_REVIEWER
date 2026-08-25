@@ -1,6 +1,6 @@
 # Audit Matrix — Issue #9 (Nâng cấp Agent Harness có chọn lọc)
 
-module-version: 2 (REV-2 sau GPT review PR #10 — GPT-REV-059/060/061)
+module-version: 3 (REV-3 sau GPT review PR #10 — GPT-REV-066/067)
 
 Ngày audit: 25/08/2026. Cơ sở: source `AI_PR_REVIEWER` tại HEAD sau Issue #6 (`7a6dc78`→`fbe5b05`),
 Issue #9, `.github/ai-review-policy.json`, `docs/AGENT_HANDOFF_PROTOCOL.md`.
@@ -93,6 +93,22 @@ write path, gồm `recover()`, đi qua duy nhất `recordEvent()`/`redactDeep()`
 - Storage lỗi → mọi hook degrade ({ok:false}), KHÔNG bao giờ block workflow.
 Integration test: `test-runtime-hooks.mjs` (temp dir; chứng minh restart/load lại được, event
 được lưu, failure không block workflow, recovery sinh telemetry giữ identity).
+
+## Invocation matrix (REV-3 — GPT-REV-066/067)
+
+Mọi lần gọi model coder (initial / verify-fix / compact-retry) đi qua **CÙNG** một entry point
+`prepareCoderInvocation()` + `executeCoderInvocation()` — **GPT-REV-067** (xóa `runCoder()`/`runFixCoder()`
+tự ghép prompt/`--read` riêng). `fetchUnresolvedFindings()` parse đúng nested `gh api --paginate --slurp`
+**GPT-REV-066** và truyền `findingsSource` (`github-comments | github-comments-empty | github-unavailable`).
+
+| Invocation path (production) | Shared capsule (`buildStartupCapsule`) | Budget enforced (`CODER_STARTUP_BUDGET_TOKENS`=12000) | Large file pointer (`conventions` >2000t → pointer, KHÔNG `--read`) | Telemetry (`recordInvocationTelemetry`) | Integration test |
+|---|---|---|---|---|---|
+| **Initial coder** — vòng 1 `processOneCycle` (findings từ GitHub, conventions, memory selective top-8, headSha) | `invocationKind='initial'`; message = protected findings + issue sections + memory; `readArgs` do capsule quyết định | `overBudget`/`blocked` fail-closed: KHÔNG gọi model, escalate `BLOCKED_CONTEXT_BUDGET` | Có — `conventionsMode='inline'\|'pointer'\|'absent'` | `outcome='startup-context'`, `startupContextTokens`, `loadedMemoryCount`/`loadedEventCount`, `findingsSource`, `externalContextUnknown` | `INT.startup-budget-benchmark`, `REV67.compact-retry-shrunk` (initial leg), `REV67.memory-count-accurate` |
+| **Verify-fix loop** — mỗi vòng verify FAIL (`--message` + tail 800t `verifyFailure`) | `invocationKind='verify-fix'`; cùng capsule, KHÔNG call site tự ghép | Cùng budget; blocked → `BLOCKED_CONTEXT_BUDGET` (không fallback model) | Có — xác nhận `readArgs=[]` với conventions lớn (sửa regress REV-067) | `outcome='startup-context'`, `invocationKind='verify-fix'`, `modelCalled` | `REV67.fix-loop-big-conventions` |
+| **Compact-then-retry** — sau `compact-then-retry` recovery | `invocationKind='compact-retry'`; `retryBudget` = nửa budget, reuse context compact NHỎ HƠN, spans còn | Cùng budget (budget đã giảm nửa) | Có | `outcome='startup-context'`, `beforeCompactTokens`/`afterCompactTokens`, `invocationKind` | `REV67.compact-retry-shrunk` |
+| **Blocked (over-budget)** — mọi path vượt budget kể cả sau compact | `blocked=true` → executor trả `{called:false, blocked:true, error:'BLOCKED_CONTEXT_BUDGET'}` TRƯỚC khi chạm runner | Fail-closed tuyệt đối: model KHÔNG được gọi | n/a (không gửi payload) | `outcome='startup-context-blocked'`, `overBudget=true`, `modelCalled=false` | `REV67.over-budget-blocked-no-model` |
+| **Cross-entry dedupe** | `message` sau `dedupeLinesAcross()` — cùng dòng ở issue/findings/memory chỉ 1 lần | Không đổi (dedupe giảm token) | n/a | `loadReasons` ghi selective retrieval | `REV67.cross-entry-dedupe` |
+| **Findings parse (authoritative)** | `findingsSource` truyền vào capsule protected entry | n/a | n/a | `findingsSource` trong event | `REV66.*` (8 case) + `INT.unresolved-findings-retrieval` |
 
 Ranh giới an toàn:
 - Policy/CI/approval gates KHÔNG đổi; memory bị chặn lưu verdict loại authoritative
