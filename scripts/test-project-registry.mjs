@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   validateManifest, scanForSecrets, scanForAbsolutePaths,
@@ -11,6 +12,7 @@ import {
   registerProject, migrateManifest, assertSingleOwner, registryOutsideWorktree,
   OWNERSHIP_MATRIX, isAllowedOverride, DEFAULT_REGISTRY_PATH,
   CANONICAL_POLICY_VERSION, SCHEMA_PATH,
+  ROLLBACK_PLAN_VERSION, UPGRADE_ALLOWED_ADDED_KEYS,
 } from './project-registry.mjs';
 
 const checks = [];
@@ -83,7 +85,7 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   const up = migrateManifest({ manifest: stale, toVersion: '1.0' });
   eq('AC6 migrate up direction', up.direction, 'up');
   tru('AC6 migrated manifest valid', validateManifest(up.manifest).ok);
-  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', added: up.added });
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', rollbackPlan: up.rollbackPlan });
   eq('AC6 rollback direction', down.direction, 'down');
   eq('AC6 rollback giữ projectId', down.manifest.projectId, 'legacy-proj');
   falsy('AC6 up không gắn __migrationAdded lên manifest', '__migrationAdded' in up.manifest);
@@ -144,7 +146,7 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   // [GPT-REV-073] marker added KHÔNG gắn lên manifest -> không đè extension field.
   falsy('AC10 up không gắn __migrationAdded lên manifest', '__migrationAdded' in up.manifest);
   // [GPT-REV-074] registerProject không mutate input trước remote.
-  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', added: up.added });
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', rollbackPlan: up.rollbackPlan });
   eq('AC10 rollback direction', down.direction, 'down');
   eq('AC10 rollback schemaVersion', down.manifest.schemaVersion, '0.9');
   // [GPT-REV-073] round-trip lossless: down(up(original)) === original.
@@ -188,7 +190,16 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   const originalJson = JSON.stringify(source);
   const up = migrateManifest({ manifest: source, toVersion: '1.0' });
   tru('AC12 up ok', up.ok === true);
-  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', added: up.added });
+  // [GPT-REV-075] rollbackPlan versioned + fingerprint-bound, KHÔNG còn mảng `added` tự do.
+  const plan = up.rollbackPlan;
+  tru('AC12 rollbackPlan có planVersion', plan.planVersion === ROLLBACK_PLAN_VERSION);
+  eq('AC12 plan fromVersion/toVersion đúng hướng', `${plan.fromVersion}>${plan.toVersion}`, '0.9>1.0');
+  tru('AC12 addedKeys ⊆ allowlist 0.9→1.0', plan.addedKeys.length > 0 && plan.addedKeys.every((k) => UPGRADE_ALLOWED_ADDED_KEYS.includes(k)));
+  tru('AC12 fingerprint là sha256 hex 64', /^[a-f0-9]{64}$/.test(plan.fingerprint));
+  eq('AC12 fingerprint bám manifest sau up + plan core', plan.fingerprint,
+    createHash('sha256').update(JSON.stringify({ manifest: up.manifest, fromVersion: plan.fromVersion, toVersion: plan.toVersion, addedKeys: plan.addedKeys })).digest('hex'));
+  falsy('AC12 result không còn field `added` tự do', 'added' in up);
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', rollbackPlan: plan });
   tru('AC12 down ok', down.ok === true);
   eq('AC12 input không mutate sau up+down', JSON.stringify(source), originalJson);
   eq('AC12 down(up(original)) deep-equal tuyệt đối với original', JSON.stringify(down.manifest), originalJson);
@@ -196,31 +207,64 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
     JSON.stringify(down.manifest.__migrationAdded), JSON.stringify({ note: 'extension metadata gốc' }));
   eq('AC12 customExtension giữ nguyên',
     JSON.stringify(down.manifest.customExtension), JSON.stringify({ enabled: true, items: ['a', 'b'] }));
-  falsy('AC12 up không nhúng metadata rollback theo tên field', up.added.includes('__migrationAdded'));
-  eq('AC12 mọi key up thêm đều nằm trong added (không key ẩn)',
-    Object.keys(up.manifest).length, Object.keys(source).length + up.added.length);
+  falsy('AC12 up không nhúng metadata rollback theo tên field', plan.addedKeys.includes('__migrationAdded'));
+  eq('AC12 mọi key up thêm đều nằm trong addedKeys (không key ẩn)',
+    Object.keys(up.manifest).length, Object.keys(source).length + plan.addedKeys.length);
 }
 
-// Negative rollback: down thiếu/không hợp lệ `added` -> fail-closed ROLLBACK_METADATA_REQUIRED.
+// NEG [GPT-REV-075]: rollbackPlan thiếu/rỗng/sửa đổi/sai fingerprint/key lạ/không khớp manifest -> fail-closed, input bất biến.
 {
-  const src = { schemaVersion: '1.0', projectId: 'rb-proj', customField: { v: 1 } };
-  const snap = JSON.stringify(src);
-  const d1 = migrateManifest({ manifest: src, toVersion: '0.9' });
-  falsy('NEG down không truyền added -> fail-closed', d1.ok);
-  eq('NEG reason ROLLBACK_METADATA_REQUIRED', d1.reason, 'ROLLBACK_METADATA_REQUIRED');
-  eq('NEG direction down', d1.direction, 'down');
-  const d2 = migrateManifest({ manifest: src, toVersion: '0.9', added: ['customField', 42] });
-  falsy('NEG added chứa phần tử non-string -> fail-closed', d2.ok);
-  eq('NEG added sai -> ROLLBACK_METADATA_REQUIRED', d2.reason, 'ROLLBACK_METADATA_REQUIRED');
-  eq('NEG payload đầu vào không bị xóa/sửa', JSON.stringify(src), snap);
-  // dedupe: added trùng key chỉ xóa 1 lần, vẫn lossless.
   const srcUp = { schemaVersion: '0.9', projectId: 'rb-proj-2', customField: { v: 2 } };
   const snapUp = JSON.stringify(srcUp);
   const upD = migrateManifest({ manifest: srcUp, toVersion: '1.0' });
-  tru('NEG dedupe setup up ok', upD.ok === true);
-  const d3 = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', added: [...upD.added, ...upD.added] });
-  tru('NEG dedupe added -> down ok', d3.ok === true);
-  eq('NEG dedupe added vẫn lossless', JSON.stringify(d3.manifest), snapUp);
+  tru('NEG setup up ok', upD.ok === true);
+  const good = upD.rollbackPlan;
+
+  // T1: plan thiếu/rỗng/null -> FAIL.
+  const d1 = migrateManifest({ manifest: upD.manifest, toVersion: '0.9' });
+  falsy('NEG-T1 thiếu plan -> fail-closed', d1.ok);
+  eq('NEG-T1 reason ROLLBACK_PLAN_REQUIRED', d1.reason, 'ROLLBACK_PLAN_REQUIRED');
+  const d2 = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, addedKeys: [] } });
+  falsy('NEG-T1 addedKeys rỗng -> fail-closed', d2.ok);
+  eq('NEG-T1 reason ROLLBACK_PLAN_KEYS_INVALID', d2.reason, 'ROLLBACK_PLAN_KEYS_INVALID');
+  const d3 = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: null });
+  falsy('NEG-T1 plan null -> fail-closed', d3.ok);
+
+  // T2: plan chứa key định danh/schema/extension user -> FAIL.
+  for (const k of ['repository', 'projectId', 'schemaVersion', 'customField']) {
+    const dk = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, addedKeys: [...good.addedKeys, k] } });
+    falsy(`NEG-T2 plan chứa "${k}" -> fail-closed`, dk.ok);
+    eq(`NEG-T2 "${k}" -> ROLLBACK_PLAN_ILLEGAL_KEY`, dk.reason, 'ROLLBACK_PLAN_ILLEGAL_KEY');
+  }
+  // T3: plan bị sửa key/fingerprint/version -> FAIL.
+  const dk3 = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, addedKeys: ['workspace'] } });
+  falsy('NEG-T3 sửa addedKeys -> fail-closed', dk3.ok);
+  eq('NEG-T3 sửa addedKeys -> ROLLBACK_PLAN_FINGERPRINT_MISMATCH (fingerprint bám kết quả up)', dk3.reason, 'ROLLBACK_PLAN_FINGERPRINT_MISMATCH');
+  const dfp = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, fingerprint: '0'.repeat(64) } });
+  falsy('NEG-T3 sai fingerprint -> fail-closed', dfp.ok);
+  eq('NEG-T3 reason ROLLBACK_PLAN_FINGERPRINT_MISMATCH', dfp.reason, 'ROLLBACK_PLAN_FINGERPRINT_MISMATCH');
+  const dfpi = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, fingerprint: 'not-hex' } });
+  falsy('NEG-T3 fingerprint sai định dạng -> fail-closed', dfpi.ok);
+  eq('NEG-T3 reason ROLLBACK_PLAN_FINGERPRINT_INVALID', dfpi.reason, 'ROLLBACK_PLAN_FINGERPRINT_INVALID');
+  const dpv = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, planVersion: ROLLBACK_PLAN_VERSION + 1 } });
+  falsy('NEG-T3 planVersion lạ -> fail-closed', dpv.ok);
+  eq('NEG-T3 reason ROLLBACK_PLAN_VERSION_INVALID', dpv.reason, 'ROLLBACK_PLAN_VERSION_INVALID');
+  const pdm = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: { ...good, toVersion: '1.0', fromVersion: '0.8' } });
+  falsy('NEG-T3 hướng migration sai -> fail-closed', pdm.ok);
+  eq('NEG-T3 reason ROLLBACK_PLAN_DIRECTION_MISMATCH', pdm.reason, 'ROLLBACK_PLAN_DIRECTION_MISMATCH');
+
+  // T4: dùng plan của manifest A cho manifest B -> FAIL (fingerprint-bound).
+  const otherUp = migrateManifest({ manifest: { schemaVersion: '0.9', projectId: 'rb-proj-B', extra: 7 }, toVersion: '1.0' });
+  tru('NEG setup B up ok', otherUp.ok === true);
+  const dA = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: otherUp.rollbackPlan });
+  falsy('NEG-T4 plan của B áp cho A -> fail-closed', dA.ok);
+  eq('NEG-T4 reason ROLLBACK_PLAN_FINGERPRINT_MISMATCH', dA.reason, 'ROLLBACK_PLAN_FINGERPRINT_MISMATCH');
+
+  // Plan nguyên vẹn do up() phát hành -> down ok, lossless; input bất biến qua mọi lần gọi.
+  const dOk = migrateManifest({ manifest: upD.manifest, toVersion: '0.9', rollbackPlan: good });
+  tru('NEG-T5 plan nguyên vẹn -> down ok', dOk.ok === true);
+  eq('NEG-T5 down(up(original)) deep-equal tuyệt đối original', JSON.stringify(dOk.manifest), snapUp);
+  eq('NEG source gốc 0.9 không bị down đụng tới', JSON.stringify(srcUp), snapUp);
 }
 
 // AC13: [GPT-REV-074] registerProject: input nguyên vẹn ở MỌI đường + persistence giữ extension field.

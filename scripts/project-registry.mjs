@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 export const SUPPORTED_SCHEMA_VERSION = '1.0';
@@ -219,10 +220,21 @@ export function registerProject({ manifest, registry, registryPath = DEFAULT_REG
 }
 
 // Migration N->N+1 (up) và rollback (down). Reversible: down(up(original)) === original (lossless).
-// Metadata rollback CHỈ truyền ngoài payload qua result.added; down nhận `added` TƯỜNG MINH,
-// không bao giờ đọc/đoán metadata từ tên field trong manifest (additionalProperties:true ->
-// __migrationAdded là extension field hợp lệ, cấm đè/xóa theo tên — GPT-REV-073).
-export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION, added = null }) {
+// Rollback metadata = rollbackPlan versioned do up() phát hành, BẮT fingerprint của manifest sau up
+// và addedKeys bị chặn allowlist — down() không nhận danh sách key tùy ý (GPT-REV-073/075).
+// Không đọc/ghi/xóa __migrationAdded trên payload; extension field của user bảo toàn tuyệt đối.
+export const ROLLBACK_PLAN_VERSION = 1;
+// Duy nhất các key mà migration 0.9 -> 1.0 được phép thêm; mọi key khác trong plan là illegal.
+export const UPGRADE_ALLOWED_ADDED_KEYS = ['workspace', 'policy', 'verify', 'deploy', 'telegram', 'memory', 'allowedOverrides'];
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
+
+// ponytail: fingerprint nhạy thứ-tu-key JSON.stringify — đủ vì up tự sinh manifest; nâng canonical stringify nếu cần cross-serialization.
+// Fingerprint bám CẢ manifest sau up LẪN plan core (hướng + addedKeys): sửa bất kỳ thành phần nào -> mismatch.
+function rollbackPlanFingerprint(m, planCore) {
+  return crypto.createHash('sha256').update(JSON.stringify({ manifest: m, ...planCore })).digest('hex');
+}
+
+export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION, rollbackPlan = null }) {
   const m = JSON.parse(JSON.stringify(manifest || {}));
   const from = m.schemaVersion || '0.9';
   if (compareVersion(toVersion, from) > 0) {
@@ -236,18 +248,40 @@ export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION
     ensure('telegram', { route: 'default' });
     ensure('memory', { provider: 'claude-mem', namespace: m.projectId || 'unknown' });
     if (!Array.isArray(m.allowedOverrides)) { m.allowedOverrides = []; addedKeys.push('allowedOverrides'); }
-    // Không ghi m.__migrationAdded (sẽ đè extension field). Trả added trong result.
-    return { ok: true, direction: 'up', manifest: m, added: addedKeys };
+    // Không ghi m.__migrationAdded (sẽ đè extension field). Trả rollbackPlan versioned + fingerprint-bound.
+    const planCore = { fromVersion: from, toVersion, addedKeys: [...addedKeys] };
+    return {
+      ok: true,
+      direction: 'up',
+      manifest: m,
+      rollbackPlan: {
+        planVersion: ROLLBACK_PLAN_VERSION,
+        ...planCore,
+        fingerprint: rollbackPlanFingerprint(m, planCore),
+      },
+    };
   }
   if (compareVersion(toVersion, from) < 0) {
-    // Rollback: CHỈ gỡ đúng các key do up trả về qua tham số `added` (validate + dedupe).
-    // Fail-closed khi thiếu/không hợp lệ — không đoán metadata từ tên field trong manifest.
-    if (!Array.isArray(added) || added.some((k) => typeof k !== 'string' || k === '')) {
-      return { ok: false, direction: 'down', reason: 'ROLLBACK_METADATA_REQUIRED' };
-    }
-    for (const k of [...new Set(added)]) delete m[k];
-    m.schemaVersion = toVersion;
-    return { ok: true, direction: 'down', manifest: m, removed: [...new Set(added)] };
+    // Rollback CHỈ thực thi rollbackPlan do up() phát hành: đúng schema/version, đúng hướng,
+    // khớp fingerprint manifest đầu vào, addedKeys ⊆ allowlist 0.9->1.0. Mọi vi phạm fail-closed,
+    // input không bị mutate (mutation chỉ diễn ra trên clone sau khi mọi gate PASS).
+    const bad = (reason, extra) => ({ ok: false, direction: 'down', reason, ...extra });
+    if (!rollbackPlan || typeof rollbackPlan !== 'object' || Array.isArray(rollbackPlan)) return bad('ROLLBACK_PLAN_REQUIRED');
+    if (rollbackPlan.planVersion !== ROLLBACK_PLAN_VERSION
+      || typeof rollbackPlan.fromVersion !== 'string'
+      || typeof rollbackPlan.toVersion !== 'string') return bad('ROLLBACK_PLAN_VERSION_INVALID');
+    if (rollbackPlan.fromVersion !== toVersion
+      || compareVersion(rollbackPlan.fromVersion, rollbackPlan.toVersion) >= 0) return bad('ROLLBACK_PLAN_DIRECTION_MISMATCH');
+    const ak = rollbackPlan.addedKeys;
+    if (!Array.isArray(ak) || ak.length === 0 || ak.some((k) => typeof k !== 'string' || k === '')) return bad('ROLLBACK_PLAN_KEYS_INVALID');
+    const illegal = [...new Set(ak.filter((k) => !UPGRADE_ALLOWED_ADDED_KEYS.includes(k)))];
+    if (illegal.length) return bad('ROLLBACK_PLAN_ILLEGAL_KEY', { keys: illegal });
+    if (typeof rollbackPlan.fingerprint !== 'string' || !SHA256_HEX_RE.test(rollbackPlan.fingerprint)) return bad('ROLLBACK_PLAN_FINGERPRINT_INVALID');
+    const verifyCore = { fromVersion: rollbackPlan.fromVersion, toVersion: rollbackPlan.toVersion, addedKeys: ak };
+    if (rollbackPlanFingerprint(m, verifyCore) !== rollbackPlan.fingerprint) return bad('ROLLBACK_PLAN_FINGERPRINT_MISMATCH');
+    for (const k of new Set(ak)) delete m[k];
+    m.schemaVersion = rollbackPlan.fromVersion;
+    return { ok: true, direction: 'down', manifest: m, removedKeys: [...new Set(ak)] };
   }
   return { ok: true, direction: 'none', manifest: m };
 }
