@@ -200,47 +200,53 @@ export function assertWorkspaceRemote({ manifest, actualRemote, canonicalRemote 
 }
 
 export function registerProject({ manifest, registry, registryPath = DEFAULT_REGISTRY_PATH, actualRemote, canonicalRemote }) {
-  delete manifest.__migrationAdded; // strip transient marker (nếu manifest là kết quả migrate)
+  // AC3: remote phải khớp TRƯỚC mọi mutation. Các bước validate/conflict/remote là read-only,
+  // KHÔNG mutate input manifest (tránh đè metadata trước khi remote verify — GPT-REV-074).
   const v = validateManifest(manifest);
   if (!v.ok) return { ok: false, stage: 'validate', errors: v.errors };
   const conflicts = detectConflicts({ registry, manifest });
   if (conflicts.length) return { ok: false, stage: 'conflict', conflicts };
   const rc = assertWorkspaceRemote({ manifest, actualRemote, canonicalRemote });
   if (!rc.ok) return { ok: false, stage: 'remote', ...rc };
+  // Sau khi remote khớp mới mutate: clone + strip transient marker rồi save.
+  const clean = JSON.parse(JSON.stringify(manifest));
+  delete clean.__migrationAdded; // phòng vệ: marker migration đã chuyển sang result, không nằm trên manifest.
   registry.projects = registry.projects || [];
-  const idx = registry.projects.findIndex((p) => p.projectId === manifest.projectId);
-  if (idx >= 0) registry.projects[idx] = manifest; else registry.projects.push(manifest);
+  const idx = registry.projects.findIndex((p) => p.projectId === clean.projectId);
+  if (idx >= 0) registry.projects[idx] = clean; else registry.projects.push(clean);
   saveRegistry({ registry, registryPath });
   return { ok: true, registry };
 }
 
 // Migration N->N+1 (up) và rollback (down). Reversible: down(up(original)) === original (lossless).
-export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION }) {
+// Marker thêm-key KHÔNG gắn lên manifest (tránh đè extension field cùng tên — GPT-REV-073);
+// trả về trong result, down nhận `added` để rollback xác định.
+export function migrateManifest({ manifest, toVersion = SUPPORTED_SCHEMA_VERSION, added = null }) {
   const m = JSON.parse(JSON.stringify(manifest || {}));
   const from = m.schemaVersion || '0.9';
   if (compareVersion(toVersion, from) > 0) {
     m.schemaVersion = toVersion;
-    const added = [];
-    const ensure = (key, value) => { if (!(key in m)) { m[key] = value; added.push(key); } };
+    const addedKeys = [];
+    const ensure = (key, value) => { if (!(key in m)) { m[key] = value; addedKeys.push(key); } };
     ensure('workspace', { workspaceId: m.projectId || 'unknown' });
     ensure('policy', { version: CANONICAL_POLICY_VERSION });
     ensure('verify', { adapter: 'pnpm-verify' });
     ensure('deploy', { capability: false, humanAuthorization: true });
     ensure('telegram', { route: 'default' });
     ensure('memory', { provider: 'claude-mem', namespace: m.projectId || 'unknown' });
-    if (!Array.isArray(m.allowedOverrides)) { m.allowedOverrides = []; added.push('allowedOverrides'); }
-    // Ghi nhận field được thêm để down gỡ bỏ (round-trip lossless). Trường transient, không lưu registry.
-    if (added.length) m.__migrationAdded = added;
-    return { ok: true, direction: 'up', manifest: m };
+    if (!Array.isArray(m.allowedOverrides)) { m.allowedOverrides = []; addedKeys.push('allowedOverrides'); }
+    // Không ghi m.__migrationAdded (sẽ đè extension field). Trả added trong result.
+    return { ok: true, direction: 'up', manifest: m, added: addedKeys };
   }
   if (compareVersion(toVersion, from) < 0) {
     // Rollback thực sự: gỡ field up đã thêm, giữ nguyên data gốc, chỉ đổi marker schemaVersion.
-    if (Array.isArray(m.__migrationAdded)) for (const k of m.__migrationAdded) delete m[k];
+    const keysToRemove = Array.isArray(added) ? added
+      : (Array.isArray(m.__migrationAdded) ? m.__migrationAdded : []);
+    for (const k of keysToRemove) delete m[k];
     delete m.__migrationAdded;
     m.schemaVersion = toVersion;
     return { ok: true, direction: 'down', manifest: m };
   }
-  delete m.__migrationAdded;
   return { ok: true, direction: 'none', manifest: m };
 }
 

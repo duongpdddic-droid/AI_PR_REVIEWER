@@ -83,9 +83,10 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   const up = migrateManifest({ manifest: stale, toVersion: '1.0' });
   eq('AC6 migrate up direction', up.direction, 'up');
   tru('AC6 migrated manifest valid', validateManifest(up.manifest).ok);
-  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9' });
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', added: up.added });
   eq('AC6 rollback direction', down.direction, 'down');
   eq('AC6 rollback giữ projectId', down.manifest.projectId, 'legacy-proj');
+  falsy('AC6 up không gắn __migrationAdded lên manifest', '__migrationAdded' in up.manifest);
 }
 
 // AC7: platform capability đúng 1 canonical owner.
@@ -140,7 +141,10 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   const stale = load('stale-schema.json');
   const up = migrateManifest({ manifest: stale, toVersion: '1.0' });
   tru('AC10 up direction', up.direction === 'up');
-  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9' });
+  // [GPT-REV-073] marker added KHÔNG gắn lên manifest -> không đè extension field.
+  falsy('AC10 up không gắn __migrationAdded lên manifest', '__migrationAdded' in up.manifest);
+  // [GPT-REV-074] registerProject không mutate input trước remote.
+  const down = migrateManifest({ manifest: up.manifest, toVersion: '0.9', added: up.added });
   eq('AC10 rollback direction', down.direction, 'down');
   eq('AC10 rollback schemaVersion', down.manifest.schemaVersion, '0.9');
   // [GPT-REV-073] round-trip lossless: down(up(original)) === original.
@@ -168,6 +172,40 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   // schema file hợp lệ (guard không corrupt -> không rơi vào MANIFEST_SCHEMA_UNAVAILABLE).
   const schemaOk = (() => { try { JSON.parse(readFileSync(SCHEMA_PATH, 'utf8')); return true; } catch { return false; } })();
   tru('AC11 schema file hợp lệ (guard)', schemaOk);
+}
+
+// AC12: [GPT-REV-073] extension field __migrationAdded KHÔNG bị migrate đè/mất.
+{
+  const withExt = {
+    schemaVersion: '0.9', projectId: 'ext-proj', repository: 'ext/proj',
+    workspace: { workspaceId: 'ext-ws' }, projectType: 'product',
+    policy: { version: CANONICAL_POLICY_VERSION }, verify: { adapter: 'pnpm-verify' },
+    deploy: { capability: false, humanAuthorization: true },
+    telegram: { route: 'default' }, memory: { provider: 'claude-mem', namespace: 'ext-proj' },
+    __migrationAdded: { note: 'extension metadata gốc' },
+  };
+  const up = migrateManifest({ manifest: withExt, toVersion: '1.0' });
+  eq('AC12 extension field __migrationAdded giữ nguyên sau up', JSON.stringify(up.manifest.__migrationAdded), JSON.stringify({ note: 'extension metadata gốc' }));
+  tru('AC12 input manifest không bị mutate', '__migrationAdded' in withExt);
+}
+
+// AC13: [GPT-REV-074] registerProject KHÔNG mutate input trước/sau remote verify.
+{
+  const reg = { schemaVersion: '1.0', projects: [] };
+  const m = {
+    schemaVersion: '1.0', projectId: 'mut-proj', repository: 'mut/proj',
+    workspace: { workspaceId: 'mut-ws' }, projectType: 'product',
+    policy: { version: CANONICAL_POLICY_VERSION }, verify: { adapter: 'pnpm-verify' },
+    deploy: { capability: false, humanAuthorization: true },
+    telegram: { route: 'default' }, memory: { provider: 'claude-mem', namespace: 'mut-proj' },
+    __migrationAdded: ['policy'],
+  };
+  const r = registerProject({ manifest: m, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/evil/repo.git' });
+  falsy('AC13 remote lệch -> reject', r.ok);
+  tru('AC13 input không bị delete marker trước remote', m.__migrationAdded !== undefined);
+  const r2 = registerProject({ manifest: m, registry: reg, registryPath: tmpPath, actualRemote: 'https://github.com/mut/proj.git' });
+  tru('AC13 remote đúng -> ok', r2.ok);
+  tru('AC13 input không bị mutate sau register (clone before save)', m.__migrationAdded !== undefined);
 }
 
 const pass = checks.filter((c) => c.ok).length;
