@@ -38,13 +38,13 @@ async function resolveFetchImpl(argv) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--status')) {
-    console.log(JSON.stringify({ lock: readLock(), health: readHealth(), ready: isReady() }));
+    console.log(JSON.stringify({ lock: readLock(), health: readHealth(), ready: await isReady() }));
     process.exit(0);
   }
   const cfg = loadConfig();
   if (!cfg) { console.error('gateway: thiếu token/chatId'); process.exit(2); }
   const instanceId = `${process.pid}-${Date.now()}`;
-  const acq = tryAcquireLock(instanceId);
+  const acq = await tryAcquireLock(instanceId);
   if (!acq.acquired) {
     console.error('gateway: duplicate instance (pid=' + (acq.lock && acq.lock.pid) + ') -> thoát');
     process.exit(3);

@@ -67,7 +67,7 @@ async function main() {
   if (argv.includes('--status')) { console.log(JSON.stringify(readLock())); process.exit(0); }
   if (argv.includes('--stop')) { releaseLock(); console.log('bridge: released lock'); process.exit(0); }
   const instanceId = `${process.pid}-${Date.now()}`;
-  const acq = tryAcquireLock(instanceId);
+  const acq = await tryAcquireLock(instanceId);
   if (!acq.acquired) {
     console.error('bridge: instance khác đang chạy (pid=' + (acq.lock && acq.lock.pid) + ') -> thoát');
     process.exit(3);

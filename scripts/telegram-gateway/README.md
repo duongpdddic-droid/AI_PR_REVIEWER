@@ -26,14 +26,18 @@ Single source of truth cho mọi notify (outbound) và command (inbound) Telegra
 - **077 — Giới hạn user/chat (fail-closed)**: `routeUpdate` chỉ nhận chat được phép (`chatId`) và
   user thuộc allowlist (`GATEWAY_ALLOWED_USERS` / `allowedUserIds`). Reject fail-closed khi thiếu
   identity (channel_post / forwarded không có `from`). appNs sai định dạng/traversal/unknown → reject.
-- **078 — Atomic single-instance lock**: `tryAcquireLock` dùng `openSync('wx')` (atomic) để chỉ 1
-  process thắng; `takeoverLock` chỉ takeover khi lock cũ STALE (pid chết / heartbeat quá hạn) bằng
-  primitive `wx` serialize contenders → tránh 2 process cùng chiếm (chống 409). `touchHeartbeat`
-  chỉ owner (instanceId khớp) mới ghi — chống race/clock-skew.
+- **078 — Single-instance bằng OS-owned TCP lease**: `tryAcquireLock` bind 1 TCP port localhost
+  (`LEASE_HOST:LEASE_PORT`, mặc định `127.0.0.1:47321`) — OS đảm bảo CHỈ 1 process giữ được; process
+  khác nhận `EADDRINUSE` → đứng xuống (exit 3, chống 409). KHÔNG còn file-lock / heartbeat-overwrite /
+  stale-takeover race: owner do kernel quản lý, tự thả port khi owner chết/crash. `probeLease()` chỉ
+  xác nhận owner khi ĐỌC được identity handshake (owner gửi `{instanceId,pid}`); connect tới socket
+  đang đóng/không data → not-alive. `releaseLock` chỉ đóng server (owner-only), không unlink file.
+  Heartbeat không còn cần thiết để chứng minh sự sống.
 - **079 — Verified startup + readiness**: gateway publish `READY_FILE` (JSON `{instanceId}`) CHỈ SAU
-  khi đã acquire lock + poll thành công đầu tiên. `isReady()` yêu cầu lock alive (pid + heartbeat)
-  + `READY_FILE` instanceId khớp + health có `lastSuccessfulPoll` gần đây. Owner release lock +
-  gỡ `READY_FILE` khi thoát (SIGTERM/SIGINT) để supervisor healing đúng.
+  khi đã acquire lease + poll thành công đầu tiên. `isReady()` (async) yêu cầu lease đang được MỘT
+  instance giữ (probe) có `instanceId` khớp health + `READY_FILE` instanceId khớp + health có
+  `lastSuccessfulPoll` gần đây. Owner release lease + gỡ `READY_FILE` khi thoát (SIGTERM/SIGINT) để
+  supervisor healing đúng.
 - **080 — Envelope validation fail-closed**: outbound envelope phải có `appNs, repo, eventType,
   state, head` (HEAD_SHA 40-hex, `HEAD_RE = /^[0-9a-f]{40}$/i`). `enqueue` validate TRƯỚC khi ghi
   file → sai → ném, KHÔNG ghi, KHÔNG phát đi. `gatewayEventKey` = `appNs::repo::ref::eventType::state::head`

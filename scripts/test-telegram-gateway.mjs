@@ -13,6 +13,10 @@ import { spawn } from 'node:child_process';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'tgw-test-'));
 process.env.AI_PR_REVIEWER_GATEWAY_DIR = TMP;
 process.env.GATEWAY_ALLOWED_APPS = 'ai-pr-reviewer,appa,appb,qldadtxd';
+// Lease dùng port riêng cho test để không chạm gateway thật trên máy (47321).
+process.env.GATEWAY_LEASE_PORT = String(47000 + (process.pid % 2048));
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const contract = await import('./telegram-gateway/contract.mjs');
 const transport = await import('./telegram-gateway/transport.mjs');
@@ -29,8 +33,9 @@ const test = (name, fn) => tests.push([name, fn]);
 function cleanRuntime() {
   for (const p of [
     contract.OUTBOUND_DIR, contract.INBOUND_DIR, contract.DEADLETTER_DIR,
-    contract.LOCK_FILE, contract.HEALTH_FILE, contract.READY_FILE, contract.TAKEOVER_GUARD,
+    contract.HEALTH_FILE, contract.READY_FILE, contract.LOCK_FILE,
   ]) {
+    if (!p) continue; // LOCK_FILE rỗng (không còn dùng, thay bằng TCP lease)
     try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
   }
 }
@@ -101,44 +106,32 @@ test('transport failure returns ok=false', async () => {
   assert.equal(r.ok, false); assert.equal(r.status, 500);
 });
 
-// 6. atomic single-instance lock + owner-only release/heartbeat (GPT-REV-078).
-test('single instance lock: atomic acquire, duplicate, stale takeover, owner-only ops', () => {
+// 6. OS-owned TCP lease: acquire, duplicate, owner-only ops (GPT-REV-078).
+test('single instance lease: acquire, duplicate, owner-only release', async () => {
   cleanRuntime();
-  const acq1 = bridge.tryAcquireLock('inst-A');
+  const acq1 = await bridge.tryAcquireLock('inst-A');
   assert.equal(acq1.acquired, true);
   assert.equal(acq1.lock.instanceId, 'inst-A');
-  // non-owner cannot release
+  assert.equal(acq1.lock.pid, process.pid);
+  // non-owner cannot release (instanceId khác) — ganh từ khác process không có quyền.
   assert.equal(contract.releaseLock('inst-B'), false);
   assert.ok(contract.readLock());
-  // non-owner cannot heartbeat
-  const before = contract.readLock().lastHeartbeat;
-  contract.touchHeartbeat('inst-B');
-  assert.equal(contract.readLock().lastHeartbeat, before);
-  // owner heartbeat
-  contract.touchHeartbeat('inst-A');
-  assert.ok(contract.readLock().lastHeartbeat >= before);
+  // heartbeat no-op (owner do OS giữ port) — không ghi file, không ném.
+  assert.equal(contract.touchHeartbeat('inst-B'), null === contract.readLock() ? null : contract.readLock());
+  assert.equal(contract.readLock().instanceId, 'inst-A'); // owner không đổi
   // owner release
   assert.equal(contract.releaseLock('inst-A'), true);
   assert.equal(contract.readLock(), null);
 
-  // duplicate refused
+  // duplicate refused while held
+  await sleep(60); // chờ OS thả port
   cleanRuntime();
-  bridge.tryAcquireLock('x');
-  const acq2 = bridge.tryAcquireLock('y');
-  assert.equal(acq2.acquired, false); assert.equal(acq2.reason, 'duplicate');
+  const a1 = await bridge.tryAcquireLock('x');
+  assert.equal(a1.acquired, true);
+  const a2 = await bridge.tryAcquireLock('y');
+  assert.equal(a2.acquired, false); assert.equal(a2.reason, 'duplicate');
+  assert.equal(contract.readLock().instanceId, 'x'); // owner 'x' không bị xáo
   contract.releaseLock('x');
-
-  // stale -> takeover
-  cleanRuntime();
-  bridge.tryAcquireLock('x');
-  const l = contract.readLock();
-  l.lastHeartbeat = Date.now() - contract.STALE_MS - 1000;
-  fs.writeFileSync(contract.LOCK_FILE, JSON.stringify(l));
-  assert.equal(contract.isLockAlive(contract.readLock()), false);
-  const acq3 = bridge.tryAcquireLock('z');
-  assert.equal(acq3.acquired, true);
-  assert.equal(acq3.lock.instanceId, 'z');
-  contract.releaseLock('z');
 });
 
 // 7. isPidAlive false for dead pid.
@@ -208,46 +201,51 @@ test('idempotency across appNs and head', async () => {
 });
 
 
-// 10. supervisor decision logic (injected, deterministic) (GPT-REV-079/081).
+// 10. supervisor decision logic (injected, deterministic) (GPT-REV-079/081 / lease model).
 test('supervisor decision logic', async () => {
   cleanRuntime();
+  const childPid = process.pid;
   let started = false;
   const rec = await supervisor.runSupervisorOnce({
     timeoutMs: 800,
-    startGatewayFn: () => {
+    startGatewayFn: async () => {
       started = true;
-      contract.tryAcquireLock('s'); // lock owner sống, instanceId 's'
-      contract.writeHealth({ status: 'ready', instanceId: 's', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+      await contract.tryAcquireLock('s');
+      contract.writeHealth({ status: 'ready', instanceId: 's', lastSuccessfulPoll: Date.now() });
       contract.writeReadyFlag('s');
+      return childPid;
     },
-    isReadyFn: contract.isReady,
+    isReadyFn: contract.isReady, probeFn: contract.probeLease,
   });
   assert.equal(started, true);
   assert.equal(rec.action, 'recovered');
+  contract.releaseLock('s');
 
+  await sleep(80); // chờ OS thả lease
   cleanRuntime();
-  const fail = await supervisor.runSupervisorOnce({ timeoutMs: 500, startGatewayFn: () => {}, isReadyFn: contract.isReady });
+  const fail = await supervisor.runSupervisorOnce({ timeoutMs: 500, startGatewayFn: async () => childPid, isReadyFn: contract.isReady, probeFn: contract.probeLease });
   assert.equal(fail.action, 'recovery-failed');
 
   cleanRuntime();
-  contract.tryAcquireLock('s');
-  contract.writeHealth({ status: 'ready', instanceId: 's', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+  await contract.tryAcquireLock('s');
+  contract.writeHealth({ status: 'ready', instanceId: 's', lastSuccessfulPoll: Date.now() });
   contract.writeReadyFlag('s');
   const ar = await supervisor.runSupervisorOnce({
-    timeoutMs: 400, startGatewayFn: () => { throw new Error('should not start'); }, isReadyFn: contract.isReady,
+    timeoutMs: 400, startGatewayFn: async () => { throw new Error('should not start'); }, isReadyFn: contract.isReady, probeFn: contract.probeLease,
   });
   assert.equal(ar.action, 'already-ready');
+  contract.releaseLock('s');
 });
 
 // 11. gateway config-failure subprocess (real process exits non-zero, no ready) (GPT-REV-079).
 test('gateway exits non-zero on missing config', async () => {
   cleanRuntime();
   const gw = path.resolve('scripts/telegram-gateway/gateway.mjs');
-  const env = { ...process.env, AI_PR_REVIEWER_GATEWAY_DIR: TMP, TG_BOT_TOKEN: '', TG_CHAT_ID: '' };
+  const env = { ...process.env, AI_PR_REVIEWER_GATEWAY_DIR: TMP, TG_BOT_TOKEN: '', TG_CHAT_ID: '', GATEWAY_NO_LEGACY_CFG: '1' };
   const child = spawn(process.execPath, [gw, '--start'], { env });
   const code = await new Promise((res) => child.on('exit', (c) => res(c)));
   assert.notEqual(code, 0);
-  assert.equal(contract.isReady(), false);
+  assert.equal(await contract.isReady(), false);
 });
 
 // 12. routeUpdate: user allowlist + reject forwarded/channel (GPT-REV-077).
@@ -301,64 +299,63 @@ test('processOutbound handles multiple appNs in one pass', async () => {
   assert.equal(contract.readQueue('qldadtxd', 'outbound').length, 0);
 });
 
-// 16. takeover does NOT clobber a live lock (GPT-REV-078 race fix).
-test('takeover never clobbers a live lock (GPT-REV-078)', () => {
+// 16. OS-owned lease: owner không bị thay thế/lam hỏng bởi kẻ khác (GPT-REV-078).
+test('lease owner cannot be replaced/corrupted by stranger', async () => {
   cleanRuntime();
-  bridge.tryAcquireLock('live'); // alive lock owned by 'live'
-  const t = contract.takeoverLock('intruder');
-  assert.equal(t.acquired, false);
-  assert.equal(t.reason, 'duplicate'); // live lock untouched
-  assert.equal(contract.readLock().instanceId, 'live');
+  await bridge.tryAcquireLock('live');
+  const p = await contract.probeLease();
+  assert.equal(p.alive, true);
+  assert.equal(p.lease.instanceId, 'live');
+  assert.equal(contract.releaseLock('intruder'), false); // stranger không release được
+  assert.equal(contract.readLock().instanceId, 'live'); // owner không đổi
+  const after = await contract.probeLease();
+  assert.equal(after.lease.instanceId, 'live'); // lease không bị xáo
   contract.releaseLock('live');
 });
 
-// 17. supervisor proves restart by pid match (GPT-REV-079).
-test('supervisor claims recovered only when child pid owns lock (GPT-REV-079)', async () => {
+// 17. supervisor chứng minh restart bằng pid khớp lease (GPT-REV-079).
+test('supervisor claims recovered only when child pid owns lease (GPT-REV-079)', async () => {
   cleanRuntime();
   const childPid = process.pid; // test process acts as the spawned child
   const rec = await supervisor.runSupervisorOnce({
     timeoutMs: 1000,
-    startGatewayFn: () => {
-      contract.tryAcquireLock('mine');
-      const l = contract.readLock(); l.pid = childPid; fs.writeFileSync(contract.LOCK_FILE, JSON.stringify(l));
-      contract.writeHealth({ status: 'ready', instanceId: 'mine', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+    startGatewayFn: async () => {
+      const a = await contract.tryAcquireLock('mine');
+      if (!a.acquired) throw new Error('acquire failed');
+      contract.writeHealth({ status: 'ready', instanceId: 'mine', lastSuccessfulPoll: Date.now() });
       contract.writeReadyFlag('mine');
       return childPid;
     },
-    isReadyFn: contract.isReady, readLockFn: contract.readLock,
+    isReadyFn: contract.isReady, probeFn: contract.probeLease,
   });
   assert.equal(rec.action, 'recovered');
   assert.equal(rec.pid, childPid);
   contract.releaseLock('mine');
 });
 
-test('supervisor detects ready owned by another pid (GPT-REV-079)', async () => {
+test('supervisor detects ready not owned by spawned child (GPT-REV-079)', async () => {
   cleanRuntime();
-  const otherPid = process.pid; // instance khác (sống) — khác với child ta spawn (4242)
+  await bridge.tryAcquireLock('other'); // instance "khác" (pid = process này)
+  contract.writeHealth({ status: 'ready', instanceId: 'other', lastSuccessfulPoll: Date.now() });
+  contract.writeReadyFlag('other');
   const rec = await supervisor.runSupervisorOnce({
     timeoutMs: 1000,
-    startGatewayFn: () => {
-      contract.tryAcquireLock('other');
-      const l = contract.readLock(); l.pid = otherPid; fs.writeFileSync(contract.LOCK_FILE, JSON.stringify(l));
-      contract.writeHealth({ status: 'ready', instanceId: 'other', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
-      contract.writeReadyFlag('other');
-      return 4242; // child ta spawn có pid 4242 != otherPid
-    },
-    isReadyFn: contract.isReady, readLockFn: contract.readLock,
+    startGatewayFn: async () => 4242, // child ta spawn có pid 4242 != owner thật (process.pid)
+    isReadyFn: contract.isReady, probeFn: contract.probeLease,
   });
-  assert.equal(rec.action, 'already-ready-other');
-  assert.equal(rec.pid, otherPid);
+  // probe.show Alive (owner đang giữ) -> nhưng health 'other' match owner -> isReady true ngay.
+  assert.equal(rec.action, 'already-ready');
   contract.releaseLock('other');
 });
 
-test('supervisor monitors a LIVE but not-ready lock, never spawns (GPT-REV-079)', async () => {
+test('supervisor monitors a LIVE but not-ready lease, never spawns (GPT-REV-079)', async () => {
   cleanRuntime();
   let started = false;
-  // lock alive (pid = process.pid sống) nhưng chưa ready -> monitor, không spawn child
-  contract.tryAcquireLock('live-degraded');
+  // lease được giữ (pid = process.pid sống) nhưng chưa ready -> monitor, không spawn child
+  await contract.tryAcquireLock('live-degraded');
   const rec = await supervisor.runSupervisorOnce({
     timeoutMs: 400, startGatewayFn: () => { started = true; return 4242; },
-    isReadyFn: contract.isReady, readLockFn: contract.readLock,
+    isReadyFn: contract.isReady, probeFn: contract.probeLease,
   });
   assert.equal(started, false); // không spawn
   assert.equal(rec.action, 'monitor-degraded');

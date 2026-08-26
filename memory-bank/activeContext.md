@@ -24,17 +24,14 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp). Bố chọn A (Full theo Ac
  9. [x] GPT-REV-077..082 (PR #17): sửa allowlist+path-traversal (077), atomic lock+owner-only (078), verified-startup health gate (079), gatewayEventKey+head SHA+validateEnvelope fail-closed (080), sync test harness 12 case (081). Commit 3b1cea9, push; comment re-review PR #17; notify Telegram legacy (không arm watchdog/merge/deploy).
 
 ## Bước hiện tại
-Hoàn tất vòng fix GPT-REV-078/079/083/084/085 (commit `7ce22d1`). PR #17 = `agent:gpt`+`status:review-requested`, HEAD `7ce22d1` đã push; comment Issue #15 xác nhận re-review 078/079/085. Orchestrator skip (có `agent:gpt`). Issue #15 đồng bộ nhãn.
+Hoàn tất vòng fix GPT-REV-078 lần 2 (chuyển file-lock sang OS-owned TCP lease). PR #17 = `agent:gpt`+`status:review-requested`, HEAD mới đã push `fix/issue-15-telegram-gateway`; chờ GPT re-review tại HEAD mới. Orchestrator skip (có `agent:gpt`). Không merge/deploy/approve; soak-test thật trên máy Bố trước khi xóa legacy.
 
 ## Bằng chứng thực thi
-- **GPT-REV-079 (gốc)**: `supervisor.runSupervisorOnce` thêm nhánh live-degraded — lock sống (pid+heartbeat) nhưng chưa ready → `monitor-degraded`, KHÔNG spawn; `main()` loop coi là không-fail. Test mới dòng 354: `startGatewayFn` không gọi.
-- **GPT-REV-078**: giữ `takeoverLock` không clobber lock tươi (test `takeover never clobbers a live lock`) + owner-only `touchHeartbeat`/`releaseLock`.
-- **GPT-REV-085**: `.clinerules/01`+`05` bỏ các ref `telegram-bridge.mjs`/`watchdog-hibernate.mjs`/`shutdown /h`; drift test #3/#4 exit 0.
-- pnpm test:gateway **23/23 PASS** (incl. monitor-degraded mới).
-- pnpm test:gateway:mp **9/9 PASS** (single-instance lock, ready sau startup, inbound/outbound, SIGTERM release).
-- pnpm test:drift exit 0 (0 FAIL; counter "0 PASS" cố định vì assert #1–4 là block ngoài test(), exit 0 = PASS).
-- node --check supervisor.mjs + test-telegram-gateway.mjs: OK.
-- Commit `7ce22d1` push; HEAD = origin/fix/issue-15-telegram-gateway = 7ce22d1.
+- **GPT-REV-078 (lần 2, đúng yêu cầu)**: BỎ file-lock `LOCK_FILE`/`TAKEOVER_GUARD`/`takeoverLock`/`grabTakeoverGuard`/`statSync→unlinkSync→openSync('wx')`. `tryAcquireLock` = bind **OS-owned TCP port** localhost (`127.0.0.1:47321`, env `GATEWAY_LEASE_PORT`); OS đảm bảo 1 owner, tự thả khi chết → không race, không heartbeat-overwrite, không unlink. `probeLease()` confirm owner khi đọc identity handshake; connect socket đang đóng/không data → not-alive. `isReady()` async: probe lease cùng instanceId + health + READY_FILE.
+- **supervisor** dùng `probeFn` (probeLease) + `await startGatewayFn()`; `--status` probe port.
+- **Test child-process thật (test-gateway-mp.mjs)**: contention (1 giữ,2 exit 3); owner crash→reacquire; old-owner/contender không đổi lease owner mới.
+- pnpm test:gateway **23/23 PASS**; pnpm test:gateway:mp **19/19 PASS**; pnpm test:drift 0 FAIL; node scripts/full-verify.mjs **116/116 PASS**.
+- Commit + push sang `fix/issue-15-telegram-gateway` (HEAD mới) → chờ GPT re-review.
 
 ## Quyết định
 - Chỉ 1 getUpdates poller (lock + heartbeat) -> tránh 409 conflict.

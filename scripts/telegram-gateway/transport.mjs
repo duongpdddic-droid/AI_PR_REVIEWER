@@ -8,10 +8,16 @@ import { withRetry } from '../tg-notify-core.mjs';
 import { CONFIG_FILE, POLL_TIMEOUT_S } from './contract.mjs';
 
 // Ưu tiên: env -> gateway config.json -> legacy ~/.ai-pr-reviewer/tg.json.
+// `GATEWAY_NO_LEGACY_CFG=1` (test) bỏ fallback legacy homedir để deterministic (máy có tg.json thật sẽ không
+// bị dùng bot thật làm poll vô hạn / gây 409).
 export function loadConfig() {
   const env = { botToken: process.env.TG_BOT_TOKEN, chatId: process.env.TG_CHAT_ID, allowedUserIds: parseAllowedUsers(process.env.GATEWAY_ALLOWED_USERS) };
   if (env.botToken && env.chatId) return env;
-  for (const p of [CONFIG_FILE, path.join(os.homedir(), '.ai-pr-reviewer', 'tg.json')]) {
+  const candidates = [CONFIG_FILE];
+  if (!(process.env.GATEWAY_NO_LEGACY_CFG === '1')) {
+    candidates.push(path.join(os.homedir(), '.ai-pr-reviewer', 'tg.json'));
+  }
+  for (const p of candidates) {
     try {
       const c = JSON.parse(fs.readFileSync(p, 'utf8'));
       if (c.botToken && c.chatId) return { botToken: c.botToken, chatId: c.chatId, allowedUserIds: parseAllowedUsers(c.allowedUserIds), _src: p };

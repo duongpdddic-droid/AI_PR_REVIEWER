@@ -5,6 +5,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import net from 'node:net';
 import { EVENT_LABELS, buildMessage, eventKey, NotificationStore, withRetry, escapeHtml } from '../tg-notify-core.mjs';
 
 export { EVENT_LABELS, buildMessage, eventKey, NotificationStore, withRetry, escapeHtml };
@@ -21,14 +22,16 @@ export const QUEUE_DIR = path.join(RUNTIME_DIR, 'queue');
 export const OUTBOUND_DIR = path.join(QUEUE_DIR, 'outbound');
 export const INBOUND_DIR = path.join(QUEUE_DIR, 'inbound');
 export const DEADLETTER_DIR = path.join(QUEUE_DIR, 'deadletter');
-export const LOCK_FILE = path.join(RUNTIME_DIR, 'gateway.lock');
+export const LOCK_FILE = ''; // không còn dùng — OS-owned TCP lease (GPT-REV-078) thay thế file-lock.
 export const HEALTH_FILE = path.join(RUNTIME_DIR, 'health.json');
 export const HEARTBEAT_FILE = path.join(RUNTIME_DIR, 'heartbeat.json');
 export const READY_FILE = path.join(RUNTIME_DIR, 'ready');
 export const CONFIG_FILE = path.join(RUNTIME_DIR, 'config.json');
-// Guard file serialize các takeover contenders (GPT-REV-078 race fix). Chỉ 1 process giữ guard tại 1 thời điểm,
-// nên bước "đọc lock -> nếu vẫn alive thì dừng, nếu stale mới gỡ -> chiếm mới" là nguyên tử với các contenders khác.
-export const TAKEOVER_GUARD = path.join(RUNTIME_DIR, 'gateway.takeover.lock');
+// GPT-REV-078 (Critical): single-instance qua OS-owned TCP lease — bind 1 port localhost độc quyền.
+// OS đảm bảo chỉ 1 process bind được 1 (host,port) cùng lúc => không cần file-lock atomic, không cần
+// stale-takeover scan (OS tự thả port khi owner chết), heartbeat không overwrite-file (owner = người giữ port).
+export const LEASE_HOST = process.env.GATEWAY_LEASE_HOST || '127.0.0.1';
+export const LEASE_PORT = Number(process.env.GATEWAY_LEASE_PORT || 47321);
 
 export const STALE_MS = Number(process.env.GATEWAY_STALE_MS || 60_000);
 export const HEARTBEAT_MS = Number(process.env.GATEWAY_HEARTBEAT_MS || 15_000);
@@ -155,99 +158,95 @@ export function validateEnvelope(p) {
   return true;
 }
 
-// ---- Lock (atomic single instance, chống 409) — GPT-REV-078 ----
-export function readLock() {
-  try { return JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); } catch { return null; }
+// ---- Single-instance qua OS-owned TCP lease (GPT-REV-078 Critical) ----
+// File-lock trước đây (openSync 'wx' + stale takeover + heartbeat overwrite + release unlink) bị
+// check-then-mutate race: contender cũ/owner cũ có thể xóa/ghi đè trạng thái của owner mới. Thay bằng
+// OS-owned primitive: bind 1 TCP port localhost độc quyền. OS đảm bảo chỉ 1 process giữ (host,port),
+// và tự thả port khi owner chết/crash => không cần stale-scan, không cần unlink, không heartbeat-overwrite.
+// Owner là người đang giữ port; người khác không đụng được owner vì port do kernel quản lý, không phải file.
+
+let leaseServer = null; // net.Server đang giữ (nếu process này là owner)
+let leaseOwner = null;  // { instanceId, pid } của owner (chỉ owner nhớ đúng state của mình)
+
+function toLeaseInfo(instanceId) {
+  return { instanceId, pid: process.pid, hostname: os.hostname(), startedAt: Date.now() };
 }
 
-function lockContent(instanceId) {
-  return { instanceId, pid: process.pid, startedAt: Date.now(), lastHeartbeat: Date.now() };
+function isLeaseHeld() { return leaseServer !== null && !leaseServer.closed; }
+
+// Bind port độc quyền (OS-owned). Chỉ 1 process thành công; EADDRINUSE = đã có owner -> duplicate.
+// Trong process này, nếu đang là owner thì trả lease hiện tại (giữ nguyên), không bind lại.
+export function tryAcquireLease(instanceId) {
+  return new Promise((resolve) => {
+    if (isLeaseHeld()) return resolve({ acquired: false, reason: 'duplicate', lease: leaseOwner });
+    const srv = net.createServer();
+    let settled = false;
+    const done = (r) => { if (!settled) { settled = true; resolve(r); } };
+    srv.once('error', (err) => {
+      if (err && (err.code === 'EADDRINUSE' || err.code === 'EACCES')) {
+        done({ acquired: false, reason: 'duplicate', lease: leaseOwner });
+      } else {
+        done({ acquired: false, reason: 'error', lease: null });
+      }
+    });
+    srv.listen(LEASE_PORT, LEASE_HOST, () => {
+      leaseServer = srv;
+      leaseOwner = toLeaseInfo(instanceId);
+      // Handshake: publich identity cho bên probe (supervisor/status) — chỉ đọc, không cho quyền.
+      srv.on('connection', (sock) => {
+        sock.setTimeout(1000);
+        sock.on('timeout', () => { try { sock.destroy(); } catch {} });
+        sock.on('error', () => {});
+        try { sock.end(JSON.stringify({ instanceId: leaseOwner.instanceId, pid: leaseOwner.pid })); } catch {}
+      });
+      done({ acquired: true, lease: leaseOwner });
+    });
+  });
 }
 
-// Chiếm lock bằng primitive atomic: openSync 'wx' fail nếu file đã tồn tại -> chỉ 1 winner.
-// Nếu đã có lock: alive -> duplicate (stand down); stale -> takeover qua rename (verify ownership).
-export function tryAcquireLock(instanceId) {
-  ensureDir(RUNTIME_DIR);
-  try {
-    const fd = fs.openSync(LOCK_FILE, 'wx');
-    try { fs.writeFileSync(LOCK_FILE, JSON.stringify(lockContent(instanceId))); }
-    finally { try { fs.closeSync(fd); } catch {} }
-  } catch (e) {
-    if (e.code === 'EEXIST') {
-      const existing = readLock();
-      if (isLockAlive(existing)) return { acquired: false, reason: 'duplicate', lock: existing };
-      return takeoverLock(instanceId);
-    }
-    throw e;
-  }
-  return { acquired: true, lock: readLock() };
+// Probe owner từ process khác hoặc chính mình. Chỉ xác nhận "alive" khi ĐỌC được identity handshake.
+// Connect thành công tới socket đang đóng (lease vừa release) sẽ `end` ngay KHÔNG có data -> coi là not-alive,
+// tránh giả owner. ECONNREFUSED / timeout -> not-alive. KHÔNG bind, KHÔNG steal.
+export function probeLease(timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    if (isLeaseHeld()) return resolve({ alive: true, lease: leaseOwner });
+    const sock = net.connect(LEASE_PORT, LEASE_HOST);
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; clearTimeout(t); try { sock.destroy(); } catch {} resolve(r); } };
+    const t = setTimeout(() => finish({ alive: false, lease: null }), timeoutMs);
+    sock.on('data', (d) => { try { const o = JSON.parse(d.toString()); finish({ alive: true, lease: o }); } catch {} });
+    sock.on('end', () => finish({ alive: false, lease: null })); // connect tới socket đã đóng -> không phải owner
+    sock.on('error', () => finish({ alive: false, lease: null }));
+  });
 }
 
-// Serialize takeovers bằng 1 guard file atomic ('wx'). Chỉ 1 contender giữ guard tại 1 thời điểm,
-// nên đoạn "đọc lock -> nếu alive dừng, nếu stale mới gỡ -> chiếm mới" không bị 2 process interleave.
-// Guard kẹt (process crash) sẽ được steal sau 1 khoảng > thời gian takeover thông thường.
-function grabTakeoverGuard(timeoutMs) {
-  const deadline = Date.now() + Math.max(2000, timeoutMs);
-  while (Date.now() < deadline) {
-    try { fs.openSync(TAKEOVER_GUARD, 'wx'); return true; }
-    catch (e) {
-      if (e.code !== 'EEXIST') return false;
-      // guard đang bị giữ: nếu đã cũ (holder crash) -> steal
-      try {
-        const st = fs.statSync(TAKEOVER_GUARD);
-        if (Date.now() - st.mtimeMs > Math.max(2000, STALE_MS)) {
-          fs.unlinkSync(TAKEOVER_GUARD);
-          fs.openSync(TAKEOVER_GUARD, 'wx');
-          return true;
-        }
-      } catch { /* lost hoặc đã biến mất */ }
-      return false; // có contender khác đang chiếm guard -> nhường
-    }
-  }
-  return false;
-}
-function releaseTakeoverGuard() { try { fs.unlinkSync(TAKEOVER_GUARD); } catch {} }
-
-// GPT-REV-078 (Critical, fixed): takeover lock cũ STALE mà KHÔNG xóa lock MỚI của process thắng.
-// Quy trình (dưới guard mutex, nguyên tử):
-//   1) đọc lock; nếu alive (pid sống + heartbeat gần) -> duplicate, KHÔNG đụng (chống clobber lock tươi).
-//   2) nếu stale -> gỡ lock cũ, rồi openSync('wx') chiếm mới.
-//      - 'wx' fail (EEXIST) nghĩa là 1 process khác vừa chiếm đúng lúc -> ta thua, yield (KHÔNG overwrite).
-//      - giữa unlink và wx, 1 process tươi có thể wx-create thành công -> wx của ta fail -> yield (đúng).
-//   => không bao giờ ghi đè lock của instance đang sống.
-export function takeoverLock(instanceId, staleMs = STALE_MS) {
-  if (!grabTakeoverGuard(staleMs)) return { acquired: false, reason: 'contended', lock: readLock() };
-  try {
-    const existing = readLock();
-    if (existing && isLockAlive(existing, Date.now(), staleMs)) {
-      return { acquired: false, reason: 'duplicate', lock: existing }; // lock tươi xuất hiện -> không clobber
-    }
-    if (existing) { try { fs.unlinkSync(LOCK_FILE); } catch {} } // chỉ gỡ lock đã xác nhận stale
-    try {
-      const fd = fs.openSync(LOCK_FILE, 'wx'); // atomic; thất bại nếu ai đó đã chiếm -> yield
-      try { fs.writeFileSync(LOCK_FILE, JSON.stringify(lockContent(instanceId))); }
-      finally { try { fs.closeSync(fd); } catch {} }
-      const now = readLock();
-      if (now && now.instanceId === instanceId) return { acquired: true, lock: now };
-      return { acquired: false, reason: 'lost-takeover', lock: now };
-    } catch (e) {
-      if (e.code === 'EEXIST') return { acquired: false, reason: 'duplicate', lock: readLock() };
-      return { acquired: false, reason: 'error', lock: readLock() };
-    }
-  } finally {
-    releaseTakeoverGuard();
-  }
+// OS-owned acquire wrapper (giữ API đối xứng với hệ thống cũ cho gateway/bridge).
+export async function tryAcquireLock(instanceId) {
+  const r = await tryAcquireLease(instanceId);
+  if (r.acquired) return { acquired: true, lock: leaseOwner };
+  return { acquired: false, reason: r.reason, lock: r.lease };
 }
 
-// Owner-only heartbeat: chỉ instance sở hữu lock mới được cập nhật.
+// Trạng thái lease hiện tại: nếu là owner -> info của mình; nếu không -> probe port để biết ai giữ.
+export function readLock() { return isLeaseHeld() ? leaseOwner : null; }
+
+// Thả lease (owner-only). Không có file để unlink — chỉ đóng server để kernel thả port.
+export function releaseLock(instanceId) {
+  if (!isLeaseHeld()) return false;
+  if (instanceId && leaseOwner && leaseOwner.instanceId !== instanceId) return false;
+  const srv = leaseServer;
+  leaseServer = null; leaseOwner = null;
+  try { if (!srv.closed) srv.close(); } catch {}
+  return true;
+}
+
+// Heartbeat cũ (ghi file) KHÔNG còn — owner được OS giữ bằng port nên không cần heartbeat để chứng minh sống.
 export function touchHeartbeat(instanceId) {
-  const cur = readLock();
-  if (!cur) return null;
-  if (instanceId && cur.instanceId !== instanceId) return cur; // không phải owner -> không ghi (chống race)
-  const next = { ...cur, lastHeartbeat: Date.now() };
-  fs.writeFileSync(LOCK_FILE, JSON.stringify(next, null, 2));
-  return next;
+  return isLeaseHeld() ? leaseOwner : null;
 }
+
+// Lease còn sống <=> port đang được giữ (owner). Dùng probe cho view từ process khác.
+export async function isLockAlive() { return (await probeLease()).alive; }
 
 export function isPidAlive(pid) {
   const n = Number(pid);
@@ -255,31 +254,20 @@ export function isPidAlive(pid) {
   try { process.kill(n, 0); return true; } catch { return false; }
 }
 
-export function isLockAlive(lock, now = Date.now(), staleMs = STALE_MS) {
-  if (!lock || typeof lock.pid !== 'number') return false;
-  if (!isPidAlive(lock.pid)) return false;
-  return now - (lock.lastHeartbeat || 0) <= staleMs;
-}
-
-// Chỉ owner (instanceId khớp) mới release được; trả false nếu không phải owner.
-// Không truyền instanceId (admin override, ví dụ --stop) -> force release.
-export function releaseLock(instanceId) {
-  const cur = readLock();
-  if (cur && instanceId && cur.instanceId !== instanceId) return false;
-  try { fs.unlinkSync(LOCK_FILE); return true; } catch { return false; }
-}
 
 // ---- Health / readiness (GPT-REV-079) ----
 export function writeHealth(h) { ensureDir(RUNTIME_DIR); fs.writeFileSync(HEALTH_FILE, JSON.stringify(h, null, 2)); }
 export function readHealth() { try { return JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8')); } catch { return null; } }
-export function isReady(opts = {}) {
+// GPT-REV-078: readiness phải đúng SỐNG người giữ lease (probe port) + health + ready + poll gần nhất.
+// KHÔNG còn đọc file-lock overwrite — owner được xác định bằng OS port đang được giữ và handshake identity.
+export async function isReady(opts = {}) {
   const h = readHealth();
   if (!h || h.status !== 'ready') return false;
   if (!h.instanceId) return false;
-  // GPT-REV-079: health + lock phải cùng 1 instance (tránh nhận ready của instance cũ sau restart/crash).
-  const lk = readLock();
-  if (!lk || lk.instanceId !== h.instanceId) return false;
-  if (!isLockAlive(lk)) return false; // owner còn sống (pid + heartbeat)
+  // Lease phải được giữ REAL bởi cùng instance (probe từ process này/khác đều đúng).
+  const probe = await probeLease(opts.probeTimeoutMs);
+  if (!probe.alive || !probe.lease) return false; // không ai giữ lease -> không ready (owner đã chết/crash)
+  if (probe.lease.instanceId !== h.instanceId) return false; // ready của instance cũ sau crash -> không nhận
   if (!fs.existsSync(READY_FILE)) return false;
   try {
     const rdy = JSON.parse(fs.readFileSync(READY_FILE, 'utf8'));
