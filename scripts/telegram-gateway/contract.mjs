@@ -26,6 +26,9 @@ export const HEALTH_FILE = path.join(RUNTIME_DIR, 'health.json');
 export const HEARTBEAT_FILE = path.join(RUNTIME_DIR, 'heartbeat.json');
 export const READY_FILE = path.join(RUNTIME_DIR, 'ready');
 export const CONFIG_FILE = path.join(RUNTIME_DIR, 'config.json');
+// Guard file serialize các takeover contenders (GPT-REV-078 race fix). Chỉ 1 process giữ guard tại 1 thời điểm,
+// nên bước "đọc lock -> nếu vẫn alive thì dừng, nếu stale mới gỡ -> chiếm mới" là nguyên tử với các contenders khác.
+export const TAKEOVER_GUARD = path.join(RUNTIME_DIR, 'gateway.takeover.lock');
 
 export const STALE_MS = Number(process.env.GATEWAY_STALE_MS || 60_000);
 export const HEARTBEAT_MS = Number(process.env.GATEWAY_HEARTBEAT_MS || 15_000);
@@ -180,22 +183,59 @@ export function tryAcquireLock(instanceId) {
   return { acquired: true, lock: readLock() };
 }
 
-// Takeover khi lock cũ STALE (pid chết / heartbeat quá hạn). Dùng primitive atomic 'wx'
-// để serialize contenders: chỉ 1 process thắng wx -> tránh 2 process cùng chiếm (GPT-REV-078).
-function takeoverLock(instanceId) {
-  const existing = readLock();
-  if (existing && isLockAlive(existing)) return { acquired: false, reason: 'duplicate', lock: existing };
-  if (existing) { try { fs.unlinkSync(LOCK_FILE); } catch {} } // stale -> gỡ rồi chiếm mới
+// Serialize takeovers bằng 1 guard file atomic ('wx'). Chỉ 1 contender giữ guard tại 1 thời điểm,
+// nên đoạn "đọc lock -> nếu alive dừng, nếu stale mới gỡ -> chiếm mới" không bị 2 process interleave.
+// Guard kẹt (process crash) sẽ được steal sau 1 khoảng > thời gian takeover thông thường.
+function grabTakeoverGuard(timeoutMs) {
+  const deadline = Date.now() + Math.max(2000, timeoutMs);
+  while (Date.now() < deadline) {
+    try { fs.openSync(TAKEOVER_GUARD, 'wx'); return true; }
+    catch (e) {
+      if (e.code !== 'EEXIST') return false;
+      // guard đang bị giữ: nếu đã cũ (holder crash) -> steal
+      try {
+        const st = fs.statSync(TAKEOVER_GUARD);
+        if (Date.now() - st.mtimeMs > Math.max(2000, STALE_MS)) {
+          fs.unlinkSync(TAKEOVER_GUARD);
+          fs.openSync(TAKEOVER_GUARD, 'wx');
+          return true;
+        }
+      } catch { /* lost hoặc đã biến mất */ }
+      return false; // có contender khác đang chiếm guard -> nhường
+    }
+  }
+  return false;
+}
+function releaseTakeoverGuard() { try { fs.unlinkSync(TAKEOVER_GUARD); } catch {} }
+
+// GPT-REV-078 (Critical, fixed): takeover lock cũ STALE mà KHÔNG xóa lock MỚI của process thắng.
+// Quy trình (dưới guard mutex, nguyên tử):
+//   1) đọc lock; nếu alive (pid sống + heartbeat gần) -> duplicate, KHÔNG đụng (chống clobber lock tươi).
+//   2) nếu stale -> gỡ lock cũ, rồi openSync('wx') chiếm mới.
+//      - 'wx' fail (EEXIST) nghĩa là 1 process khác vừa chiếm đúng lúc -> ta thua, yield (KHÔNG overwrite).
+//      - giữa unlink và wx, 1 process tươi có thể wx-create thành công -> wx của ta fail -> yield (đúng).
+//   => không bao giờ ghi đè lock của instance đang sống.
+export function takeoverLock(instanceId, staleMs = STALE_MS) {
+  if (!grabTakeoverGuard(staleMs)) return { acquired: false, reason: 'contended', lock: readLock() };
   try {
-    const fd = fs.openSync(LOCK_FILE, 'wx');
-    try { fs.writeFileSync(LOCK_FILE, JSON.stringify(lockContent(instanceId))); }
-    finally { try { fs.closeSync(fd); } catch {} }
-    const now = readLock();
-    if (now && now.instanceId === instanceId) return { acquired: true, lock: now };
-    return { acquired: false, reason: 'lost-takeover', lock: now };
-  } catch (e) {
-    if (e.code === 'EEXIST') return { acquired: false, reason: 'duplicate', lock: readLock() };
-    return { acquired: false, reason: 'error', lock: readLock() };
+    const existing = readLock();
+    if (existing && isLockAlive(existing, Date.now(), staleMs)) {
+      return { acquired: false, reason: 'duplicate', lock: existing }; // lock tươi xuất hiện -> không clobber
+    }
+    if (existing) { try { fs.unlinkSync(LOCK_FILE); } catch {} } // chỉ gỡ lock đã xác nhận stale
+    try {
+      const fd = fs.openSync(LOCK_FILE, 'wx'); // atomic; thất bại nếu ai đó đã chiếm -> yield
+      try { fs.writeFileSync(LOCK_FILE, JSON.stringify(lockContent(instanceId))); }
+      finally { try { fs.closeSync(fd); } catch {} }
+      const now = readLock();
+      if (now && now.instanceId === instanceId) return { acquired: true, lock: now };
+      return { acquired: false, reason: 'lost-takeover', lock: now };
+    } catch (e) {
+      if (e.code === 'EEXIST') return { acquired: false, reason: 'duplicate', lock: readLock() };
+      return { acquired: false, reason: 'error', lock: readLock() };
+    }
+  } finally {
+    releaseTakeoverGuard();
   }
 }
 

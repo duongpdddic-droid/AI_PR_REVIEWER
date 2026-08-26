@@ -40,6 +40,10 @@ Single source of truth cho mọi notify (outbound) và command (inbound) Telegra
   → HEAD thay đổi hoặc app/project khác → khóa khác (không suppress nhầm).
 - **082 — 1 notifier cho mọi appNs**: `processOutbound` đọc `readOutboundAll()` (shared OUTBOUND_DIR)
   xử lý TẤT CẢ registered appNs trong 1 pass; item appNs unknown → `validateEnvelope` fail → deadletter.
+- **083 — Outbound duplicate không làm queue tăng mãi**: `sendItem` skip (SENT store đã có key) thì
+  vẫn `dequeue` item pending → queue không tồn tại mãi mãi các bản duplicate.
+- **084 — Inbound consume mọi namespace**: `gateway.mjs` duyệt `[APP_NS, ...listApps()]` (vd `qldadtxd`)
+  thay vì chỉ `ai-pr-reviewer`; mỗi namespace lỗi không sập vòng lặp namespace khác.
 
 ## Chạy
 ```bash

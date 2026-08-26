@@ -11,8 +11,13 @@ import { processOutbound } from './notifier.mjs';
 import { dispatchInbound } from './dispatcher.mjs';
 import {
   readLock, readHealth, writeHealth, touchHeartbeat, isReady, releaseLock,
-  writeReadyFlag, readQueue, dequeue, HEARTBEAT_MS, READY_FILE, RUNTIME_DIR, APP_NS, enqueue,
+  writeReadyFlag, readQueue, dequeue, listApps, HEARTBEAT_MS, READY_FILE, RUNTIME_DIR, APP_NS, enqueue,
 } from './contract.mjs';
+
+// GPT-REV-084: danh sách namespace inbound cần consume = appNs mặc định + mọi namespace đã có queue inbound.
+export function listInboundNamespaces() {
+  return [...new Set([APP_NS, ...listApps()])];
+}
 
 function makeEnqueue(health) {
   return (appNs, kind, payload) => {
@@ -103,13 +108,19 @@ async function main() {
       await sleep(HEARTBEAT_MS);
     }
   })();
+  // GPT-REV-084: consume inbound của TẤT CẢ namespace đã đăng ký (ai-pr-reviewer + qldadtxd + ...),
+  // không chỉ riêng ai-pr-reviewer. Mỗi namespace lỗi không làm sập vòng lặp của namespace khác.
   const inboundLoop = (async () => {
     while (true) {
       try {
-        const items = readQueue(APP_NS, 'inbound');
-        for (const it of items) {
-          dispatchInbound(it.payload); // Issue #15: KHÔNG verdict self-review, chỉ dispatch command
-          dequeue(APP_NS, 'inbound', it.id);
+        for (const ns of listInboundNamespaces()) {
+          try {
+            const items = readQueue(ns, 'inbound');
+            for (const it of items) {
+              dispatchInbound(it.payload); // Issue #15: KHÔNG verdict self-review, chỉ dispatch command
+              dequeue(ns, 'inbound', it.id);
+            }
+          } catch (e) { console.error('inbound[' + ns + ']: ' + e.message); }
         }
       } catch (e) { console.error('inbound: ' + e.message); }
       await sleep(HEARTBEAT_MS);

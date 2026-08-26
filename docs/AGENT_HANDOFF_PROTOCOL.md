@@ -305,5 +305,5 @@ Thiếu một điều kiện phải báo `IN PROGRESS`, `CHANGES REQUESTED` ho�
 - Riêng `status:blocked` hoặc mở Decision Gate vẫn bắt buộc gửi Telegram hỏi người dùng (xem §8).
 - `node scripts/telegram-bridge.mjs --process` chỉ đọc hàng đợi lệnh cục bộ, **KHÔNG được coi là
   bằng chứng đã thông báo**.
-- Không sửa logic/secret của `notify-telegram.mjs`/`telegram-bridge.mjs`/`watchdog-hibernate.mjs`
-  trừ khi có yêu cầu riêng.
+- Không sửa logic/secret của `notify-telegram.mjs`/`telegram-bridge.mjs`
+  (`watchdog-hibernate.mjs` đã xóa khỏi repo này — Issue #15: gateway quản lý lock/heartbeat/supervisor thay thế) trừ khi có yêu cầu riêng.

@@ -19,6 +19,7 @@ const transport = await import('./telegram-gateway/transport.mjs');
 const bridge = await import('./telegram-gateway/bridge.mjs');
 const notifier = await import('./telegram-gateway/notifier.mjs');
 const supervisor = await import('./telegram-gateway/supervisor.mjs');
+const gateway = await import('./telegram-gateway/gateway.mjs');
 
 let passed = 0;
 let failed = 0;
@@ -28,7 +29,7 @@ const test = (name, fn) => tests.push([name, fn]);
 function cleanRuntime() {
   for (const p of [
     contract.OUTBOUND_DIR, contract.INBOUND_DIR, contract.DEADLETTER_DIR,
-    contract.LOCK_FILE, contract.HEALTH_FILE, contract.READY_FILE,
+    contract.LOCK_FILE, contract.HEALTH_FILE, contract.READY_FILE, contract.TAKEOVER_GUARD,
   ]) {
     try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
   }
@@ -298,6 +299,98 @@ test('processOutbound handles multiple appNs in one pass', async () => {
   assert.equal(r.sent, 2);
   assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0);
   assert.equal(contract.readQueue('qldadtxd', 'outbound').length, 0);
+});
+
+// 16. takeover does NOT clobber a live lock (GPT-REV-078 race fix).
+test('takeover never clobbers a live lock (GPT-REV-078)', () => {
+  cleanRuntime();
+  bridge.tryAcquireLock('live'); // alive lock owned by 'live'
+  const t = contract.takeoverLock('intruder');
+  assert.equal(t.acquired, false);
+  assert.equal(t.reason, 'duplicate'); // live lock untouched
+  assert.equal(contract.readLock().instanceId, 'live');
+  contract.releaseLock('live');
+});
+
+// 17. supervisor proves restart by pid match (GPT-REV-079).
+test('supervisor claims recovered only when child pid owns lock (GPT-REV-079)', async () => {
+  cleanRuntime();
+  const childPid = process.pid; // test process acts as the spawned child
+  const rec = await supervisor.runSupervisorOnce({
+    timeoutMs: 1000,
+    startGatewayFn: () => {
+      contract.tryAcquireLock('mine');
+      const l = contract.readLock(); l.pid = childPid; fs.writeFileSync(contract.LOCK_FILE, JSON.stringify(l));
+      contract.writeHealth({ status: 'ready', instanceId: 'mine', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+      contract.writeReadyFlag('mine');
+      return childPid;
+    },
+    isReadyFn: contract.isReady, readLockFn: contract.readLock,
+  });
+  assert.equal(rec.action, 'recovered');
+  assert.equal(rec.pid, childPid);
+  contract.releaseLock('mine');
+});
+
+test('supervisor detects ready owned by another pid (GPT-REV-079)', async () => {
+  cleanRuntime();
+  const otherPid = process.pid; // instance khác (sống) — khác với child ta spawn (4242)
+  const rec = await supervisor.runSupervisorOnce({
+    timeoutMs: 1000,
+    startGatewayFn: () => {
+      contract.tryAcquireLock('other');
+      const l = contract.readLock(); l.pid = otherPid; fs.writeFileSync(contract.LOCK_FILE, JSON.stringify(l));
+      contract.writeHealth({ status: 'ready', instanceId: 'other', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+      contract.writeReadyFlag('other');
+      return 4242; // child ta spawn có pid 4242 != otherPid
+    },
+    isReadyFn: contract.isReady, readLockFn: contract.readLock,
+  });
+  assert.equal(rec.action, 'already-ready-other');
+  assert.equal(rec.pid, otherPid);
+  contract.releaseLock('other');
+});
+
+// 18. supervisor backoff + circuit breaker avoid restart storm (GPT-REV-079).
+test('supervisor backoff + circuit breaker (GPT-REV-079)', () => {
+  assert.equal(supervisor.computeBackoff(1), 60000);
+  assert.equal(supervisor.computeBackoff(2), 120000);
+  assert.equal(supervisor.computeBackoff(3), 240000);
+  assert.equal(supervisor.computeBackoff(10), supervisor.MAX_BACKOFF_MS); // clamp
+  assert.equal(supervisor.isCircuitOpen(1, 1000, 2000), false);
+  assert.equal(supervisor.isCircuitOpen(5, 1000, 2000), true); // >=5 trong window
+  assert.equal(supervisor.isCircuitOpen(5, 1000, 1000 + supervisor.FAIL_WINDOW_MS + 1), false); // quá window
+});
+
+// 19. notifier dequeues duplicate (skipped) outbound so queue does not grow (GPT-REV-083).
+test('notifier dequeues duplicate outbound (GPT-REV-083)', async () => {
+  cleanRuntime();
+  const cfg = { botToken: 'T', chatId: 'C' };
+  const okFetch = async () => ({ ok: true, status: 200, text: async () => 'ok' });
+  const env = { eventType: 'done', repo: 'R83', ref: '#83', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'a'.repeat(40) };
+  contract.enqueue('ai-pr-reviewer', 'outbound', env);
+  let items = contract.readQueue('ai-pr-reviewer', 'outbound');
+  const r1 = await notifier.sendItem(items[items.length - 1], cfg, { fetchImpl: okFetch, sleep: async () => {} });
+  assert.equal(r1.sent, true);
+  contract.enqueue('ai-pr-reviewer', 'outbound', env); // same key -> duplicate
+  items = contract.readQueue('ai-pr-reviewer', 'outbound');
+  const r2 = await notifier.sendItem(items[items.length - 1], cfg, { fetchImpl: okFetch, sleep: async () => {} });
+  assert.equal(r2.sent, false); assert.equal(r2.skipped, true);
+  assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0); // duplicate dequeued
+});
+
+// 20. gateway consumes inbound for all registered namespaces (GPT-REV-084).
+test('gateway consumes inbound for all namespaces (GPT-REV-084)', () => {
+  cleanRuntime();
+  contract.enqueue('qldadtxd', 'inbound', { command: 'status', args: '', fromId: 'u', appNs: 'qldadtxd', updateId: 9001 });
+  const ns = gateway.listInboundNamespaces();
+  assert.ok(ns.includes('ai-pr-reviewer'));
+  assert.ok(ns.includes('qldadtxd'));
+  assert.equal(contract.readQueue('qldadtxd', 'inbound').length, 1);
+  for (const n of ns) {
+    for (const it of contract.readQueue(n, 'inbound')) contract.dequeue(n, 'inbound', it.id);
+  }
+  assert.equal(contract.readQueue('qldadtxd', 'inbound').length, 0);
 });
 
 // Chạy tuần tự, đếm SAU KHI await xong (GPT-REV-081).

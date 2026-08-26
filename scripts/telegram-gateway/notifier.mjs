@@ -30,7 +30,11 @@ export async function sendItem(item, cfg, { fetchImpl, sleep } = {}) {
     deadletter(item.appNs || APP_NS, 'outbound', item.id, 'invalid');
     return { sent: false, invalid: true, key: null, error: String((e && e.message) || e) };
   }
-  if (!store.shouldSend(key)) return { sent: false, skipped: true, key };
+  // GPT-REV-083: duplicate (đã gửi, key trong SENT store) -> skip VÀ dequeue để queue không tăng mãi.
+  if (!store.shouldSend(key)) {
+    dequeue(item.appNs || APP_NS, 'outbound', item.id);
+    return { sent: false, skipped: true, key };
+  }
   const text = buildMessage(item.payload);
   const r = await sendTelegram({ token: cfg.botToken, chatId: cfg.chatId, text }, { fetchImpl, sleep });
   if (r.ok) {

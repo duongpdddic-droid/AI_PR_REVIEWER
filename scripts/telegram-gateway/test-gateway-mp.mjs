@@ -99,6 +99,12 @@ async function testIntegration() {
   const acked = await waitFor(() => fs.existsSync(ackDir) && fs.readdirSync(ackDir).length > 0, 5000);
   ok('inbound /ping được dispatch (ack file)', acked);
 
+  // 084: qldadtxd inbound cũng được consume (không chỉ ai-pr-reviewer)
+  const before = fs.readdirSync(ackDir).length;
+  enqueue('qldadtxd', 'inbound', { command: 'status', args: '', fromId: 'u', appNs: 'qldadtxd', updateId: 9001 });
+  const qAcked = await waitFor(() => fs.readdirSync(ackDir).length > before, 5000);
+  ok('qldadtxd inbound được dispatch (GPT-REV-084)', qAcked);
+
   // graceful shutdown -> lock + ready bị gỡ
   child.kill('SIGTERM');
   await waitExit(child, 2000);
