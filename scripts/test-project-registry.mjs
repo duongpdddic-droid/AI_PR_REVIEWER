@@ -283,6 +283,25 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   const up0_8 = migrateManifest({ manifest: { schemaVersion: '0.8', projectId: 'p-076c2' }, toVersion: '1.0' });
   falsy('076 up nguồn 0.8 (không phải 0.9) -> fail-closed', up0_8.ok);
   eq('076 reason UNSUPPORTED_MIGRATION_PATH (nguồn 0.8)', up0_8.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  // same-version paths: chỉ 1.0->1.0 idempotent; version lạ bằng nhau -> fail-closed + input bất biến.
+  const snap0808 = JSON.stringify({ schemaVersion: '0.8', projectId: 'p-076f' });
+  const s0808 = JSON.parse(snap0808);
+  const m0808 = migrateManifest({ manifest: s0808, toVersion: '0.8' });
+  falsy('076 up 0.8->0.8 (version lạ) -> fail-closed', m0808.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (0.8->0.8)', m0808.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  eq('076 input 0.8->0.8 bất biến', JSON.stringify(s0808), snap0808);
+  const snap0909 = JSON.stringify({ schemaVersion: '0.9', projectId: 'p-076g' });
+  const s0909 = JSON.parse(snap0909);
+  const m0909 = migrateManifest({ manifest: s0909, toVersion: '0.9' });
+  falsy('076 up 0.9->0.9 (version lạ) -> fail-closed', m0909.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (0.9->0.9)', m0909.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  eq('076 input 0.9->0.9 bất biến', JSON.stringify(s0909), snap0909);
+  const snap2 = JSON.stringify({ schemaVersion: '2.0', projectId: 'p-076h' });
+  const s2 = JSON.parse(snap2);
+  const m2 = migrateManifest({ manifest: s2, toVersion: '2.0' });
+  falsy('076 up 2.0->2.0 (version lạ) -> fail-closed', m2.ok);
+  eq('076 reason UNSUPPORTED_MIGRATION_PATH (2.0->2.0)', m2.reason, 'UNSUPPORTED_MIGRATION_PATH');
+  eq('076 input 2.0->2.0 bất biến', JSON.stringify(s2), snap2);
   const up2_0 = migrateManifest({ manifest: { schemaVersion: '2.0', projectId: 'p-076d' }, toVersion: '1.0' });
   falsy('076 up nguồn 2.0 -> fail-closed', up2_0.ok);
   eq('076 reason UNSUPPORTED_MIGRATION_PATH (nguồn 2.0)', up2_0.reason, 'UNSUPPORTED_MIGRATION_PATH');

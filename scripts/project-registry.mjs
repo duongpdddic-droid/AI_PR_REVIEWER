@@ -301,7 +301,12 @@ export function migrateManifest({ manifest, toVersion = MIGRATION_TO_VERSION, ro
     m.schemaVersion = MIGRATION_FROM_VERSION;
     return { ok: true, direction: 'down', manifest: m, removedKeys: [...new Set(ak)] };
   }
-  return { ok: true, direction: 'none', manifest: m };
+  // [GPT-REV-076] Chỉ 1.0 -> 1.0 mới idempotent (none). Mọi version lạ bằng nhau (0.8->0.8, 0.9->0.9,
+  // 2.0->2.0) fail-closed — không được nhận là no-op.
+  if (from === MIGRATION_TO_VERSION && toVersion === MIGRATION_TO_VERSION) {
+    return { ok: true, direction: 'none', manifest: m };
+  }
+  return { ok: false, reason: 'UNSUPPORTED_MIGRATION_PATH' };
 }
 
 // Đảm bảo mỗi capability có đúng 1 canonical owner.
