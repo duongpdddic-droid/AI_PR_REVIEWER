@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 // bridge.mjs — Single getUpdates poller (inbound). Lock đảm bảo CHỈ 1 instance (chống 409 conflict).
-// Nhận command từ Bố, parse namespace, enqueue vào inbound queue cho agent xử lý.
+// Nhận command từ Bố, parse + validate namespace, enqueue vào inbound queue cho agent xử lý.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, getUpdates } from './transport.mjs';
 import {
-  APP_NS, LOCK_FILE, RUNTIME_DIR, STALE_MS, HEARTBEAT_MS,
-  readLock, writeLock, touchHeartbeat, isLockAlive, releaseLock, enqueue,
+  APP_NS, RUNTIME_DIR, HEARTBEAT_MS,
+  readLock, tryAcquireLock, touchHeartbeat, releaseLock, enqueue, isValidAppNs,
 } from './contract.mjs';
 
 // Parse một update thành { appNs, command, args, raw, updateId } hoặc null (bỏ qua).
 // Quy ước command: "/<appNs>:<lệnh> <args>" hoặc "/<lệnh>" (mặc định APP_NS).
+// appNs KHÔNG hợp lệ (traversal/unknown) -> reject (null) trước khi enqueue (GPT-REV-077).
 export function routeUpdate(update, authorizedChatId) {
   const msg = update && update.message;
   if (!msg) return null;
@@ -25,15 +26,9 @@ export function routeUpdate(update, authorizedChatId) {
   let appNs = APP_NS;
   let command = head;
   if (segs.length >= 2) { appNs = segs[0]; command = segs.slice(1).join(':'); }
+  if (!isValidAppNs(appNs)) return null; // reject traversal/unknown appNs (chat auth không thay thế validation)
   const args = parts.slice(1).join(' ');
   return { appNs, command, args, raw: text, updateId: update.update_id };
-}
-
-// Thử chiếm lock. Nếu đã có instance sống -> {acquired:false, reason:'duplicate'}. Nếu stale -> takeover.
-export function tryAcquireLock(instanceId) {
-  const existing = readLock();
-  if (isLockAlive(existing)) return { acquired: false, reason: 'duplicate', lock: existing };
-  return { acquired: true, lock: writeLock(instanceId, process.pid) };
 }
 
 const OFFSET_FILE = path.join(RUNTIME_DIR, 'offset.json');
@@ -44,19 +39,22 @@ function writeOffset(o) {
   try { fs.writeFileSync(OFFSET_FILE, JSON.stringify({ offset: o })); } catch {}
 }
 
-// Xử lý 1 batch getUpdates (dùng cho --once và trong loop).
+// Xử lý 1 batch getUpdates. Trả { ok, status, updates, offset, enqueued }.
 export async function pollOnce(cfg, { enqueueFn = enqueue, fetchImpl } = {}) {
   const offset = readOffset();
   const r = await getUpdates({ token: cfg.botToken, offset, fetchImpl });
+  let enqueued = 0;
   if (r.ok) {
     for (const u of r.updates) {
       const routed = routeUpdate(u, cfg.chatId);
-      if (routed) enqueueFn(routed.appNs, 'inbound', routed);
+      if (routed) { enqueueFn(routed.appNs, 'inbound', routed); enqueued += 1; }
     }
     writeOffset(r.offset);
   }
-  return r;
+  return { ...r, enqueued };
 }
+
+export { tryAcquireLock };
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -67,7 +65,7 @@ async function main() {
   const instanceId = `${process.pid}-${Date.now()}`;
   const acq = tryAcquireLock(instanceId);
   if (!acq.acquired) {
-    console.error('bridge: instance khác đang chạy (pid=' + acq.lock.pid + ') -> thoát');
+    console.error('bridge: instance khác đang chạy (pid=' + (acq.lock && acq.lock.pid) + ') -> thoát');
     process.exit(3);
   }
   if (argv.includes('--once')) { await pollOnce(cfg); process.exit(0); }
@@ -76,8 +74,10 @@ async function main() {
     try {
       const r = await pollOnce(cfg);
       if (!r.ok && r.status === 429) await sleep((r.retryAfter || 5) * 1000);
+      // 409 = nhiều poller cùng chạy -> lock của ta không hợp lệ -> stand down (không lặp vô hạn).
+      if (r.status === 409) { console.error('bridge: 409 conflict (nhiều poller) -> stand down'); process.exit(3); }
     } catch (e) { console.error('bridge poll error: ' + e.message); }
-    touchHeartbeat(readLock());
+    touchHeartbeat(acq.lock, instanceId);
     await sleep(HEARTBEAT_MS);
   }
 }

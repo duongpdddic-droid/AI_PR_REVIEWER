@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 // notifier.mjs — Single outbound sender. Đọc outbound queue, gửi qua transport (retry/429),
-// idempotency (NotificationStore). KHÔNG gửi trùng; lỗi -> giữ lại để retry sau.
+// idempotency (NotificationStore) theo gatewayEventKey bao gồm appNs/projectId + HEAD.
+// Envelope invalid -> deadletter (không retry vô hạn). KHÔNG gửi trùng; lỗi -> giữ lại retry sau.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, sendTelegram } from './transport.mjs';
-import { buildMessage, eventKey, NotificationStore } from '../tg-notify-core.mjs';
-import { APP_NS, RUNTIME_DIR, HEARTBEAT_MS, readQueue, dequeue } from './contract.mjs';
+import { buildMessage, NotificationStore } from '../tg-notify-core.mjs';
+import {
+  APP_NS, RUNTIME_DIR, HEARTBEAT_MS, readQueue, dequeue, deadletter,
+  gatewayEventKey, validateEnvelope,
+} from './contract.mjs';
 
 // SENT store lưu ở runtime (KHÔNG commit). Tái sử dụng idempotency liên lần restart.
 const SENT_PATH = path.join(RUNTIME_DIR, 'sent.json');
@@ -15,9 +19,17 @@ const store = new NotificationStore({
   save: (m) => fs.writeFileSync(SENT_PATH, JSON.stringify(m, null, 2)),
 });
 
-// Gửi 1 item outbound. payload = {eventType, repo, ref, state, summary, nextAction, link}.
+// Gửi 1 item outbound. payload = {eventType, repo, ref, state, summary, nextAction, link, appNs, head}.
 export async function sendItem(item, cfg, { fetchImpl, sleep } = {}) {
-  const key = eventKey(item.payload);
+  let key;
+  try {
+    validateEnvelope(item.payload);
+    key = gatewayEventKey(item.payload);
+  } catch (e) {
+    // envelope không hợp lệ -> deadletter, không retry vô hạn
+    deadletter(item.appNs || APP_NS, 'outbound', item.id, 'invalid');
+    return { sent: false, invalid: true, key: null, error: String((e && e.message) || e) };
+  }
   if (!store.shouldSend(key)) return { sent: false, skipped: true, key };
   const text = buildMessage(item.payload);
   const r = await sendTelegram({ token: cfg.botToken, chatId: cfg.chatId, text }, { fetchImpl, sleep });
@@ -30,11 +42,11 @@ export async function sendItem(item, cfg, { fetchImpl, sleep } = {}) {
 }
 
 export async function processOutbound(cfg, { fetchImpl, sleep, once } = {}) {
-  const items = readQueue(APP_NS, 'outbound');
+  const items = readQueue(APP_NS, 'outbound').filter((it) => it.appNs === APP_NS);
   let sent = 0;
   for (const it of items) {
     const r = await sendItem(it, cfg, { fetchImpl, sleep });
-    if (r.sent) sent++;
+    if (r.sent) sent += 1;
     if (once) break;
   }
   return { processed: items.length, sent };
