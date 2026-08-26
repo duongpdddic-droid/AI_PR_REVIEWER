@@ -1,3 +1,13 @@
+## 26/08/2026 18:23 — PR #17: handoff GPT re-review (diff-limit Decision Gate) — COMPLETED (handoff restored, chờ GPT)
+- [x] Phát hiện: cron CI orchestrator KHÔNG quét AI_PR_REVIEWER (committed `targetRepos=['QLDA_DTXD']`); PR #17 chỉ pre-review thủ công (config tạm đổi sang AI_PR_REVIEWER).
+- [x] Sai sót vòng trước: PR #17 giữ nhãn cũ `agent:cline`+`status:changes-requested` (từ đợt GPT changes-requested); Issue #15 đã `agent:gpt`+`status:review-requested`. Orchestrator SKIP PR có `agent:gpt` → đồng bộ nhãn PR.
+- [x] Chạy orchestrator pre-review tại HEAD `9978677` (config tạm AI_PR_REVIEWER): `block-decision-gate` (`decisionGate: diff-limit`) vì diff 2399 dòng > `maxLines:1500` (additions+deletions); orchestrator mutate PR #17 sang `status:blocked`.
+- [x] Khôi phục đúng: PR #17 = `agent:gpt`+`status:review-requested` (GPT review trực tiếp, orchestrator skip) — trạng thái từng cho GPT review 078..084; gỡ `status:blocked`.
+- [x] Restore config `targetRepos`=`QLDA_DTXD`; xóa temp script. git status chỉ còn memory-bank (uncommitted).
+- [ ] **DECISION GATE (Mức 3)**: diff 2399 > 1500 giới hạn policy. Bố chọn (A) giữ review trực tiếp / (B) nâng maxLines / (C) chia PR. Hiện giữ (A).
+- [x] CHỜ GPT re-review tại HEAD `9978677`. KHÔNG chạy orchestrator pre-review (sẽ block diff-limit). KHÔNG merge/deploy/approve.
+
+
 ## 26/08/2026 (tiếp) — PR #17 GPT-REV-077..082 hardening (bản FINAL trước handoff GPT) — COMPLETED
 - [x] Tiếp nối phiên trước: sửa tiếp transport (allowlist user) + bridge (routeUpdate user allowlist + reject forwarded/channel) + notifier (processOutbound đọc readOutboundAll cho mọi appNs) + gateway (fetchImpl test hook, touchHeartbeat mới, READY_FILE JSON, inbound dispatch loop, dọn stale ready) + tạo dispatcher.mjs (chỉ dispatch command, KHÔNG self-review).
 - [x] Sửa 3 bug thực tế bắt bằng test: (1) `takeoverLock` stale check sai (L-036) → giờ check `isLockAlive`; (2) `HEARTBEAT_MS` hardcoded 15000 bỏ qua env (L-037) → đọc env `GATEWAY_HEARTBEAT_MS`/`GATEWAY_STALE_MS`; (3) test idempotency trùng key (L-038) → key unique.
@@ -422,3 +432,14 @@ IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR 
 - [x] Kết quả: **PRE_REVIEW_FINDINGS (3 critical, openBlocking=3, outcome=request-fix)**. 3 findings đều FALSE POSITIVE: secret-scanner flag test fixtures giả trong `scripts/test-project-registry.mjs` dòng 66/134/137 (`'AKIAIOSFODNN7EXAMPLE'`, `'sk-1234567890abcdef'` — key giả để test AC4/AC10 của chính bộ quét). KHÔNG phải rò rỉ thật.
 - [x] Orchestrator deterministic fail-closed: set `status:changes-requested` + post comment issuecomment-5419225160. KHÔNG handoff GPT, KHÔNG merge/deploy, KHÔNG sửa code. Config + Temp đã restore/dọn.
 - [ ] DECISION GATE (Mức 3): Bố chọn (A) chấp nhận false positive + thủ công post marker/restore labels, (B) sửa test fixtures placeholder rồi re-run orchestrator, hoặc (C) để nguyên fail-closed chờ GPT. PR state: `agent:cline` + `status:changes-requested`.
+
+## 26/08/2026 (tiếp) — PR #17 GPT-REV-078/079/083/084 hardening (sau CHANGES_REQUESTED) — COMPLETED (handoff GPT)
+- [x] Sóc re-review PR #17: CHANGES_REQUESTED (đóng 077/080/081/082; mở 078 Critical, 079/083/084 Important + doc watchdog).
+- [x] 078: `contract.mjs` takeoverLock dùng guard file `gateway.takeover.lock` (`openSync('wx')` atomic) serialize contenders; re-check `isLockAlive` dưới guard; stale → unlink rồi `wx`-create, yield nếu EEXIST (KHÔNG ghi đè lock đang sống). Thêm `TAKEOVER_GUARD` const.
+- [x] 079: `supervisor.mjs` `runSupervisorOnce` ghi nhận pid child, chỉ claim `recovered` khi lock ready ĐÚNG pid child (khác → `already-ready-other`, không kill); thêm `computeBackoff` (cấp số nhân, clamp 5p) + `isCircuitOpen` (≥5 fail/10p) chống restart storm.
+- [x] 083: `notifier.mjs` `sendItem` skip duplicate vẫn `dequeue` pending → queue không tăng mãi.
+- [x] 084: `gateway.mjs` inboundLoop duyệt `[APP_NS, ...listApps()]` (ai-pr-reviewer + qldadtxd + ...), mỗi ns lỗi không sập loop ns khác; export `listInboundNamespaces`.
+- [x] Docs: `AGENT_HANDOFF_PROTOCOL.md` bỏ ref `watchdog-hibernate.mjs` (đã xóa); README thêm 083/084.
+- [x] Tests: `test-telegram-gateway.mjs` 22/22 (+6: 078-clobber, 079-proof×2, 079-backoff, 083, 084); `test-gateway-mp.mjs` 9/9 (+1 qldadtxd inbound); `full-verify` 116/116; `pnpm test` 192/192 PASS.
+- [x] Commit `9978677` push `eb05ab4..9978677` (fix/issue-15-telegram-gateway). Comment CLINE-FIX trên PR #17. Labels Issue #15 = `agent:gpt`+`status:review-requested` (đúng). Notify Telegram 816272951 EXIT=0.
+- [ ] Chờ GPT re-review tại HEAD `9978677`. KHÔNG merge/deploy/approve. Soak test máy thật vẫn là bước thủ công trước xóa `notify-telegram.mjs` legacy.

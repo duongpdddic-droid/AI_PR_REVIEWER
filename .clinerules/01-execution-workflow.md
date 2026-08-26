@@ -31,7 +31,7 @@ Khi task khởi tạo từ lệnh Telegram `[NEW]` (có `msg_id`):
 1. Tự lập plan nội bộ.
 2. Gửi báo cáo kế hoạch về DM Bố (`node scripts/notify-telegram.mjs`).
 3. **Chuyển thẳng sang thực thi** — không chờ phê duyệt.
-4. Sau hoàn thành: `node scripts/telegram-bridge.mjs --reply <msg_id> "✅ <kết quả đã verify>"`.
+4. Sau hoàn thành: thông báo trạng thái qua `node scripts/notify-telegram.mjs --event '<json>'` (eventType=done, idempotent); ghi evidence + commit trong repo.
 
 Nếu trong lúc tự hành phát sinh vấn đề Mức 3 (Decision Gate — xem §5): tạm dừng riêng bước đó, gửi câu hỏi qua scripts/progress-report.mjs tới DM Bố, và chờ trả lời trước khi tiếp tục bước đó. Các bước khác không phụ thuộc vào quyết định này vẫn có thể tiếp tục song song. Không tự ý quyết Mức 3 chỉ vì đang ở kênh tự hành.
 
@@ -55,7 +55,7 @@ Không hỏi: tên biến/hàm nội bộ, thứ tự bước đã xác định,
   - **Không có timeout tự động** — chờ vô thời hạn tới khi Bố phản hồi.
   - Trong lúc chờ: **KHÔNG** được tự suy diễn câu trả lời để tiếp tục task.
   - Áp dụng cả khi đang ở kênh tự hành Telegram (xem §3.2).
-  - **Hook trước khi hỏi**: bất kỳ câu hỏi nào dành cho Bố (Decision Gate hay thường) → BẮT BUỘC chạy `node scripts/telegram-bridge.mjs --process` trước. Nếu có lệnh `[NEW]` mới hơn (msg_id > câu hỏi đang chuẩn bị): ưu tiên xử lý lệnh đó trước, rồi gộp câu hỏi vào 1 tin — tránh 2 luồng chờ lẫn nhau.
+  - **Hook trước khi hỏi**: bất kỳ câu hỏi nào dành cho Bộ (Decision Gate hay thường) → BẮT BUỘC kiểm tra trạng thái gateway (`node scripts/telegram-gateway/supervisor.mjs --status`) trước; đọc state local (~/.ai-pr-reviewer/gateway/) để phát hiện `[NEW]` chưa xử lý. Nếu có lệnh mới → ưu tiên xử lý trước, rồi gộp câu hỏi vào 1 tin — tránh 2 luồng chờ lẫn nhau.
   - **Quy trình batch thay đổi** (khi sửa nhiều lỗi/thay đổi nhỏ đã rõ nguyên nhân trong cùng 1 phạm vi file/module): gom lại sửa 1 lượt rồi chạy `full-verify.mjs` 1 lần, thay vì verify sau mỗi thay đổi đơn lẻ — vẫn giữ ranh giới 1 giai đoạn = 1 commit. Chỉ tách verify riêng khi 1 thay đổi có rủi ro cao/không chắc chắn, cần cô lập để dễ xác định nguyên nhân nếu fail.
 
 ## 6. Giữ phạm vi
@@ -66,16 +66,16 @@ Chỉ kết thúc khi: task/plan hoàn thành; kiểm tra phù hợp đã chạy
 - **Cấm báo hoàn thành chỉ vì context compact/tràn** (xem `02-memory-bank.md` §9).
 - **Báo cáo từng bước**: sau mỗi milestone, `node scripts/progress-report.mjs --force "<tiêu đề>" "<chi tiết>"` (DM Bố `816272951`).
 - **Gộp báo cáo milestone**: các milestone cách nhau <3 phút → gộp thành 1 lần gửi (1 lệnh `--force` cho cả nhóm) để tránh spam Telegram.
-- **Báo cáo tổng kết**: khi task xong, `node scripts/notify-telegram.mjs "<tiêu đề>" "<tóm tắt>"` (script tự arm watchdog 90p). Nếu thiếu token trong `~/.qldadtxd/tg.json` → ghi nợ nhắc Bố.
+- **Báo cáo tổng kết**: khi task xong, `node scripts/notify-telegram.mjs --event '<json>'` (eventType=done, idempotent; send+retry/silence do gateway transport chịu). Nếu thiếu token/chatId (`~/.ai-pr-reviewer/tg.json` hoặc env TG_BOT_TOKEN/TG_CHAT_ID) → ghi nợ nhắc Bộ.
 
-### Ma trận script Telegram & Watchdog
+### Ma trận script Telegram Gateway
 | Script | Mục đích | Kênh / Chat ID | Kích hoạt |
 |---|---|---|---|
-| `scripts/telegram-bridge.mjs` | Hàng đợi lệnh 2 chiều (`--listen`, `--process`, `--reply`) | Trả lời đúng `chat_id` nguồn chứa `msg_id` | Khởi động phiên / xử lý task Telegram `[NEW]` |
+| `scripts/telegram-gateway/gateway.mjs` | Poller getUpdates + inbound dispatch + outbound process — 1 process, 1 poller (tránh 409) | — | Được `supervisor.mjs` spawn; kiểm tra bởi `supervisor.mjs --status` |
+|| `scripts/telegram-gateway/supervisor.mjs` | Đảm bảo 1 gateway instance; tự heal (spawn/recover); `--stop` để dừng | — | `--status` / `--once` / `--stop` |
 | `scripts/progress-report.mjs` | Báo cáo tiến độ từng bước/milestone | Chỉ DM Bố `816272951` | Ngay sau mỗi bước (cờ `--force`) |
-| `scripts/notify-telegram.mjs` | Báo cáo kế hoạch + tổng kết hoàn thành; `--event <json>` dùng chuẩn message + chống gửi trùng | Chỉ DM Bố `816272951` | Sau lập kế hoạch / khi task xong (tự arm watchdog) |
-| `scripts/tg-notify-core.mjs` | Lõi thuần: `buildMessage`, `eventKey`(idempotency `repo::ref::event::state`), `NotificationStore`, watchdog silence levels | — | Test: `pnpm test:tg` |
-| `scripts/watchdog-hibernate.mjs` | Daemon tự ngủ đông + theo dõi im lặng (daemon gửi `timeout-level1/2` đúng 1 lần/cấp, `--heartbeat` reset khi Cline hoạt động, heartbeat không guard = no-op) | Ngầm hệ thống | `shutdown /h` khi hết hạn, không lệnh mới, máy idle |
+| `scripts/notify-telegram.mjs` | Báo cáo kế hoạch + tổng kết; `--event <json>` dùng chuẩn message + chống gửi trùng (idempotency) | Chỉ DM Bố `816272951` | Sau lập kế hoạch / khi task xong |
+| `scripts/tg-notify-core.mjs` | Lõi thuần: `buildMessage`, `eventKey`(idempotency `repo::ref::event::state`), `NotificationStore`, gateway silence levels | — | Test: `pnpm test:tg` |
 
 ### Mở rộng §7 — Protocol thông báo (Issue #16)
 Tại mọi điểm dừng/chờ/bàn giao, trước khi kết thúc phiên hoặc gửi Telegram:
@@ -87,7 +87,6 @@ Tại mọi điểm dừng/chờ/bàn giao, trước khi kết thúc phiên ho�
    - Retry sau lỗi gửi được phép; retry sau đã SENT không tạo tin thứ 2 (mark SENT chỉ khi gửi thành công).
    - `nextAction` luôn nêu rõ người dùng cần làm tiếp (nhất là `needs-input`/`blocked`).
 3. Không kết thúc phiên nếu notifier FAIL (fail-closed): ghi bằng chứng, không báo hoàn thành.
-4. Cline hoạt động lại giữa chừng → `node scripts/watchdog-hibernate.mjs --heartbeat` để reset watchdog im lặng, tránh gửi cảnh báo timeout cũ.
 
 **Ma trận sự kiện → Telegram → GitHub state** (fixture test trong `scripts/test-tg-notify.mjs`):
 
@@ -103,11 +102,10 @@ Tại mọi điểm dừng/chờ/bàn giao, trước khi kết thúc phiên ho�
 
 *Lưu ý bảo mật*: KHÔNG gửi báo cáo task con/tiến độ vào group `QLDA_DDIC` (`-5403998356`). Group chỉ nhận báo cáo nghiệp vụ từ Web App.
 
-## 8. Tự ngủ đông (watchdog)
-- `notify-telegram.mjs` tự arm watchdog 90 phút (`~/.qldadtxd/guard.json`, daemon `watchdog-hibernate.mjs`).
-- Trong 90p: lệnh mới `[NEW]` hoặc `--cancel` → hủy ngủ đông.
-- Hết hạn + máy idle ≥30p → `shutdown /h`; máy đang dùng → hoãn 30p.
-- Không tự ý vô hiệu watchdog; muốn tắt phải hỏi Bố.
+## 8. Lifecycle & Power-State
+- Gateway instance lifecycle (inbound polling + outbound processing + silence/timeout monitoring) do `scripts/telegram-gateway/supervisor.mjs` quản lý (auto-spawn / tự heal). Cline **không** arm/heartbeat/hibernate bất kỳ daemon nào — chỉ dùng `supervisor.mjs --status` để kiểm tra, `--once` để đảm bảo gateway chạy, `--stop` để dừng.
+- Timeout (`timeout-level1`/`timeout-level2`) được gateway supervisor gửi khi cửa sổ im lặng; Cline không chủ động reset watchdog.
+- **Power-state (sleep/hibernate/shutdown)**: LUÔN dưới chỉ thị trực tiếp của Bố — xem `05-terminal-safety.md` §5. Cline KHÔNG tự động sleep/hibernate/shutdown dựa trên Telegram timeout.
 
 ## 9. Quy tắc Git
 - Commit message viết tiếng Anh theo chuẩn Conventional Commits; giao tiếp với Bố trong chat vẫn luôn tiếng Việt (§1 không áp dụng cho nội dung commit).
@@ -118,8 +116,8 @@ Tại mọi điểm dừng/chờ/bàn giao, trước khi kết thúc phiên ho�
 - Không reset/xóa thay đổi của người dùng nếu chưa có chỉ thị rõ ràng.
 
 ## 10. Auto-Boot (khởi động mỗi phiên — 1 chu kỳ Telegram duy nhất)
-1. Chạy một chu kỳ kiểm tra Telegram: `node scripts/telegram-bridge.mjs --listen` rồi `node scripts/telegram-bridge.mjs --process`.
-2. Nếu `--process` exit code `3` → có lệnh `[NEW]`: đọc `~/.qldadtxd/inbox.md`, lấy `msg_id`, coi nội dung message là **Primary Task Instruction**, thực thi theo §3.2, reply `--reply <msg_id>` khi xong.
+1. Chạy một chu kỳ kiểm tra Telegram: `node scripts/telegram-gateway/supervisor.mjs --status` (đảm bảo gateway đang chạy; exit non-zero nếu lỗi cấu hình) rồi đọc state local từ `~/.ai-pr-reviewer/gateway/`.
+2. Nếu có lệnh `[NEW]` (gateway inbound) → coi nội dung message là **Primary Task Instruction**, thực thi theo §3.2.
 2b. **GitHub task intake (read-only)**: chạy `node scripts/github-task-intake.mjs`. Nếu ra `TASKS_FOUND` với đúng 1 Issue `agent:cline + status:ready-for-cline` → chạy `node scripts/github-task-intake.mjs --claim <số>` để claim, xác nhận `CLAIMED` bằng read-after-write (labels từ xa đúng `agent:cline` + `status:in-progress`), rồi thực thi task theo §13. Nếu `NO_TASK`/`BLOCKED_MULTIPLE_TASKS`/`BLOCKED_DIRTY_WORKTREE` → xử lý theo trạng thái và tiếp tục.
 2c. **Preflight workspace/Git trước mọi mutation khi `--claim` (Issue #20)**: trước khi `--claim` đụng bất kỳ mutation git/GitHub nào, chạy `runPreflight()` (thứ tự chặn cố định — xem §13 "Khi bắt đầu"). Mọi trạng thái chặn đều fail-closed: KHÔNG đổi label, không tạo branch, không fetch-tự-động-sửa, không reset/stash/clean. Nếu bị `BLOCKED_MULTIPLE_WORKSPACES` (phát hiện workspace anh em cùng remote canonical trong thư mục cha) → dừng, báo Bố xin phép dọn/di chuyển các clone cũ hoặc xác nhận `GITHUB_TASK_INTAKE_ALLOW_MULTI=1` — không tự xóa.
 3. Đọc Memory Bank (`memory-bank/activeContext.md`, `memory-bank/progress.md`).
@@ -149,17 +147,17 @@ AUTO-BOOT → Telegram --process
 
 **GitHub task intake (checkpoint an toàn)**: chạy lại `node scripts/github-task-intake.mjs` (read-only) tại các điểm an toàn trong vòng lặp (sau milestone lớn, trước kết thúc phiên) — KHÔNG poll dày, KHÔNG chạy song song khi daemon/task khác đang mutation. Telegram Decision Gate vẫn ưu tiên. Giới hạn: cơ chế KHÔNG thể đánh thức Cline/VS Code đang tắt; chỉ tự nhận khi Cline đang chạy hoặc phiên mới Auto-Boot.
 
-## 11a. Hook quét Telegram giữa task (Cách a — Bố chốt 16/08/2026)
-Mục đích: nhận lệnh Telegram cả khi Cline đang giữa task, không chỉ lúc Auto-Boot. Chi phí 0 — `--process` đọc file local, không token/time đáng kể.
-- **Chạy `node scripts/telegram-bridge.mjs --process` tại các điểm sau** (kể cả khi không có task Telegram đang xử lý):
+## 11a. Hook kiểm tra gateway giữa task (Cách a — Bố chống 16/08/2026)
+Mục đích: kiểm tra trạng thái gateway khi Cline đang giữa task, không chỉ lúc Auto-Boot. Chi phí 0 — `supervisor.mjs --status` đọc state file local (~/.ai-pr-reviewer/gateway/), không gọi API.
+- **Chạy `node scripts/telegram-gateway/supervisor.mjs --status` tại các điểm sau** (kể cả khi không có task Telegram đang xử lý):
   1. Sau mỗi milestone lớn (trước Verify tiếp theo nếu thuận tiện).
   2. Trước khi báo cáo tổng kết/hoàn thành task.
   3. Trước khi kết thúc phiên làm việc.
   4. Trước mọi câu hỏi gửi Bố (xem hook §5 Decision Gate).
-- **Khi `--process` exit code `3`** → có `[NEW]` mới hơn msg đang xử lý: tạm dừng task hiện tại ở ranh giới milestone an toàn, xử lý lệnh Telegram trước (theo §3.2), reply xong rồi quay lại task cũ. Không nhảy giữa chừng mutation/verify.
+- **Khi gateway không ready / recovery-failed** → inbound đang không hoạt động: ghi evidence, thông báo Bộ qua `notify-telegram.mjs --event` (eventType=blocked), tiếp tục task con tại ranh giới an toàn. Không tự suy diễn trạng thái.
 - **Lưu ý bảo mật/độ tin cậy**:
-  - CẤM chạy `--listen`/probe getUpdates song song khi daemon đang chạy → Telegram 409 conflict, daemon miss lệnh.
-  - `--process` chỉ đọc; `--listen` mới gọi API. Luồng chuẩn giữa task: chỉ `--process` (không cần `--listen` vì daemon đã poll sẵn).
+  - CẤM chạy poller/getUpdates song song khi gateway đang chạy → Telegram 409 conflict.
+  - Chỉ `gateway.mjs` (qua supervisor spawn) mới gọi getUpdates API; Cline chỉ đọc state local.
 
 ## 12. Context Budget Checkpoint (flush memory + compact chủ động)
 - **Lý do**: agent không đo được chính xác token context → dùng heuristic; auto-condense của Cline chưa đáng tin (session hay bị `stale_session_reconciler` giết, reason `failed_external_process_exit`) → phải chủ động checkpoint TRƯỚC khi chạm trần, không lệ thuộc auto-condense.
@@ -187,7 +185,7 @@ Mục đích: nhận lệnh Telegram cả khi Cline đang giữa task, không ch
 - Khi bắt đầu:
   1. Đọc toàn bộ Issue và comment mới nhất.
   2. Reconcile Issue với repository và Memory Bank.
-  3. Nếu mâu thuẫn không thể tự giải quyết, gắn `status:blocked` và hỏi người dùng — **BẮT BUỘC** gửi Telegram qua `node scripts/notify-telegram.mjs` (GPT-REV-006): kiểm tra exit code, ghi `SENT`/`FAILED` vào Memory Bank; `telegram-bridge.mjs --process` không phải bằng chứng đã thông báo.
+   3. Nếu mâu thuẫn không thể tự giải quyết, gắn `status:status:blocked` và hỏi người dùng — **BẮT BUỘC** gửi Telegram qua `node scripts/notify-telegram.mjs --event '<json>'` (GPT-REV-006): kiểm tra exit code, ghi `SENT`/`FAILED` vào Memory Bank; notify-telegram exit 0 mới là bằng chứng đã thông báo.
   4. Claim khi repository **sạch** + HEAD hợp lệ (không detached) + đang ở `main`/`master` — tự động qua `node scripts/github-task-intake.mjs --claim` (Idempotent, fail-closed, read-after-write, marker `cline-claim` đi kèm verify labels `agent:cline` + `status:in-progress`; marker có nhưng labels sai → `BLOCKED_READBACK_MISMATCH`) hoặc thủ công bằng `gh issue edit`; chỉ báo `CLAIMED` khi labels từ xa xác nhận. **KHÔNG yêu cầu task branch/upstream tồn tại trước claim**; đang ở branch task cũ hoặc detached HEAD → chặn (`BLOCKED_ACTIVE_ISSUE_BRANCH` / `DETACHED_HEAD`).
   4b. **Preflight bắt buộc (Issue #20 — workspace/Git sạch trước mọi mutation)**: `--claim` chỉ mutation sau khi `runPreflight()` trả `PREFLIGHT_OK`. Thứ tự chặn cố định (dừng tại điều kiện đầu tiên vi phạm, fail-closed):
      - `ERROR_GIT` — không xác định được repo root (KHÔNG suy đoán từ tên thư mục).
@@ -232,5 +230,7 @@ Mục đích: nhận lệnh Telegram cả khi Cline đang giữa task, không ch
   - Chỉ GPT approval cuối; approval khóa HEAD SHA — HEAD đổi là vô hiệu, GPT phải review lại.
   - Approval-drift: PR `status:approved` thiếu marker hợp lệ → orchestrator gỡ hiệu lực tự động.
   - Merge/deploy luôn thuộc người dùng.
+
+
 
 

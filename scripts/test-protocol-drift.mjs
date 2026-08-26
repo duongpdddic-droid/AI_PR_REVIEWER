@@ -67,7 +67,34 @@ const sentencesOf = (file) => stripFences(fs.readFileSync(file, 'utf8'))
       if (canonSet.has(s)) dupes.push(`${rel}: "${s.slice(0, 60)}..."`);
     }
   }
-  assert.deepEqual(dupes, [], `câu quy tắc nhân bản từ canonical protocol:\n${dupes.join('\n')}`);
+    assert.deepEqual(dupes, [], `câu quy tắc nhân bản từ canonical protocol:\n${dupes.join('\n')}`);
+}
+
+// 3. (GPT-REV-085) Không rule nào trong .clinerules/ được tham chiếu đến script đã xóa (watchdog-hibernate.mjs).
+//    Tombstone notes trong docs/README (ghi chú "đã xóa") là thông tin chương trình — không phải rule active.
+{
+  const ruleFiles = walk(ROOT, ['.md']).filter((p) => {
+    const rel = path.relative(ROOT, p).split(path.sep).join('/');
+    return rel.startsWith('.clinerules/');
+  });
+  const deletedRefs = [];
+  for (const f of ruleFiles) {
+    const raw = fs.readFileSync(f, 'utf8');
+    if (raw.includes('watchdog-hibernate')) deletedRefs.push(path.relative(ROOT, f).split(path.sep).join('/'));
+  }
+  assert.deepEqual(deletedRefs, [], `rule doc tham chiếu script đã xóa (watchdog-hibernate.mjs):\n${deletedRefs.join('\n')}`);
+}
+
+// 4. (GPT-REV-085) File rule watchdog-protokol (.clinerules/01) không được chứa lệnh tự động arm/heartbeat/shutdown /h.
+//    Lưu ý: `shutdown /h` hợp lệ ở .clinerules/05-terminal-safety.md §5 (dòng lệnh power-state dưới chỉ thị Bộ) — KHÔNG bị ở đây.
+{
+  const f = path.join(ROOT, '.clinerules', '01-execution-workflow.md');
+  const raw = fs.readFileSync(f, 'utf8');
+  const bad = [];
+  for (const m of ['arm watchdog', '--heartbeat', 'shutdown /h']) {
+    if (raw.includes(m)) bad.push(m);
+  }
+  assert.deepEqual(bad, [], `01-execution-workflow.md còn lệnh tự động watchdog arm/heartbeat/shutdown /h:\n${bad.join('\n')}`);
 }
 
 console.log(`\nprotocol-drift: ${passed} PASS${process.exitCode ? ' (có FAIL)' : ''}`);

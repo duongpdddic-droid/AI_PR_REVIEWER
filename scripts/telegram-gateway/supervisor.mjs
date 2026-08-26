@@ -20,11 +20,16 @@ export function startGateway(env = process.env) {
 
 // Quyết định 1 chu kỳ supervisor (injectable để test — GPT-REV-079/081):
 // - đã ready -> 'already-ready'
+// - lock còn sống (owner pid + heartbeat) nhưng CHƯA ready -> 'monitor-degraded' (chỉ theo dõi, KHÔNG spawn —
+//   instance đang chạy nhưng xuống cấp; spawn thêm sẽ chết vì duplicate, gây restart storm)
 // - spawn xong, đợi ready, VÀ lock ready đúng là child ta spawn (chứng minh restart đúng child) -> 'recovered'
 // - ready nhưng lock thuộc pid khác -> 'already-ready-other' (instance khác đang chạy, KHÔNG kill)
 // - hết timeout mà không ready -> 'recovery-failed'
 export async function runSupervisorOnce({ startGatewayFn = startGateway, isReadyFn = isReady, readLockFn = readLock, timeoutMs = 5000 } = {}) {
   if (isReadyFn()) return { action: 'already-ready' };
+  // GPT-REV-079: lock sống + chưa ready = live-degraded -> monitor, không spawn (dead/stale mới spawn 1).
+  const cur = readLockFn();
+  if (cur && isLockAlive(cur)) return { action: 'monitor-degraded', pid: cur.pid };
   const childPid = startGatewayFn(); // pid của child ta vừa spawn (nếu có)
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -79,7 +84,7 @@ function main() {
     let windowStart = 0;
     while (true) {
       const r = await runSupervisorOnce();
-      if (r.action === 'recovered' || r.action === 'already-ready' || r.action === 'already-ready-other') {
+      if (r.action === 'recovered' || r.action === 'already-ready' || r.action === 'already-ready-other' || r.action === 'monitor-degraded') {
         consecutiveFails = 0; windowStart = 0;
         await sleep(STALE_MS / 2);
         continue;

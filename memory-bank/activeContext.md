@@ -24,7 +24,7 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp). Bố chọn A (Full theo Ac
  9. [x] GPT-REV-077..082 (PR #17): sửa allowlist+path-traversal (077), atomic lock+owner-only (078), verified-startup health gate (079), gatewayEventKey+head SHA+validateEnvelope fail-closed (080), sync test harness 12 case (081). Commit 3b1cea9, push; comment re-review PR #17; notify Telegram legacy (không arm watchdog/merge/deploy).
 
 ## Bước hiện tại
-Hoàn tất sửa toàn bộ GPT-REV-077..082 + docs + tests (unit 16/16, integration 8/8, verify 116/116). Đang commit/push, comment CLINE-FIX PR #17, handoff GPT, notify Telegram.
+Hoàn tất vòng fix GPT-REV-078/079/083/084 (commit `9978677`). PR #17 = `agent:gpt`+`status:review-requested` chờ GPT re-review trực tiếp tại HEAD `9978677` (orchestrator skip vì có `agent:gpt`). Issue #15 đồng bộ nhãn. Config restored, temp script dọn.
 
 ## Bằng chứng thực thi
 - node --check toàn bộ scripts gateway + core/notify/orchestrator/autonomous: PASS.
@@ -45,6 +45,7 @@ Hoàn tất sửa toàn bộ GPT-REV-077..082 + docs + tests (unit 16/16, integr
 ## Vấn đề trì hoãn
 - [ ] Soak test thực tế (chạy gateway trên máy Bố) trước khi xóa hẳn notify-telegram.mjs legacy.
 - [ ] Có thể mở rộng adapter QLDA_DTXD nếu Bố cần.
+- [ ] **DECISION GATE (Mức 3)**: diff PR #17 = 2399 dòng > giới hạn policy `maxLines:1500` (additions+deletions, `blocking-decision-gate`). Orchestrator pre-review luôn `block-decision-gate` nếu PR ở `agent:cline`. GPT review PR này TRỰC TIẾP (`agent:gpt`+`status:review-requested`, orchestrator skip). Bố chọn: (A) giữ review trực tiếp / (B) nâng `maxLines` / (C) chia PR nhỏ. Hiện giữ (A).
 
 ## Bước tiếp theo
-Commit + push fix/issue-15-telegram-gateway; gh pr comment 17 CLINE-FIX; handoff GPT (status:review-requested, agent:gpt) tại HEAD mới; notify Telegram báo hoàn thành. KHÔNG merge/deploy/approve.
+CHỜ GPT re-review tại HEAD `9978677` (PR #17 = `agent:gpt`+`status:review-requested`, orchestrator skip). KHÔNG chạy orchestrator pre-review (sẽ `block-decision-gate` do diff 2399 > 1500). KHÔNG merge/deploy/approve. Soak test máy thật vẫn là bước thủ công trước xóa `notify-telegram.mjs` legacy.

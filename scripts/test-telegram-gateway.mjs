@@ -351,6 +351,21 @@ test('supervisor detects ready owned by another pid (GPT-REV-079)', async () => 
   contract.releaseLock('other');
 });
 
+test('supervisor monitors a LIVE but not-ready lock, never spawns (GPT-REV-079)', async () => {
+  cleanRuntime();
+  let started = false;
+  // lock alive (pid = process.pid sống) nhưng chưa ready -> monitor, không spawn child
+  contract.tryAcquireLock('live-degraded');
+  const rec = await supervisor.runSupervisorOnce({
+    timeoutMs: 400, startGatewayFn: () => { started = true; return 4242; },
+    isReadyFn: contract.isReady, readLockFn: contract.readLock,
+  });
+  assert.equal(started, false); // không spawn
+  assert.equal(rec.action, 'monitor-degraded');
+  assert.equal(rec.pid, process.pid);
+  contract.releaseLock('live-degraded');
+});
+
 // 18. supervisor backoff + circuit breaker avoid restart storm (GPT-REV-079).
 test('supervisor backoff + circuit breaker (GPT-REV-079)', () => {
   assert.equal(supervisor.computeBackoff(1), 60000);
