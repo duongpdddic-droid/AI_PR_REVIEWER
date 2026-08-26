@@ -39,7 +39,7 @@ test('queue namespacing per appNs/kind', () => {
   cleanRuntime();
   const a = contract.enqueue('appa', 'inbound', { x: 1 });
   const b = contract.enqueue('appb', 'inbound', { x: 2 });
-  const o = contract.enqueue('appa', 'outbound', { x: 3 });
+  const o = contract.enqueue('appa', 'outbound', { eventType: 'done', repo: 'R', ref: '#1', state: 's', summary: 'o', nextAction: '', appNs: 'appa', head: 'a'.repeat(40) });
   assert.equal(contract.readQueue('appa', 'inbound').length, 1);
   assert.equal(contract.readQueue('appa', 'inbound')[0].id, a);
   assert.equal(contract.readQueue('appb', 'inbound').length, 1);
@@ -55,13 +55,13 @@ test('queue namespacing per appNs/kind', () => {
 test('routeUpdate parses namespace + auth', () => {
   const chat = 816272951;
   const u = { update_id: 5, message: { chat: { id: chat }, text: '/qldadtxd:status now' } };
-  const r = bridge.routeUpdate(u, chat);
+  const r = bridge.routeUpdate(u, { chatId: chat });
   assert.equal(r.appNs, 'qldadtxd'); assert.equal(r.command, 'status'); assert.equal(r.args, 'now');
-  assert.equal(bridge.routeUpdate(u, 999), null);
+  assert.equal(bridge.routeUpdate(u, { chatId: 999 }), null);
   const plain = { update_id: 6, message: { chat: { id: chat }, text: 'hello' } };
-  assert.equal(bridge.routeUpdate(plain, chat), null);
+  assert.equal(bridge.routeUpdate(plain, { chatId: chat }), null);
   const def = { update_id: 7, message: { chat: { id: chat }, text: '/ping' } };
-  assert.equal(bridge.routeUpdate(def, chat).appNs, 'ai-pr-reviewer');
+  assert.equal(bridge.routeUpdate(def, { chatId: chat }).appNs, 'ai-pr-reviewer');
 });
 
 // 2b. routeUpdate rejects traversal / unknown / invalid appNs (GPT-REV-077).
@@ -70,7 +70,7 @@ test('routeUpdate rejects invalid/unknown appNs', () => {
   const cases = ['..', '../x', '/abs/path', 'c:\\\\x', '', 'a'.repeat(40), 'unknownapp', '/etc/passwd'];
   for (const app of cases) {
     const u = { update_id: 1, message: { chat: { id: chat }, text: '/' + app + ':status' } };
-    assert.equal(bridge.routeUpdate(u, chat), null, 'should reject: ' + app);
+    assert.equal(bridge.routeUpdate(u, { chatId: chat }), null, 'should reject: ' + app);
   }
 });
 
@@ -111,10 +111,10 @@ test('single instance lock: atomic acquire, duplicate, stale takeover, owner-onl
   assert.ok(contract.readLock());
   // non-owner cannot heartbeat
   const before = contract.readLock().lastHeartbeat;
-  contract.touchHeartbeat(contract.readLock(), 'inst-B');
+  contract.touchHeartbeat('inst-B');
   assert.equal(contract.readLock().lastHeartbeat, before);
   // owner heartbeat
-  contract.touchHeartbeat(contract.readLock(), 'inst-A');
+  contract.touchHeartbeat('inst-A');
   assert.ok(contract.readLock().lastHeartbeat >= before);
   // owner release
   assert.equal(contract.releaseLock('inst-A'), true);
@@ -150,7 +150,7 @@ test('notifier sendItem success/failure/invalid', async () => {
   cleanRuntime();
   const cfg = { botToken: 'T', chatId: 'C' };
   contract.enqueue('ai-pr-reviewer', 'outbound', {
-    eventType: 'done', repo: 'R', ref: '#1', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'a1b2c3d4',
+    eventType: 'done', repo: 'R', ref: '#1', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'a'.repeat(40),
   });
   let items = contract.readQueue('ai-pr-reviewer', 'outbound');
   assert.equal(items.length, 1);
@@ -160,7 +160,7 @@ test('notifier sendItem success/failure/invalid', async () => {
   assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0);
 
   contract.enqueue('ai-pr-reviewer', 'outbound', {
-    eventType: 'done', repo: 'R', ref: '#2', state: 's', summary: 'y', nextAction: '', appNs: 'ai-pr-reviewer', head: 'b2c3d4e5',
+    eventType: 'done', repo: 'R', ref: '#2', state: 's', summary: 'y', nextAction: '', appNs: 'ai-pr-reviewer', head: 'b'.repeat(40),
   });
   const items2 = contract.readQueue('ai-pr-reviewer', 'outbound');
   const failFetch = async () => ({ ok: false, status: 500, headers: { get: () => null }, text: async () => 'boom' });
@@ -168,17 +168,12 @@ test('notifier sendItem success/failure/invalid', async () => {
   assert.equal(r2.sent, false);
   assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 1); // giữ lại retry
 
-  // invalid envelope (thiếu head) -> deadletter, không retry.
-  // reset queue để item invalid là item duy nhất (readQueue trả oldest-first).
+  // invalid envelope (thiếu head) -> enqueue rejected fail-closed (không ghi file, không phát đi).
   cleanRuntime();
-  contract.enqueue('ai-pr-reviewer', 'outbound', {
+  assert.throws(() => contract.enqueue('ai-pr-reviewer', 'outbound', {
     eventType: 'done', repo: 'R', ref: '#3', state: 's', summary: 'z', nextAction: '', appNs: 'ai-pr-reviewer',
-  });
-  const items3 = contract.readQueue('ai-pr-reviewer', 'outbound');
-  const r3 = await notifier.sendItem(items3[0], cfg, { fetchImpl: okFetch, sleep: async () => {} });
-  assert.equal(r3.sent, false); assert.equal(r3.invalid, true);
-  assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0); // item invalid bị deadletter, rời queue
-  assert.ok(fs.existsSync(contract.DEADLETTER_DIR) && fs.readdirSync(contract.DEADLETTER_DIR).length >= 1);
+  }));
+  assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0); // không ghi file
 });
 
 // 9. idempotency key includes appNs + head; cross-app/head not suppressed (GPT-REV-080).
@@ -186,7 +181,7 @@ test('idempotency across appNs and head', async () => {
   cleanRuntime();
   const cfg = { botToken: 'T', chatId: 'C' };
   const okFetch = async () => ({ ok: true, status: 200, text: async () => 'ok' });
-  const base = { eventType: 'done', repo: 'R', ref: '#1', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'deadbeef' };
+  const base = { eventType: 'done', repo: 'R', ref: '#1', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'd'.repeat(40) };
 
   // same envelope twice -> second skipped
   contract.enqueue('ai-pr-reviewer', 'outbound', base);
@@ -199,7 +194,7 @@ test('idempotency across appNs and head', async () => {
   assert.equal(r2.sent, false); assert.equal(r2.skipped, true);
 
   // different head -> must send again
-  contract.enqueue('ai-pr-reviewer', 'outbound', { ...base, head: 'cafef00d' });
+  contract.enqueue('ai-pr-reviewer', 'outbound', { ...base, head: 'c'.repeat(40) });
   items = contract.readQueue('ai-pr-reviewer', 'outbound');
   const r3 = await notifier.sendItem(items[items.length-1], cfg, { fetchImpl: okFetch, sleep: async () => {} });
   assert.equal(r3.sent, true);
@@ -220,8 +215,9 @@ test('supervisor decision logic', async () => {
     timeoutMs: 800,
     startGatewayFn: () => {
       started = true;
-      contract.writeHealth({ status: 'ready', instanceId: 's', lastHeartbeat: Date.now() });
-      fs.writeFileSync(contract.READY_FILE, String(Date.now()));
+      contract.tryAcquireLock('s'); // lock owner sống, instanceId 's'
+      contract.writeHealth({ status: 'ready', instanceId: 's', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+      contract.writeReadyFlag('s');
     },
     isReadyFn: contract.isReady,
   });
@@ -233,8 +229,9 @@ test('supervisor decision logic', async () => {
   assert.equal(fail.action, 'recovery-failed');
 
   cleanRuntime();
-  contract.writeHealth({ status: 'ready', instanceId: 's', lastHeartbeat: Date.now() });
-  fs.writeFileSync(contract.READY_FILE, String(Date.now()));
+  contract.tryAcquireLock('s');
+  contract.writeHealth({ status: 'ready', instanceId: 's', lastHeartbeat: Date.now(), lastSuccessfulPoll: Date.now() });
+  contract.writeReadyFlag('s');
   const ar = await supervisor.runSupervisorOnce({
     timeoutMs: 400, startGatewayFn: () => { throw new Error('should not start'); }, isReadyFn: contract.isReady,
   });
@@ -250,6 +247,57 @@ test('gateway exits non-zero on missing config', async () => {
   const code = await new Promise((res) => child.on('exit', (c) => res(c)));
   assert.notEqual(code, 0);
   assert.equal(contract.isReady(), false);
+});
+
+// 12. routeUpdate: user allowlist + reject forwarded/channel (GPT-REV-077).
+test('routeUpdate user allowlist + reject forwarded/channel', () => {
+  const chat = 816272951;
+  const mk = (text, fromId) => ({ update_id: 9, message: { chat: { id: chat }, from: fromId ? { id: fromId } : undefined, text } });
+  const auth = { chatId: chat, userIds: new Set(['u1']) };
+  assert.equal(bridge.routeUpdate(mk('/ping', 'u1'), auth).fromId, 'u1');
+  assert.equal(bridge.routeUpdate(mk('/ping', 'u2'), auth), null); // không trong allowlist
+  assert.equal(bridge.routeUpdate(mk('/ping'), auth), null); // forwarded/channel (không from) -> reject fail-closed
+});
+
+// 13. HEAD_RE 40-hex + gatewayEventKey per repo/ref/head (GPT-REV-080).
+test('HEAD_RE 40-hex + gatewayEventKey distinguishes', () => {
+  assert.equal(contract.HEAD_RE.test('a'.repeat(40)), true);
+  assert.equal(contract.HEAD_RE.test('deadbeef'), false); // 8 hex -> reject
+  assert.equal(contract.HEAD_RE.test('g'.repeat(40)), false); // non-hex -> reject
+  const a = { appNs: 'ai-pr-reviewer', repo: 'R', ref: '#1', eventType: 'done', state: 's', head: 'a'.repeat(40) };
+  const b = { ...a, head: 'b'.repeat(40) };
+  const c = { ...a, repo: 'R2' };
+  assert.notEqual(contract.gatewayEventKey(a), contract.gatewayEventKey(b)); // head phân biệt
+  assert.notEqual(contract.gatewayEventKey(a), contract.gatewayEventKey(c)); // repo phân biệt
+});
+
+// 14. enqueue outbound validates envelope before write (fail-closed) (GPT-REV-080).
+test('enqueue outbound validates envelope before write', () => {
+  cleanRuntime();
+  assert.throws(() => contract.enqueue('ai-pr-reviewer', 'outbound', {
+    eventType: 'done', repo: 'R', ref: '#1', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'deadbeef',
+  }));
+  assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0); // không ghi file
+  assert.throws(() => contract.enqueue('ai-pr-reviewer', 'outbound', {
+    eventType: 'done', repo: 'R', ref: '#2', state: 's', summary: 'y', nextAction: '', appNs: 'ai-pr-reviewer',
+  }));
+  // inbound KHÔNG validate head -> ghi được
+  contract.enqueue('ai-pr-reviewer', 'inbound', { text: '/ping' });
+  assert.equal(contract.readQueue('ai-pr-reviewer', 'inbound').length, 1);
+});
+
+// 15. processOutbound sends all registered appNs in one pass (GPT-REV-082).
+test('processOutbound handles multiple appNs in one pass', async () => {
+  cleanRuntime();
+  const cfg = { botToken: 'T', chatId: 'C' };
+  contract.enqueue('ai-pr-reviewer', 'outbound', { eventType: 'done', repo: 'R15a', ref: '#15a', state: 's', summary: 'x', nextAction: '', appNs: 'ai-pr-reviewer', head: 'a'.repeat(40) });
+  contract.enqueue('qldadtxd', 'outbound', { eventType: 'done', repo: 'Q15b', ref: '#15b', state: 's', summary: 'y', nextAction: '', appNs: 'qldadtxd', head: 'b'.repeat(40) });
+  const okFetch = async () => ({ ok: true, status: 200, text: async () => 'ok' });
+  const r = await notifier.processOutbound(cfg, { fetchImpl: okFetch, sleep: async () => {} });
+  assert.equal(r.processed, 2);
+  assert.equal(r.sent, 2);
+  assert.equal(contract.readQueue('ai-pr-reviewer', 'outbound').length, 0);
+  assert.equal(contract.readQueue('qldadtxd', 'outbound').length, 0);
 });
 
 // Chạy tuần tự, đếm SAU KHI await xong (GPT-REV-081).

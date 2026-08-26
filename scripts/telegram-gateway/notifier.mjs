@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// notifier.mjs — Single outbound sender. Đọc outbound queue, gửi qua transport (retry/429),
-// idempotency (NotificationStore) theo gatewayEventKey bao gồm appNs/projectId + HEAD.
+// notifier.mjs — Single outbound sender. Đọc outbound queue (TẤT CẢ appNs), gửi qua transport (retry/429),
+// idempotency (NotificationStore) theo gatewayEventKey bao gồm appNs + repo + ref + event + state + HEAD.
 // Envelope invalid -> deadletter (không retry vô hạn). KHÔNG gửi trùng; lỗi -> giữ lại retry sau.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, sendTelegram } from './transport.mjs';
 import { buildMessage, NotificationStore } from '../tg-notify-core.mjs';
 import {
-  APP_NS, RUNTIME_DIR, HEARTBEAT_MS, readQueue, dequeue, deadletter,
+  APP_NS, RUNTIME_DIR, HEARTBEAT_MS, readOutboundAll, dequeue, deadletter,
   gatewayEventKey, validateEnvelope,
 } from './contract.mjs';
 
@@ -41,8 +41,11 @@ export async function sendItem(item, cfg, { fetchImpl, sleep } = {}) {
   return { sent: false, key, ...r }; // KHÔNG markSent -> item còn, retry sau
 }
 
+// GPT-REV-082: 1 notifier duy nhất xử lý outbound của TẤT CẢ registered appNs.
+// readOutboundAll() trả mọi item trong OUTBOUND_DIR (shared) bất kể appNs.
+// sendItem tự validate envelope -> item appNs unknown sẽ bị deadletter (fail-closed).
 export async function processOutbound(cfg, { fetchImpl, sleep, once } = {}) {
-  const items = readQueue(APP_NS, 'outbound').filter((it) => it.appNs === APP_NS);
+  const items = readOutboundAll();
   let sent = 0;
   for (const it of items) {
     const r = await sendItem(it, cfg, { fetchImpl, sleep });

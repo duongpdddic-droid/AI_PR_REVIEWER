@@ -1,3 +1,20 @@
+## 26/08/2026 (tiếp) — PR #17 GPT-REV-077..082 hardening (bản FINAL trước handoff GPT) — COMPLETED
+- [x] Tiếp nối phiên trước: sửa tiếp transport (allowlist user) + bridge (routeUpdate user allowlist + reject forwarded/channel) + notifier (processOutbound đọc readOutboundAll cho mọi appNs) + gateway (fetchImpl test hook, touchHeartbeat mới, READY_FILE JSON, inbound dispatch loop, dọn stale ready) + tạo dispatcher.mjs (chỉ dispatch command, KHÔNG self-review).
+- [x] Sửa 3 bug thực tế bắt bằng test: (1) `takeoverLock` stale check sai (L-036) → giờ check `isLockAlive`; (2) `HEARTBEAT_MS` hardcoded 15000 bỏ qua env (L-037) → đọc env `GATEWAY_HEARTBEAT_MS`/`GATEWAY_STALE_MS`; (3) test idempotency trùng key (L-038) → key unique.
+- [x] Thêm integration test multi-process + real child gateway: scripts/telegram-gateway/test-gateway-mp.mjs (8/8 PASS: lock đơn instance, ready sau startup, inbound ack, outbound send, release khi thoát). package.json + `test:gateway:mp`.
+- [x] Mở rộng unit test (16/16 PASS): routeUpdate user allowlist, HEAD_RE 40-hex + gatewayEventKey, enqueue validate fail-closed, processOutbound multi-appNs, supervisor decision.
+- [x] Docs: scripts/telegram-gateway/README.md bổ sung phần Bảo mật & Robustness (077..082) + test mp.
+- [x] Verify: `pnpm test:gateway` 16/16; `pnpm test:gateway:mp` 8/8; `pnpm verify` **116/116 PASS**.
+- [x] Kế hoạch: commit/pushfix/issue-15-telegram-gateway, comment CLINE-FIX PR #17, handoff GPT tại HEAD mới, notify Telegram.
+
+## 26/08/2026 11:39 — PR #17 GPT-REV-077..081 re-fix — COMPLETED (verify + pushed, chờ GPT re-review)
+
+- [x] Sửa 5 finding review (REV-077 allowlist+path-traversal; REV-078 atomic lock+owner-only; REV-079 verified-startup health gate; REV-080 gatewayEventKey+head SHA+validateEnvelope fail-closed; REV-081 sync test harness 12 case).
+- [x] Verify: `node scripts/test-telegram-gateway.mjs` **12/12 PASS**; `node scripts/full-verify.mjs` **110/110 PASS**.
+- [x] Commit `3b1cea9` (gc.auto=0 core.commitGraph=false), push `fix/issue-15-telegram-gateway`; `39db081..3b1cea9`.
+- [x] `gh pr comment 17` re-review (issuecomment-5420675625); notify-telegram.mjs legacy sent to 816272951 (không arm watchdog).
+- [x] KHÔNG merge/deploy. Chờ GPT re-review.
+
 ## 26/08/2026 09:59 — Issue #15: Shared Telegram Gateway (A) — COMPLETED (code+test)
 
 - [x] Bố chọn A (Full per AC). Xóa watchdog-hibernate.mjs (idle/sleep/hibernate + shutdown /h).

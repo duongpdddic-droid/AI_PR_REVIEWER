@@ -9,15 +9,21 @@ import { CONFIG_FILE, POLL_TIMEOUT_S } from './contract.mjs';
 
 // Ưu tiên: env -> gateway config.json -> legacy ~/.ai-pr-reviewer/tg.json.
 export function loadConfig() {
-  const env = { botToken: process.env.TG_BOT_TOKEN, chatId: process.env.TG_CHAT_ID };
+  const env = { botToken: process.env.TG_BOT_TOKEN, chatId: process.env.TG_CHAT_ID, allowedUserIds: parseAllowedUsers(process.env.GATEWAY_ALLOWED_USERS) };
   if (env.botToken && env.chatId) return env;
   for (const p of [CONFIG_FILE, path.join(os.homedir(), '.ai-pr-reviewer', 'tg.json')]) {
     try {
       const c = JSON.parse(fs.readFileSync(p, 'utf8'));
-      if (c.botToken && c.chatId) return { botToken: c.botToken, chatId: c.chatId, _src: p };
+      if (c.botToken && c.chatId) return { botToken: c.botToken, chatId: c.chatId, allowedUserIds: parseAllowedUsers(c.allowedUserIds), _src: p };
     } catch {}
   }
   return null;
+}
+
+function parseAllowedUsers(v) {
+  const s = (v == null ? '' : String(v)).trim();
+  if (!s) return new Set();
+  return new Set(s.split(/[,\s]+/).map((x) => String(x).trim()).filter(Boolean));
 }
 
 // Gửi 1 tin nhắn. Retry trên lỗi mạng + 5xx + 429 (tôn trọng Retry-After). KHÔNG dùng shell.

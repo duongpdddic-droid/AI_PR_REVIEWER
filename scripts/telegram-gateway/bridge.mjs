@@ -10,14 +10,18 @@ import {
   readLock, tryAcquireLock, touchHeartbeat, releaseLock, enqueue, isValidAppNs,
 } from './contract.mjs';
 
-// Parse một update thành { appNs, command, args, raw, updateId } hoặc null (bỏ qua).
+// Parse một update thành { appNs, command, args, raw, updateId, fromId } hoặc null (bỏ qua).
 // Quy ước command: "/<appNs>:<lệnh> <args>" hoặc "/<lệnh>" (mặc định APP_NS).
 // appNs KHÔNG hợp lệ (traversal/unknown) -> reject (null) trước khi enqueue (GPT-REV-077).
-export function routeUpdate(update, authorizedChatId) {
+// GPT-REV-077: giới hạn user. Reject fail-closed khi thiếu identity (channel_post / forwarded không có from).
+export function routeUpdate(update, auth = {}) {
   const msg = update && update.message;
   if (!msg) return null;
-  const fromId = String(msg.chat && msg.chat.id);
-  if (authorizedChatId && fromId !== String(authorizedChatId)) return null; // chỉ nhận chat được phép
+  if (auth.chatId && String(msg.chat && msg.chat.id) !== String(auth.chatId)) return null; // chỉ nhận chat được phép
+  // Reject channel_post / forwarded (không có from) khi có allowlist user.
+  const fromId = msg.from && msg.from.id;
+  const ids = auth.userIds;
+  if (ids && ids.size && ids.size > 0 && !ids.has(String(fromId))) return null;
   const text = (msg.text || '').trim();
   if (!text.startsWith('/')) return null;
   const parts = text.slice(1).split(/\s+/);
@@ -28,7 +32,7 @@ export function routeUpdate(update, authorizedChatId) {
   if (segs.length >= 2) { appNs = segs[0]; command = segs.slice(1).join(':'); }
   if (!isValidAppNs(appNs)) return null; // reject traversal/unknown appNs (chat auth không thay thế validation)
   const args = parts.slice(1).join(' ');
-  return { appNs, command, args, raw: text, updateId: update.update_id };
+  return { appNs, command, args, raw: text, updateId: update.update_id, fromId: fromId ? String(fromId) : null };
 }
 
 const OFFSET_FILE = path.join(RUNTIME_DIR, 'offset.json');
@@ -46,7 +50,7 @@ export async function pollOnce(cfg, { enqueueFn = enqueue, fetchImpl } = {}) {
   let enqueued = 0;
   if (r.ok) {
     for (const u of r.updates) {
-      const routed = routeUpdate(u, cfg.chatId);
+      const routed = routeUpdate(u, { chatId: cfg.chatId, userIds: cfg.allowedUserIds });
       if (routed) { enqueueFn(routed.appNs, 'inbound', routed); enqueued += 1; }
     }
     writeOffset(r.offset);
@@ -77,7 +81,7 @@ async function main() {
       // 409 = nhiều poller cùng chạy -> lock của ta không hợp lệ -> stand down (không lặp vô hạn).
       if (r.status === 409) { console.error('bridge: 409 conflict (nhiều poller) -> stand down'); process.exit(3); }
     } catch (e) { console.error('bridge poll error: ' + e.message); }
-    touchHeartbeat(acq.lock, instanceId);
+    touchHeartbeat(instanceId);
     await sleep(HEARTBEAT_MS);
   }
 }

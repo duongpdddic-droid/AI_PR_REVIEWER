@@ -27,8 +27,8 @@ export const HEARTBEAT_FILE = path.join(RUNTIME_DIR, 'heartbeat.json');
 export const READY_FILE = path.join(RUNTIME_DIR, 'ready');
 export const CONFIG_FILE = path.join(RUNTIME_DIR, 'config.json');
 
-export const STALE_MS = 60_000;
-export const HEARTBEAT_MS = 15_000;
+export const STALE_MS = Number(process.env.GATEWAY_STALE_MS || 60_000);
+export const HEARTBEAT_MS = Number(process.env.GATEWAY_HEARTBEAT_MS || 15_000);
 export const POLL_TIMEOUT_S = 30;
 
 // --- App namespace validation (GPT-REV-077) ---
@@ -67,6 +67,9 @@ function nextId() {
 // Enqueue một item. appNs phải hợp lệ (fail-closed: ném nếu không) — KHÔNG ghi file khi invalid.
 export function enqueue(appNs, kind, payload) {
   if (!isValidAppNs(appNs)) throw new Error('enqueue rejected invalid appNs: ' + appNs);
+  if (kind !== 'inbound' && kind !== 'outbound') throw new Error('enqueue kind không hợp lệ: ' + kind);
+  // GPT-REV-080: outbound envelope phải validate TRƯỚC khi ghi file (fail-closed: sai -> throw, không ghi, không phát đi).
+  if (kind === 'outbound') validateEnvelope(payload);
   const id = nextId();
   const item = { id, appNs, kind, payload, enqueuedAt: Date.now() };
   const base = kind === 'inbound' ? appInboundDir(appNs) : OUTBOUND_DIR;
@@ -85,6 +88,19 @@ export function readQueue(appNs, kind) {
     .filter((f) => f.endsWith('.json'))
     .map((f) => {
       try { return JSON.parse(fs.readFileSync(path.join(base, f), 'utf8')); } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+}
+
+// GPT-REV-082: đọc TOÀN BỘ outbound bất kể appNs (shared OUTBOUND_DIR) để 1 notifier duy nhất
+// xử lý mọi appNs đăng ký. Trả items sắp xếp theo enqueuedAt.
+export function readOutboundAll() {
+  if (!fs.existsSync(OUTBOUND_DIR)) return [];
+  return fs.readdirSync(OUTBOUND_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => {
+      try { return JSON.parse(fs.readFileSync(path.join(OUTBOUND_DIR, f), 'utf8')); } catch { return null; }
     })
     .filter(Boolean)
     .sort((a, b) => a.enqueuedAt - b.enqueuedAt);
@@ -120,10 +136,10 @@ export function listApps() {
 // Hai app/project khác nhau hoặc HEAD thay đổi -> khóa khác -> không suppress nhầm.
 export function gatewayEventKey(p) {
   const f = (v) => String(v ?? '');
-  return [f(p.appNs), f(p.projectId || p.repo), f(p.repo), f(p.ref), f(p.eventType), f(p.state), f(p.head)].join('::');
+  return [f(p.appNs), f(p.repo), f(p.ref), f(p.eventType), f(p.state), f(p.head)].join('::');
 }
 
-const HEAD_RE = /^[0-9a-f]{7,40}$/i;
+export const HEAD_RE = /^[0-9a-f]{40}$/i;
 // Validate envelope fail-closed trước enqueue/send (GPT-REV-080).
 export function validateEnvelope(p) {
   const errs = [];
@@ -164,22 +180,31 @@ export function tryAcquireLock(instanceId) {
   return { acquired: true, lock: readLock() };
 }
 
+// Takeover khi lock cũ STALE (pid chết / heartbeat quá hạn). Dùng primitive atomic 'wx'
+// để serialize contenders: chỉ 1 process thắng wx -> tránh 2 process cùng chiếm (GPT-REV-078).
 function takeoverLock(instanceId) {
-  const tmp = `${LOCK_FILE}.takeover-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(lockContent(instanceId)));
-  try { fs.renameSync(tmp, LOCK_FILE); }
-  catch { try { fs.unlinkSync(tmp); } catch {} return { acquired: false, reason: 'lost-takeover', lock: readLock() }; }
-  const now = readLock();
-  if (now && now.instanceId === instanceId) return { acquired: true, lock: now };
-  return { acquired: false, reason: 'lost-takeover', lock: now };
+  const existing = readLock();
+  if (existing && isLockAlive(existing)) return { acquired: false, reason: 'duplicate', lock: existing };
+  if (existing) { try { fs.unlinkSync(LOCK_FILE); } catch {} } // stale -> gỡ rồi chiếm mới
+  try {
+    const fd = fs.openSync(LOCK_FILE, 'wx');
+    try { fs.writeFileSync(LOCK_FILE, JSON.stringify(lockContent(instanceId))); }
+    finally { try { fs.closeSync(fd); } catch {} }
+    const now = readLock();
+    if (now && now.instanceId === instanceId) return { acquired: true, lock: now };
+    return { acquired: false, reason: 'lost-takeover', lock: now };
+  } catch (e) {
+    if (e.code === 'EEXIST') return { acquired: false, reason: 'duplicate', lock: readLock() };
+    return { acquired: false, reason: 'error', lock: readLock() };
+  }
 }
 
 // Owner-only heartbeat: chỉ instance sở hữu lock mới được cập nhật.
-export function touchHeartbeat(lock, instanceId) {
-  if (!lock) lock = readLock();
-  if (!lock) return null;
-  if (instanceId && lock.instanceId !== instanceId) return lock;
-  const next = { ...lock, lastHeartbeat: Date.now() };
+export function touchHeartbeat(instanceId) {
+  const cur = readLock();
+  if (!cur) return null;
+  if (instanceId && cur.instanceId !== instanceId) return cur; // không phải owner -> không ghi (chống race)
+  const next = { ...cur, lastHeartbeat: Date.now() };
   fs.writeFileSync(LOCK_FILE, JSON.stringify(next, null, 2));
   return next;
 }
@@ -210,7 +235,22 @@ export function readHealth() { try { return JSON.parse(fs.readFileSync(HEALTH_FI
 export function isReady(opts = {}) {
   const h = readHealth();
   if (!h || h.status !== 'ready') return false;
+  if (!h.instanceId) return false;
+  // GPT-REV-079: health + lock phải cùng 1 instance (tránh nhận ready của instance cũ sau restart/crash).
+  const lk = readLock();
+  if (!lk || lk.instanceId !== h.instanceId) return false;
+  if (!isLockAlive(lk)) return false; // owner còn sống (pid + heartbeat)
   if (!fs.existsSync(READY_FILE)) return false;
+  try {
+    const rdy = JSON.parse(fs.readFileSync(READY_FILE, 'utf8'));
+    if (rdy.instanceId !== h.instanceId) return false; // record ready phải của cùng instance
+  } catch { return false; }
   const stale = opts.staleMs ?? STALE_MS;
-  return Date.now() - (h.lastHeartbeat || 0) <= stale;
+  if (Date.now() - (h.lastSuccessfulPoll || 0) > stale) return false; // poll gần nhất phải ok
+  return true;
+}
+
+// GPT-REV-079: publish ready chỉ khi health.ready + cùng instanceId (chống stale/mismatched).
+export function writeReadyFlag(instanceId) {
+  fs.writeFileSync(READY_FILE, JSON.stringify({ instanceId, at: Date.now() }, null, 2));
 }
