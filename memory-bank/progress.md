@@ -1,3 +1,11 @@
+## 26/08/2026 (tối) — PR #17 fix GPT-REV-078/079/085 + handoff re-review — COMPLETED
+- [x] GPT-REV-079 (gốc): `supervisor.runSupervisorOnce` nhánh live-degraded — lock SỐNG (pid+heartbeat) nhưng chưa ready → `monitor-degraded`, KHÔNG spawn (trước chỉ xét `!isReady` → spawn thừa gây churn); `main()` loop coi là không-fail (reset backoff). Test mới assert `startGatewayFn` không gọi (L-041).
+- [x] GPT-REV-078 (giữ): `takeoverLock` không clobber lock tươi (atomic wx + re-check isLockAlive); owner-only touchHeartbeat/releaseLock.
+- [x] GPT-REV-085 (giữ): `.clinerules/01`+`05` bỏ ref `telegram-bridge.mjs`/`watchdog-hibernate.mjs`/`shutdown /h`; drift test #3/#4 PASS.
+- [x] Verify: `pnpm test:gateway` **23/23 PASS** (incl. monitor-degraded mới); `pnpm test:gateway:mp` **9/9 PASS**; `pnpm test:drift` exit 0 (0 FAIL).
+- [x] Commit `7ce22d1` push `fix/issue-15-telegram-gateway` (HEAD=origin); comment Issue #15 re-review 078/079/085 trên PR #17. GPT re-review PR trực tiếp (agent:gpt+review-requested, orchestrator skip). KHÔNG merge/deploy/approve.
+
+## 26/08/2026 18:23 — PR #17: handoff GPT re-review (diff-limit Decision Gate) — COMPLETED (handoff restored, chờ GPT)
 ## 26/08/2026 18:23 — PR #17: handoff GPT re-review (diff-limit Decision Gate) — COMPLETED (handoff restored, chờ GPT)
 - [x] Phát hiện: cron CI orchestrator KHÔNG quét AI_PR_REVIEWER (committed `targetRepos=['QLDA_DTXD']`); PR #17 chỉ pre-review thủ công (config tạm đổi sang AI_PR_REVIEWER).
 - [x] Sai sót vòng trước: PR #17 giữ nhãn cũ `agent:cline`+`status:changes-requested` (từ đợt GPT changes-requested); Issue #15 đã `agent:gpt`+`status:review-requested`. Orchestrator SKIP PR có `agent:gpt` → đồng bộ nhãn PR.

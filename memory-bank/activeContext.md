@@ -24,15 +24,17 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp). Bố chọn A (Full theo Ac
  9. [x] GPT-REV-077..082 (PR #17): sửa allowlist+path-traversal (077), atomic lock+owner-only (078), verified-startup health gate (079), gatewayEventKey+head SHA+validateEnvelope fail-closed (080), sync test harness 12 case (081). Commit 3b1cea9, push; comment re-review PR #17; notify Telegram legacy (không arm watchdog/merge/deploy).
 
 ## Bước hiện tại
-Hoàn tất vòng fix GPT-REV-078/079/083/084 (commit `9978677`). PR #17 = `agent:gpt`+`status:review-requested` chờ GPT re-review trực tiếp tại HEAD `9978677` (orchestrator skip vì có `agent:gpt`). Issue #15 đồng bộ nhãn. Config restored, temp script dọn.
+Hoàn tất vòng fix GPT-REV-078/079/083/084/085 (commit `7ce22d1`). PR #17 = `agent:gpt`+`status:review-requested`, HEAD `7ce22d1` đã push; comment Issue #15 xác nhận re-review 078/079/085. Orchestrator skip (có `agent:gpt`). Issue #15 đồng bộ nhãn.
 
 ## Bằng chứng thực thi
-- node --check toàn bộ scripts gateway + core/notify/orchestrator/autonomous: PASS.
-- pnpm test:gateway **16/16 PASS** (routeUpdate allowlist, HEAD_RE 40-hex, enqueue validate fail-closed, processOutbound multi-appNs, supervisor decision...).
-- pnpm test:gateway:mp **8/8 PASS** (multi-process single-instance lock, gateway ready sau startup, inbound ack, outbound send qua mock, release khi thoát).
-- pnpm verify **116/116 PASS** (node --check + BOM + dup fn + git diff --check + behavior-map).
-- Sửa 3 bug thực tế bằng test: takeoverLock stale (L-036), HEARTBEAT_MS env-config (L-037), test idempotency key (L-038).
-- Docs: scripts/telegram-gateway/README.md phần Bảo mật & Robustness (077..082).
+- **GPT-REV-079 (gốc)**: `supervisor.runSupervisorOnce` thêm nhánh live-degraded — lock sống (pid+heartbeat) nhưng chưa ready → `monitor-degraded`, KHÔNG spawn; `main()` loop coi là không-fail. Test mới dòng 354: `startGatewayFn` không gọi.
+- **GPT-REV-078**: giữ `takeoverLock` không clobber lock tươi (test `takeover never clobbers a live lock`) + owner-only `touchHeartbeat`/`releaseLock`.
+- **GPT-REV-085**: `.clinerules/01`+`05` bỏ các ref `telegram-bridge.mjs`/`watchdog-hibernate.mjs`/`shutdown /h`; drift test #3/#4 exit 0.
+- pnpm test:gateway **23/23 PASS** (incl. monitor-degraded mới).
+- pnpm test:gateway:mp **9/9 PASS** (single-instance lock, ready sau startup, inbound/outbound, SIGTERM release).
+- pnpm test:drift exit 0 (0 FAIL; counter "0 PASS" cố định vì assert #1–4 là block ngoài test(), exit 0 = PASS).
+- node --check supervisor.mjs + test-telegram-gateway.mjs: OK.
+- Commit `7ce22d1` push; HEAD = origin/fix/issue-15-telegram-gateway = 7ce22d1.
 
 ## Quyết định
 - Chỉ 1 getUpdates poller (lock + heartbeat) -> tránh 409 conflict.
@@ -48,4 +50,4 @@ Hoàn tất vòng fix GPT-REV-078/079/083/084 (commit `9978677`). PR #17 = `agen
 - [ ] **DECISION GATE (Mức 3)**: diff PR #17 = 2399 dòng > giới hạn policy `maxLines:1500` (additions+deletions, `blocking-decision-gate`). Orchestrator pre-review luôn `block-decision-gate` nếu PR ở `agent:cline`. GPT review PR này TRỰC TIẾP (`agent:gpt`+`status:review-requested`, orchestrator skip). Bố chọn: (A) giữ review trực tiếp / (B) nâng `maxLines` / (C) chia PR nhỏ. Hiện giữ (A).
 
 ## Bước tiếp theo
-CHỜ GPT re-review tại HEAD `9978677` (PR #17 = `agent:gpt`+`status:review-requested`, orchestrator skip). KHÔNG chạy orchestrator pre-review (sẽ `block-decision-gate` do diff 2399 > 1500). KHÔNG merge/deploy/approve. Soak test máy thật vẫn là bước thủ công trước xóa `notify-telegram.mjs` legacy.
+CHỜ GPT re-review tại HEAD `7ce22d1` (PR #17 = `agent:gpt`+`status:review-requested`, orchestrator skip). KHÔNG chạy orchestrator pre-review (sẽ `block-decision-gate` do diff > 1500). KHÔNG merge/deploy/approve. Soak test máy thật vẫn là bước thủ công trước xóa `notify-telegram.mjs` legacy.
