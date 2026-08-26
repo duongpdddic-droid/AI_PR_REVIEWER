@@ -1,47 +1,47 @@
-## 25/08/2026 12:20 (ACT) — Issue #9 REV-4: fix GPT-REV-065 startup context trên PR #10
+# Active Context
+## Mục tiêu
+Issue #14 — Shared Agent Platform: Project Registry và versioned project manifest (child của EPIC #11). Định nghĩa `.agent/project.json` versioned + machine-local registry + ownership matrix + registration/validation/migration APIs + fixtures. Không thay đổi Claude Mem hooks/retrieval.
 
-- **Mục tiêu**: [GPT-REV-065] Important — startup ~50k token/task; budget 6000 chỉ đo message; thiếu unresolved findings vào capsule, telemetry tổng, dedupe, benchmark before/after.
-- **Kế hoạch & trạng thái**:
-  1. [x] `buildStartupCapsule()`: đo TỔNG payload harness-controlled (message + `--read` inline); conventions ≤2000t mới inline, lớn → pointer KHÔNG `--read`.
-  2. [x] Budget tổng fail-closed `CODER_STARTUP_BUDGET_TOKENS` (env, mặc định 12000); vượt → escalate `BLOCKED_CONTEXT_BUDGET` + label blocked + Telegram.
-  3. [x] `fetchUnresolvedFindings()`: comments GitHub authoritative, verdict MỚI NHẤT mỗi mã `[GPT-REV-NNN]` thắng; RESOLVED loại; gh lỗi degrade rỗng. Wire thật trong executeIssue.
-  4. [x] `dedupeByHash()` sha1 — cùng content không nạp lặp trong 1 task.
-  5. [x] Telemetry `outcome=startup-context`: `startupContextTokens`, `loadedModules`/`loadedSections`, `loadedMemoryCount`, `beforeCompactTokens`/`afterCompactTokens`, `loadReasons`, `findingsSource`; aider tự nạp → `externalContextUnknown=true`.
-  6. [x] Benchmark INT: issue raw ~337k ký tự (~84k tokens) → startup **101 tokens** (≤12k, giảm ~99.9%); critical spans nguyên vẹn; history không nạp toàn bộ; retry nhỏ hơn. Thêm 2 test retrieval/dedupe-pointer.
-  7. [x] Verify: test-runtime-hooks **13/13 PASS**; full-verify **89/89 PASS exit 0**; CI Verify CI success HEAD `260ab3d15af63314694afff142c0a0d9d8dbf2df`.
-  8. [x] Bàn giao: commit `260ab3d` push; comment `[CLINE-FIX-065]` (issuecomment-5405750436); labels read-back `agent:cline`+`status:review-requested`. Audit matrix đồng bộ section Startup capsule.
-- **Bước tiếp theo**: chờ orchestrator pre-review + GPT review vòng 4 tại HEAD `260ab3d`; approval qua `gpt-approval.mjs` (user-relay) → user merge. Không merge/deploy.
+## Chế độ
+Tự hành (kênh Cline, lệnh Bố trực tiếp).
 
----
+## Kế hoạch thực thi
+1. [x] Đọc EPIC #11, Issue #14, `.agent/config.json`, conventions (test pattern, full-verify).
+2. [x] Preflight: backup mb notes issue9 → `C:\Users\Admin\mb-issue9-backup`; stash 3 mb file; checkout `main` (fbfd2ff); tạo branch `feat/issue-14-project-registry` từ `origin/main`.
+3. [x] Set label #14 `agent:cline`+`status:ready-for-cline` (bỏ `status:queued`); claim qua `github-task-intake.mjs --claim 14` → `CLAIMED`, remote `agent:cline`+`status:in-progress`.
+4. [x] Viết `scripts/project-manifest-schema.json` (JSON Schema draft-07, required repo identity) + `scripts/project-registry.mjs` (validate fail-closed / registry / detectConflicts / assertWorkspaceRemote / registerProject / migrateManifest up+down / assertSingleOwner / registryOutsideWorktree).
+5. [x] Fixtures 6 file (`ai-pr-reviewer`, `qlda-dtxd`, `generic`, `duplicate-id`, `wrong-remote`, `stale-schema`) + `.agent/project.json` mẫu chuẩn.
+6. [x] `scripts/test-project-registry.mjs` (32 check, AC1–AC9) + đăng ký `test-project-registry.mjs` vào `optionalSuites` của full-verify.
+7. [x] Verify: `node scripts/test-project-registry.mjs` 32/32 PASS; `pnpm verify` **94/94 PASS exit 0**.
+8. [x] Commit + push branch; mở Draft PR `Ref #14`; handoff GPT (`agent:gpt` + `status:review-requested`).
+9. [x] Re-handoff vòng 2 (HEAD 0cc5827→52a2b9e) + vòng 3 (HEAD e79e975) sau fix 3 finding còn mở.
+10. [ ] Dừng chờ GPT re-review vòng 3 (không merge/deploy).
 
-## 25/08/2026 09:35 (ACT) — Issue #9 REV-2: fix 3 finding GPT review PR #10 (GPT-REV-059/060/061)
+## Bước hiện tại
+GPT re-review vòng 2 đóng [071][072], còn mở [069][070][073]. Đã sửa 3 finding, commit `e79e975`, push, re-handoff PR #16 (labels `agent:gpt` + `status:review-requested`). Chờ GPT re-review vòng 3.
 
-- **Mục tiêu**: xử lý 3 finding Important từ GPT review PR #10 tại HEAD `05e12cf…`; sửa trên cùng PR, KHÔNG mở PR mới.
-- **Kế hoạch & trạng thái**:
-  1. [x] [GPT-REV-060] `context-manager.mjs`: `overBudget = totalTokens > budgetTokens` cho MỌI trường hợp vượt (bỏ điều kiện protected); `selectiveLoad()` trả thêm `overBudget` khi invariants vượt. Test âm mới §9–§11.
-  2. [x] [GPT-REV-061] `error-recovery.mjs`: thêm `redactDeep()` đệ quy (depth ≤6, node ≤500, circular → `[Circular]`, oversized → `[TRUNCATED]`); `recordExecutionEvent()` redact đệ quy mọi giá trị; regex Bearer trần. Test §11–§13.
-  3. [x] [GPT-REV-059] `memory-core.mjs`: default IO = `fsJsonlIo()` (node:fs thật), io thiếu hàm ghi → `stored:false 'no-storage-io'`; tạo `runtime-hooks.mjs` (`createRuntimeHooks()`: recordObservation/recordEvent/recover/consolidateMemory/loadEvents) persistence tại `.agent/runtime/*.jsonl`.
-  4. [x] Wire runtime: `autonomous-run.mjs` — coder bounded recovery qua `hooks.recover()` (≤3 attempt, AUTH escalate ngay), verify-fail telemetry, workflow-failure observation khi BLOCKED, session-summary + consolidate khi DONE; storage lỗi không block workflow.
-  5. [x] Integration test mới `test-runtime-hooks.mjs` (7 case): restart/load lại được, event lưu đĩa không còn secret, recovery sinh telemetry giữ identity, AUTH fail-closed, failure degrade, consolidation bounded, no-silent-store. Đăng ký `optionalSuites` full-verify.
-  6. [x] Audit matrix module-version 2: sửa claim sai (`appendObservation()` không tồn tại → facade thật), bổ sung section Runtime wiring.
-  7. [x] Verify: test-context-manager 11 PASS; test-error-recovery 13 PASS; test-runtime-hooks 7 PASS; test-memory-core 10 PASS; **full-verify 89/89 PASS exit 0**; smoke dry-run autonomous-run OK.
-- **Ranh giới giữ nguyên**: fallback không round-robin mù; AUTH_OR_CONFIG_ERROR không bypass; policy gate fail-closed; memory không lưu verdict authoritative.
-- **Bước tiếp theo**: commit + push lên branch PR #10 → comment `[CLINE-FIX-059]/[CLINE-FIX-060]/[CLINE-FIX-061]` kèm evidence → labels về `status:review-requested` cho orchestrator pre-review lại.
+## Bằng chứng thực thi
+- `scripts/project-manifest-schema.json`: schema versioned, `repository` required + pattern `^[\w.-]+/[\w.-]+$`.
+- `scripts/project-registry.mjs`:
+  - [GPT-REV-069] `CANONICAL_POLICY_VERSION=''2026-08-23.7''`; gate `POLICY_VERSION_MISMATCH` khi `policy.version` lệch canonical (fail-closed).
+  - [GPT-REV-070] `loadSchema()` fail-closed (ném khi file thiếu/corrupt → `MANIFEST_SCHEMA_UNAVAILABLE`); `validateAgainstSchema` rewrite đệ quy validate type/pattern/enum/minLength nested đầy đủ.
+  - [GPT-REV-073] `migrateManifest` reversible lossless: `up` ghi nhận field added, `down` gỡ → `down(up(original)) === original`.
+  - `scanForSecrets` quét key camelCase; `detectConflicts` idempotent; `registerProject` strip `__migrationAdded` trước save.
+- `scripts/fixtures/project-registry/*.json`: 6 fixtures; generic.json/duplicate-id.json pin canonical `2026-08-23.7`; qlda-dtxd route `dm-boss-qlda`.
+- `scripts/test-project-registry.mjs`: 50/50 PASS (AC1–AC11; AC11 = gate + nested fail-closed; AC10 strengthen round-trip).
+- `.agent/project.json`: manifest chuẩn repo này (policy pin `2026-08-23.7`).
+- `pnpm verify` 94/94 PASS exit 0; `full-verify` 94/94.
+- PR #16: comment `[CLINE-FIX-069..073]`; labels `agent:gpt`+`status:review-requested`; HEAD `e79e9750b84868ab61e7efe004a9573c4472f5ee`.
 
----
+## Quyết định
+- Registry machine-local tại `~/.ai-pr-reviewer/registry.json` (ngoài worktree/Git).
+- Branch `feat/issue-14-project-registry` từ `origin/main`.
+- KHÔNG migrate `config.json` → `project.json` (out of scope); `project.json` manifest chuẩn song song.
+- Bỏ qua đồng thời #12/#13/#15 và QLDA_DTXD#48 theo lệnh Bố.
 
----
+## Vấn đề trì hoãn
+- [ ] Chưa migrate QLDA_DTXD/AI_PR_REVIEWER sang project adapter (EPIC workstream 4–5, Issue khác).
+- [ ] Chưa xây CLI init/sync/doctor (#12/#13/#15 — Bố cấm đồng thời).
 
-## 25/08/2026 11:25 (ACT) — Issue #9 REV-3: fix GPT-REV-062/063/064 trên PR #10
-
-- **Mục tiêu**: xử lý 3 blocker Important vòng GPT re-review REV-2 tại HEAD `d0f7f4e…` (062 recovery telemetry bypass redact; 063 runtime JSONL trong worktree + git add -A; 064 compact/selective chưa nối execution path).
-- **Kế hoạch & trạng thái**:
-  1. [x] [GPT-REV-062] `runtime-hooks.mjs`: `recover()` KHÔNG còn `appendJsonl` event thô — ghi qua duy nhất `recordEvent()` → `recordExecutionEvent()` → `redactDeep()`. Test `INT.recover-redacts-identity`: secret lồng identity/fallbackChain không lên đĩa.
-  2. [x] [GPT-REV-063] persistence mặc định NGOÀI worktree: `<homedir>/.agent-runtime/<basename>-<sha1-12(rootDir)>/{observations,events}.jsonl`; override `{runtimeDir}`; `commitAndPush()` unstage `.agent/runtime` phòng hờ legacy. Test `INT.runtime-outside-worktree`: git status sạch sau khi ghi state + persist qua restart.
-  3. [x] [GPT-REV-064] `autonomous-run.mjs`: `buildCoderContext()` = bootstrap/invariants + findings protected + `selectiveLoad()` tag ac/scope/test (scope=invariant) trên section issue body → `compactTranscript()` budget 6000 tokens. Coder loop dùng context budget-enforce; overBudget → escalate `BLOCKED_CONTEXT_OVERBUDGET`; action `compact-then-retry` → rebuild budget nửa + telemetry `context-compaction` persist. Test `INT.coder-context-budget`.
-  4. [x] Verify: test-runtime-hooks **10/10 PASS**; **full-verify 89/89 PASS exit 0**; smoke dry-run autonomous-run OK; CI Verify CI **success** tại HEAD `025e66b7a0db8d2b351778d380014f7e69112031`.
-  5. [x] Bàn giao: commit `025e66b` push `d0f7f4e..025e66b`; comment `[CLINE-FIX-062]/[CLINE-FIX-063]/[CLINE-FIX-064]` (issuecomment-5405139219); labels read-back `agent:cline`+`status:review-requested`.
-- **Đồng bộ docs**: `issue9-audit-matrix.md` cập nhật persistence ngoài worktree + redact path duy nhất + wiring context budget.
-- **Bước tiếp theo**: chờ orchestrator pre-review + GPT review vòng 3 tại HEAD `025e66b`; approval qua `gpt-approval.mjs` (user-relay) → user merge. Không merge/deploy.
-
----
+## Bước tiếp theo
+Chờ GPT re-review vòng 3 tại PR #16 (HEAD e79e975). Sau approval GPT qua `gpt-approval.mjs` (user-relay) → user merge. Không tự merge/deploy.

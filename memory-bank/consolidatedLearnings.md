@@ -177,3 +177,25 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Tránh lặp lại**:
   1. Trước khi viết assertion cho failure path, đọc lại signature + luồng IO thật của facade (tham số nào nhận injection, đường nào dùng stdlib).
   2. Comment rõ scope injection ngay ở JSDoc tham số (`io` áp dụng cho cái gì) để test và caller không suy diễn.
+## L-029 (25/08/2026) — Test phát hiện xung đột phải seed registry bằng entity CÙNG identity gây xung đột trước khi assert
+
+- **Triệu chứng**: test AC9 gọi `registerProject(duplicate-id)` (projectId `ai-pr-reviewer`) trên registry vừa chứa `qlda-dtxd` → mong đợi conflict nhưng `res.ok === true` (đăng ký thành công, không phát hiện trùng). `pnpm verify` báo 1 FAIL.
+- **Nguyên nhân gốc**: `detectConflicts` so projectId của manifest với TỪNG project đã có trong registry; registry seed bằng project KHÁC id nên không trùng. Fixture `duplicate-id` chỉ "trùng" khi registry đã chứa chính `ai-pr-reviewer`.
+- **Tránh lặp lại**: khi viết test phát hiện xung đột (duplicate id/route/workspace), seed registry trước bằng entity CÙNG identity gây xung đột (register `ai-pr-reviewer.json` trước, rồi `duplicate-id.json` mới conflict). Đừng dùng fixture duplicate với registry seed id khác.
+
+
+## L-030 (25/08/2026) — Validator phải reject schema tương lai + secret trong key camelCase + register idempotent + rollback giữ data
+- **Triệu chứng**: GPT review GPT-REV-069..073 bắt lỗi: (1) fixture pin policy `.1` thay vì canonical `.7`; (2) `validateManifest` nhận schema tương lai chưa hỗ trợ, không thực thi đầy đủ JSON Schema; (3) secret nằm dưới key `apiKey`/`botToken` lọt qua; (4) hai project khác route vẫn trùng + re-register cùng project không idempotent; (5) down migration mất trường.
+- **Nguyên nhân gốc**: validator tự viết song song schema (DRY violation) chỉ reject schema < min, không reject > supported; secret scan chỉ quét value có prefix key (`apiKey = ...`), bỏ qua key tên secret; `detectConflicts` coi mọi trùng projectId là conflict kể cả re-register; down migration chỉ giữ vài trường.
+- **Tránh lặp lại**:
+  1. Khi có JSON Schema: thực thi schema làm single source of truth (required/pattern/enum/minLength/nested), không duy trì danh sách check tay song song; reject cả schema < MIN_SCHEMA_VERSION (STALE) và > SUPPORTED_SCHEMA_VERSION (UNSUPPORTED).
+  2. Secret scan phải duyệt CẢ key (camelCase: apiKey/botToken/accessToken/privateKey) lẫn value — fail-closed.
+  3. `registerProject` idempotent: cùng projectId+repository = update no-op (skip self trong detectConflicts); chỉ conflict khi identity (repository) khác hoặc resource (route/workspace) trùng giữa project KHÁC.
+  4. Migration down phải preserve mọi trường (chỉ đổi marker version), không drop data.
+  5. Fixture/manifest pin version phải theo canonical (`2026-08-23.7`), không hardcode `.1`.
+
+## L-031 (25/08/2026) — Schema/file loader phải fail-closed (throw), không trả null bị skip
+- **Triệu chứng**: GPT re-review vòng 2 (GPT-REV-070) bắt: `loadSchema()` trả `null` khi schema file thiếu/corrupt, rồi `if (schema)` bỏ qua hoàn toàn schema validation → "schema lỗi/mất bị bỏ qua"; nested validation cũng chưa đệ quy đầy đủ.
+- **Nguyên nhân gốc**: loader trả null thay vì ném; caller coi null = "không có schema để check" thay vì "không thể validate".
+- **Tránh lặp lại**: mọi loader phụ thuộc file ngoài (schema/policy/config) phải NÉM lỗi khi đọc/parse fail; caller bắt và chuyển thành error reject (VD `MANIFEST_SCHEMA_UNAVAILABLE`) — fail-closed tuyệt đối, không silent-skip. Validation schema viết đệ quy duyệt mọi cấp nested (type/pattern/enum/minLength).
+

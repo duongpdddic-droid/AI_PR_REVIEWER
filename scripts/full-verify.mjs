@@ -104,6 +104,7 @@ try {
     'test-runtime-hooks.mjs',
     'test-tg-notify.mjs',
     'test-protocol-drift.mjs',
+    'test-project-registry.mjs',
   ];
   for (const suite of optionalSuites) {
     const f = path.join(ROOT, 'scripts', suite);

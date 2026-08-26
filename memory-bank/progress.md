@@ -1,4 +1,26 @@
+## 25/08/2026 21:28 — Issue #14: fix GPT-REV-069/070/073 (re-review vòng 3) — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-069]: gate policy canonical — `CANONICAL_POLICY_VERSION=''2026-08-23.7''`; `validateManifest` reject `POLICY_VERSION_MISMATCH` khi `policy.version` lệch canonical.
+- [x] [GPT-REV-070]: `loadSchema()` fail-closed (throw khi file thiếu/corrupt → `MANIFEST_SCHEMA_UNAVAILABLE`); `validateAgainstSchema` viết lại đệ quy validate type/pattern/enum/minLength nested đầy đủ.
+- [x] [GPT-REV-073]: `migrateManifest` reversible lossless — `up` ghi nhận field added, `down` gỡ → `down(up(original)) === original`.
+- [x] Fixtures generic.json/duplicate-id.json pin canonical `2026-08-23.7`; migration default `policy.version = CANONICAL_POLICY_VERSION`.
+- [x] `scripts/test-project-registry.mjs` 50/50 PASS (thêm AC11 gate + nested fail-closed; strengthen AC10 round-trip).
+- [x] `pnpm verify` **94/94 PASS exit 0**; `full-verify` 94/94.
+- [x] Commit `e79e975`, push origin `feat/issue-14-project-registry`; comment `[CLINE-FIX-069..073]`; PR #16 labels `agent:gpt`+`status:review-requested`; HEAD `e79e9750b84868ab61e7efe004a9573c4472f5ee`.
+- [ ] CHỜ: GPT re-review vòng 3; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
 # Progress (AI_PR_REVIEWER)
+
+## 25/08/2026 23:40 — Issue #14: fix GPT-REV-069..073 (re-review vòng 2) — COMPLETED (chờ GPT re-review)
+
+- [x] [GPT-REV-069]: pin policy version canonical `2026-08-23.7` trong ai-pr-reviewer.json, qlda-dtxd.json, .agent/project.json.
+- [x] [GPT-REV-070]: `validateManifest` thực thi JSON Schema (required/pattern/enum/minLength/nested) làm single source of truth; reject schema tương lai (UNSUPPORTED_SCHEMA_VERSION).
+- [x] [GPT-REV-071]: `scanForSecrets` quét cả key camelCase (apiKey/botToken/accessToken) -> reject.
+- [x] [GPT-REV-072]: `registerProject` idempotent (re-register cùng projectId+repo = no-op); QLDA fixture route `dm-boss-qlda` (distinct).
+- [x] [GPT-REV-073]: down migration giữ nguyên mọi trường (true rollback, không mất data).
+- [x] `scripts/test-project-registry.mjs` 43/43 PASS (thêm AC10: idempotency, secret-in-key, future schema, route uniqueness, rollback preserves data).
+- [x] `pnpm verify` **94/94 PASS exit 0**; `full-verify` 94/94.
+- [x] Commit `0cc5827`, push origin `feat/issue-14-project-registry`; comment `[CLINE-FIX-069..073]` (issuecomment-5411484124); PR #16 labels `agent:gpt`+`status:review-requested`; Issue #14 `status:review-requested`.
+- [ ] CHỜ: GPT re-review vòng 2; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
 
 ## 25/08/2026 12:20 — Issue #9 REV-4: fix GPT-REV-065 startup context PR #10 — COMPLETED (chờ review vòng 4)
 
@@ -267,3 +289,12 @@
 ## Trạng thái
 IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR vì worktree còn file chưa commit (preflight fail-closed đúng). Để chạy execute thật: commit/đẩy công việc hiện tại hoặc dùng workspace sạch.
 ## 24/08/2026 22:54 — Issue #6 giai đoạn AI_PR_REVIEWER: PR #8 bàn giao CI PASS (context router fail-closed + 9 module + verify gates C2). pnpm verify 67/67; CI run 32747426537 SUCCESS @ 1056971a. Chờ GPT review; còn phần QLDA_DTXD (branch/PR riêng). Đồng thời: đóng #5 COMPLETED, #2 NOT_PLANNED (SPEC-SUPERSEDED), #6 claimed.
+## 25/08/2026 20:06 — Issue #14: Project Registry + versioned project manifest — IN PROGRESS (bàn giao GPT review)
+
+- [x] Claim #14 (`agent:cline` + `status:in-progress`); branch `feat/issue-14-project-registry` từ `origin/main` (fbfd2ff).
+- [x] Deliver: `scripts/project-manifest-schema.json` (schema versioned, fail-closed thiếu repo identity); `scripts/project-registry.mjs` (validate/registry/conflict/remote/register/migrate/owner); 6 fixtures; `.agent/project.json` mẫu.
+- [x] `scripts/test-project-registry.mjs` 32/32 PASS (AC1–AC9); đăng ký vào full-verify `optionalSuites`.
+- [x] `pnpm verify` **94/94 PASS exit 0**.
+- [ ] Commit + push; mở Draft PR `Ref #14`; handoff GPT (`agent:gpt` + `status:review-requested`).
+- [ ] CHỜ: GPT review; approval qua `gpt-approval.mjs` (user-relay) → user merge. Không merge/deploy.
+
