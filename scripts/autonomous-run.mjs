@@ -17,6 +17,7 @@
 //   node scripts/autonomous-run.mjs --execute --loop --interval 120000
 //   node scripts/autonomous-run.mjs --no-aider      # bỏ qua bước coder LLM (chỉ verify hiện trạng)
 import { execFileSync } from 'node:child_process';
+import { notifyTelegram as gwNotify } from './telegram-gateway/adapter-ai-pr-reviewer.mjs';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -568,24 +569,13 @@ function postComment(issueNumber, body) {
   runQuiet('gh', ['issue', 'comment', String(issueNumber), '--repo', REPO, '--body', body]);
 }
 
+// Issue #15: route qua gateway (single source of truth) thay vì gọi notify-telegram.mjs trực tiếp.
 function notifyTelegram(eventType, ref, state, summary, nextAction) {
-  const script = path.join(ROOT, 'scripts', 'notify-telegram.mjs');
-  if (!fs.existsSync(script)) return;
-  const payload = JSON.stringify({
-    eventType,
-    repo: REPO || 'AI_PR_REVIEWER',
-    ref: ref || '',
-    state,
-    summary,
-    nextAction,
-  });
-  const tmp = path.join(ROOT, '.autonomous-notify.json');
-  fs.writeFileSync(tmp, payload);
   try {
-    const r = runQuiet(NODE, [script, '--event-file', tmp]);
-    log(`Telegram notify (${eventType}): ${r.ok ? 'SENT' : 'FAILED ' + r.out}`);
-  } finally {
-    try { fs.unlinkSync(tmp); } catch {}
+    const id = gwNotify(eventType, ref, state, summary, nextAction);
+    return { ok: true, out: 'QUEUED id=' + id };
+  } catch (e) {
+    return { ok: false, out: String((e && e.message) || e) };
   }
 }
 

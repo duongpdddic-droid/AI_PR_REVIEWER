@@ -1,47 +1,43 @@
 # Active Context
 ## Mục tiêu
-Issue #14 — Shared Agent Platform: Project Registry và versioned project manifest (child của EPIC #11). Định nghĩa `.agent/project.json` versioned + machine-local registry + ownership matrix + registration/validation/migration APIs + fixtures. Không thay đổi Claude Mem hooks/retrieval.
+Issue #15 — Shared Telegram Gateway (Telegram control mode): single source of truth, queue name spacing,
+reliable notify, self-heal; xóa idle/sleep/hibernate + shutdown /h.
 
 ## Chế độ
-Tự hành (kênh Cline, lệnh Bố trực tiếp).
+Tự hành (kênh Cline, lệnh Bố trực tiếp). Bố chọn A (Full theo Acceptance Criteria) tại Issue #15.
+
+## Ranh giới kiến trúc (quyết định Bố)
+- Source gateway: scripts/telegram-gateway/ (Git-managed, review, test, rollback).
+- Runtime thực tế: ~/.ai-pr-reviewer/gateway/ (queue/lock/heartbeat/config — KHÔNG commit).
+- Xóa watchdog ngủ đông + mọi đường shutdown /h.
+- Giữ legacy adapter đến khi migration + soak test hoàn tất.
 
 ## Kế hoạch thực thi
-1. [x] Đọc EPIC #11, Issue #14, `.agent/config.json`, conventions (test pattern, full-verify).
-2. [x] Preflight: backup mb notes issue9 → `C:\Users\Admin\mb-issue9-backup`; stash 3 mb file; checkout `main` (fbfd2ff); tạo branch `feat/issue-14-project-registry` từ `origin/main`.
-3. [x] Set label #14 `agent:cline`+`status:ready-for-cline` (bỏ `status:queued`); claim qua `github-task-intake.mjs --claim 14` → `CLAIMED`, remote `agent:cline`+`status:in-progress`.
-4. [x] Viết `scripts/project-manifest-schema.json` (JSON Schema draft-07, required repo identity) + `scripts/project-registry.mjs` (validate fail-closed / registry / detectConflicts / assertWorkspaceRemote / registerProject / migrateManifest up+down / assertSingleOwner / registryOutsideWorktree).
-5. [x] Fixtures 6 file (`ai-pr-reviewer`, `qlda-dtxd`, `generic`, `duplicate-id`, `wrong-remote`, `stale-schema`) + `.agent/project.json` mẫu chuẩn.
-6. [x] `scripts/test-project-registry.mjs` (32 check, AC1–AC9) + đăng ký `test-project-registry.mjs` vào `optionalSuites` của full-verify.
-7. [x] Verify: `node scripts/test-project-registry.mjs` 32/32 PASS; `pnpm verify` **94/94 PASS exit 0**.
-8. [x] Commit + push branch; mở Draft PR `Ref #14`; handoff GPT (`agent:gpt` + `status:review-requested`).
-9. [x] Re-handoff vòng 2 (HEAD 0cc5827→52a2b9e) + vòng 3 (HEAD e79e975) sau fix 3 finding còn mở.
-10. [ ] Dừng chờ GPT re-review vòng 3 (không merge/deploy).
+1. [x] Claim #15, branch fix/issue-15-telegram-gateway từ origin/main (baseSha 0bedf104).
+2. [x] Xóa watchdog-hibernate.mjs (idle reminder + shutdown /h).
+3. [x] tg-notify-core.mjs: +events approved/merged; xóa hàm watchdog (silenceTimeoutLevels, nextSilenceState, resetOnActivity, SILENCE_DEFAULTS, watchdogSilenceTick, commitSilenceLevel, isPidAlive, isGuardAlive, shouldArm).
+4. [x] notify-telegram.mjs: xóa arm block + imports thừa.
+5. [x] Tạo scripts/telegram-gateway/: contract, transport, bridge (single getUpdates poller + lock chống 429), notifier (single outbound sender + idempotency), supervisor (self-heal), gateway (single instance), adapter-ai-pr-reviewer (legacy redirect), install, README.
+6. [x] Wire unified-orchestrator.io.notify + autonomous-run.notifyTelegram -> adapter (single source of truth).
+7. [x] Tests: test-telegram-gateway.mjs 9 PASS; test-tg-notify.mjs PASS; full-verify 110/110 PASS.
+8. [x] Smoke gateway: lock + heartbeat + ready tạo đúng (dummy token, 2s).
 
 ## Bước hiện tại
-GPT re-review vòng 2 đóng [071][072], còn mở [069][070][073]. Đã sửa 3 finding, commit `e79e975`, push, re-handoff PR #16 (labels `agent:gpt` + `status:review-requested`). Chờ GPT re-review vòng 3.
+Commit + push branch; tạo Draft PR Ref #15; handoff GPT (status:review-requested + agent:gpt).
 
 ## Bằng chứng thực thi
-- `scripts/project-manifest-schema.json`: schema versioned, `repository` required + pattern `^[\w.-]+/[\w.-]+$`.
-- `scripts/project-registry.mjs`:
-  - [GPT-REV-069] `CANONICAL_POLICY_VERSION=''2026-08-23.7''`; gate `POLICY_VERSION_MISMATCH` khi `policy.version` lệch canonical (fail-closed).
-  - [GPT-REV-070] `loadSchema()` fail-closed (ném khi file thiếu/corrupt → `MANIFEST_SCHEMA_UNAVAILABLE`); `validateAgainstSchema` rewrite đệ quy validate type/pattern/enum/minLength nested đầy đủ.
-  - [GPT-REV-073] `migrateManifest` reversible lossless: `up` ghi nhận field added, `down` gỡ → `down(up(original)) === original`.
-  - `scanForSecrets` quét key camelCase; `detectConflicts` idempotent; `registerProject` strip `__migrationAdded` trước save.
-- `scripts/fixtures/project-registry/*.json`: 6 fixtures; generic.json/duplicate-id.json pin canonical `2026-08-23.7`; qlda-dtxd route `dm-boss-qlda`.
-- `scripts/test-project-registry.mjs`: 50/50 PASS (AC1–AC11; AC11 = gate + nested fail-closed; AC10 strengthen round-trip).
-- `.agent/project.json`: manifest chuẩn repo này (policy pin `2026-08-23.7`).
-- `pnpm verify` 94/94 PASS exit 0; `full-verify` 94/94.
-- PR #16: comment `[CLINE-FIX-069..073]`; labels `agent:gpt`+`status:review-requested`; HEAD `e79e9750b84868ab61e7efe004a9573c4472f5ee`.
+- node --check toàn bộ scripts gateway + core/notify/orchestrator/autonomous: PASS.
+- pnpm test:gateway 9/9; pnpm test:tg PASS; pnpm verify 110/110.
+- gateway smoke: gateway.lock (pid+heartbeat) + ready; --status đọc được.
 
 ## Quyết định
-- Registry machine-local tại `~/.ai-pr-reviewer/registry.json` (ngoài worktree/Git).
-- Branch `feat/issue-14-project-registry` từ `origin/main`.
-- KHÔNG migrate `config.json` → `project.json` (out of scope); `project.json` manifest chuẩn song song.
-- Bỏ qua đồng thời #12/#13/#15 và QLDA_DTXD#48 theo lệnh Bố.
+- Chỉ 1 getUpdates poller (lock + heartbeat) -> tránh 409 conflict.
+- Outbound queue dir chung (không namespaced appNs); inbound namespaced theo appNs.
+- Token/config runtime ~/.ai-pr-reviewer/gateway/config.json (copy từ legacy tg.json qua install.mjs), KHÔNG commit.
 
 ## Vấn đề trì hoãn
-- [ ] Chưa migrate QLDA_DTXD/AI_PR_REVIEWER sang project adapter (EPIC workstream 4–5, Issue khác).
-- [ ] Chưa xây CLI init/sync/doctor (#12/#13/#15 — Bố cấm đồng thời).
+- [ ] Soak test thực tế (chạy gateway trên máy Bố) trước khi xóa hẳn notify-telegram.mjs legacy.
+- [ ] Có thể mở rộng adapter QLDA_DTXD nếu Bố cần.
 
 ## Bước tiếp theo
-Chờ GPT re-review vòng 3 tại PR #16 (HEAD e79e975). Sau approval GPT qua `gpt-approval.mjs` (user-relay) → user merge. Không tự merge/deploy.
+Push -> Draft PR Ref #15 -> handoff GPT. Sau GPT duyệt: merge (quyền Bố).

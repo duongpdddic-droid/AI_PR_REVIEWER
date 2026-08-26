@@ -1,3 +1,102 @@
+## 26/08/2026 09:59 — Issue #15: Shared Telegram Gateway (A) — COMPLETED (code+test)
+
+- [x] Bố chọn A (Full per AC). Xóa watchdog-hibernate.mjs (idle/sleep/hibernate + shutdown /h).
+- [x] tg-notify-core.mjs: +events approved/merged; xóa toàn bộ hàm watchdog (production path sạch).
+- [x] notify-telegram.mjs: xóa arm block + imports thừa.
+- [x] Tạo scripts/telegram-gateway/ (contract/transport/bridge/notifier/supervisor/gateway/adapter/install/README) — single getUpdates poller (lock chống 429), notifier idempotent, supervisor self-heal, runtime ngoài repo ~/.ai-pr-reviewer/gateway/ (KHÔNG commit token/queue/lock/heartbeat).
+- [x] Wire orchestrator.io.notify + autonomous.notifyTelegram -> adapter (single source of truth).
+- [x] Verify: node --check PASS; pnpm test:gateway 9/9; pnpm test:tg PASS; pnpm verify 110/110; gateway smoke (lock+heartbeat+ready) PASS.
+- [x] Commit + push fix/issue-15-telegram-gateway; Draft PR Ref #15; handoff GPT (agent:gpt + status:review-requested).
+
+## 26/08/2026 09:15 — Issue #14 / PR #16: MERGE vào main (không có deploy riêng)
+
+- [x] Bố đồng ý merge + deploy. PR #16 là Draft → `gh pr ready 16` + `gh pr merge 16 --squash` → **MERGED**; main HEAD `0bedf1046863222bcc5d9bf58bbcb5b630611f37` (mergedAt 2026-08-26T02:15:37Z).
+- [x] Deploy KHÔNG áp dụng: repo `AI_PR_REVIEWER` chỉ có Node scripts (package.json scripts: test/verify/orchestrate/notify…), không `appsscript.json`/`.clasp.json`, không script `deploy`. Merge vào main = hoàn tất.
+- [x] Đóng Issue #14 (resolved bởi PR #16). Memory Bank giữ uncommitted (theo chỉ thị "không đưa vào commit").
+
+## 26/08/2026 09:09 — Issue #14 / PR #16: GPT user-relay APPROVAL (status:approved)
+
+- [x] Relay GPT decision (issuecomment-5419527516, user `duongpdddic-droid`): APPROVE tại HEAD `8d2c7d8b2f13e731234b7a4e50aeeb345f066a1a`, policy `2026-08-23.7`, decisionId `gpt-pr16-8d2c7d8-20260826`.
+- [x] Chạy `node scripts/gpt-approval.mjs --repo duongpdddic-droid/AI_PR_REVIEWER --pr 16 --payload-file <tmp> --note "Relay GPT decision issuecomment-5419527516..."` → gate trả **ĐÃ GHI approval**.
+- [x] Read-back: labels `agent:gpt`+`status:approved` (xóa `status:review-requested`); HEAD `8d2c7d8b2f13e731234b7a4e50aeeb345f066a1a` giữ nguyên (KHÔNG merge); comment marker `5419617390` khóa full HEAD+policy+decisionId (`<!-- ai-review-approval:{...} -->`). Temp payload đã xóa.
+- [x] KHÔNG merge/deploy — chờ người dùng thực hiện merge theo thẩm quyền. Memory Bank giữ uncommitted (không đưa vào commit).
+
+## 26/08/2026 08:43 — Issue #14: resolve 3 false-positive secret findings (LOCAL-REV-001..003) — PRE_REVIEW_PASS + handoff GPT
+
+- [x] Bố chọn (B): sửa 3 false positive trong `scripts/test-project-registry.mjs` (AC4 aws key, AC10 apiKey + botToken) bằng cách tách literal giả rồi `.join('')` tại runtime; computed key `[fakeApiKeyName]`/`[fakeBotTokenName]`. KHÔNG đổi regex/logic production, KHÔNG allowlist, KHÔNG credential thật.
+- [x] Evidence: `node scripts/test-project-registry.mjs` **136/136 PASS** (thêm 3 assertion runtime-join + giữ CONTAINS_SECRET); temp `scanDiffForSecrets(git diff)` = 0 finding; `pnpm verify` 94/94 PASS; `git diff --check` sạch.
+- [x] Commit `8d2c7d8` (test-only `--only`), push `feat/issue-14-project-registry`.
+- [x] Re-handoff PR #16 (`changes-requested`→`review-requested`, giữ `agent:cline`, không `agent:gpt`); chạy `node scripts/unified-orchestrator.mjs --execute` tại HEAD `8d2c7d8` → **PRE_REVIEW_PASS** (openBlocking:0) → orchestrator tự post marker + handoff `agent:gpt`+`status:review-requested`. KHÔNG tự tạo marker, KHÔNG merge/deploy. Chờ GPT phê duyệt cuối.
+
+## 26/08/2026 07:33 — Reconcile: verdict [GPT-REV-076] Bố relay là STALE (không re-fix)
+
+- [x] Bố relay verdict CHANGES_REQUESTED [GPT-REV-076] (CI 32870732938) — nhưng reconcile cho thấy ĐÃ STALE:
+  - CI run `32870732938` headSha = `3406b2ee...` (commit round-6, TRƯỚC fix). Current HEAD PR #16 = `27196ed` (đã fix round 7+7b).
+  - PR #16 labels thực tế: `agent:cline`+`agent:gpt`+`status:review-requested` (KHÔNG phải changes-requested). `reviews`: `[]`.
+- [x] [GPT-REV-076] đã đóng tại HEAD `27196ed`: up() reject `toVersion!=='1.0'||from!=='0.9'` (UNSUPPORTED, phủ 0.9→2.0, L248-250); assert `planCore.toVersion===m.schemaVersion` (ROLLBACK_PLAN_VERSION_MISMATCH, L263-264); down() reject `toVersion!=='0.9'||from!=='1.0'` (L278-280); plan down `plan.toVersion===current && plan.fromVersion==='0.9'` (DIRECTION_MISMATCH, L291-292); chỉ 1.0→1.0 none (L306-309).
+- [x] Evidence: `node scripts/test-project-registry.mjs` 133/133 PASS (test `076 up 0.9->2.0 (đích lạ) -> fail-closed` + rollbackPlan mismatch); CI Verify PASS tại HEAD `27196ed`.
+- [x] HÀNH ĐỘNG: KHÔNG re-fix, KHÔNG commit dư thừa, KHÔNG đổi label (đã đúng review-requested). Đợi Bố xác nhận nếu确有 review mới trên 27196ed (cần số CI run khác). Issue #14 / PR #16 vẫn chờ GPT re-review.
+
+## 26/08/2026 07:25 — GitHub task-intake (safe checkpoint) — NO_TASK
+
+- [x] Chạy `node scripts/github-task-intake.mjs` (read-only) tại safe checkpoint: kết quả `{"status":"NO_TASK","repo":"duongpdddic-droid/AI_PR_REVIEWER"}`. Không có Issue `agent:cline`+`status:ready-for-cline` để claim.
+- [x] Trạng thái workspace: đang trên nhánh `feat/issue-14-project-registry` (Issue #14 / PR #16) chờ GPT re-review vòng 8; worktree chỉ 3 file memory-bank sửa, chưa commit (theo lệnh Bố giữ nguyên).
+- [x] Không thực hiện claim (NO_TASK + đang trên task branch → preflight sẽ BLOCKED_ACTIVE_ISSUE_BRANCH fail-closed). Tiếp tục chờ GPT re-review vòng 8; không merge/deploy.
+
+## 26/08/2026 07:03 — Issue #14: fix GPT-REV-076 (re-review vòng 7→8, round 7b) — COMPLETED (chờ GPT re-review vòng 8)
+
+- [x] Feedback vòng 7: path tăng/giảm lạ đã chặn đúng, nhưng branch `none` (from===toVersion) vẫn nhận version lạ bằng nhau `0.8→0.8`/`0.9→0.9`/`2.0→2.0` → `ok:true, direction:'none'`. Chỉ `1.0→1.0` idempotent.
+- [x] Sửa source: branch cuối chỉ trả `none` khi `from === MIGRATION_TO_VERSION && toVersion === MIGRATION_TO_VERSION` (tức `1.0→1.0`); mọi version lạ bằng nhau khác → `UNSUPPORTED_MIGRATION_PATH`.
+- [x] Test 133/133 PASS: thêm 0.8→0.8 / 0.9→0.9 / 2.0→2.0 → UNSUPPORTED + input bất biến; 1.0→1.0 vẫn none giữ nguyên; NEG-T1..T5 + AC10/AC12/AC13 không regress.
+- [x] `node scripts/test-project-registry.mjs` **133/133 PASS**; `pnpm verify` **94/94 PASS exit 0**; `git diff --check` sạch.
+- [x] Commit `27196edc018448acd16643cbdf25ede0a98ec843`, push `e898380..27196ed`; comment `[CLINE-FIX-076]`: PR issuecomment-5418689910 + Issue issuecomment-5418690309; labels read-back `agent:cline`+`agent:gpt`+`status:review-requested` (đã xóa dư `status:changes-requested`); CI Verify PASS HEAD mới.
+- [ ] CHỜ: GPT re-review vòng 8; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
+
+## 26/08/2026 06:53 — Issue #14: fix GPT-REV-076 (re-review vòng 6→7) — COMPLETED (chờ GPT re-review vòng 7)
+
+- [x] Thêm hằng `MIGRATION_FROM_VERSION='0.9'`, `MIGRATION_TO_VERSION='1.0'`.
+- [x] up(): giới hạn path chính xác 0.9→1.0; `toVersion!=='1.0' || from!=='0.9'` → `UNSUPPORTED_MIGRATION_PATH`; assert `planCore.toVersion === m.schemaVersion` → `ROLLBACK_PLAN_VERSION_MISMATCH` (rollbackPlan.toVersion khớp manifest.schemaVersion sau up).
+- [x] down(): giới hạn path chính xác 1.0→0.9; `toVersion!=='0.9' || from!=='1.0'` → `UNSUPPORTED_MIGRATION_PATH`; ràng buộc hướng plan `plan.toVersion !== current manifest` HOẶC `plan.fromVersion!=='0.9'` → `ROLLBACK_PLAN_DIRECTION_MISMATCH`.
+- [x] Test 124/124 PASS: 076 up 0.9→1.0 ok / 0.9→2.0 (đích lạ) fail / nguồn 0.8 & 2.0 fail / 1.0→1.0 none; down nguồn 2.0 fail / plan 1.0→2.0 & 0.9→2.0 DIRECTION_MISMATCH / path 1.0→0.9 ok lossless. NEG-T1..T5 + AC10/AC12/AC13 không regress.
+- [x] Lỗi giữa phiên: ràng buộc down ban đầu so `plan.fromVersion` với `MIGRATION_TO_VERSION` (sai — plan.fromVersion='0.9' nguồn gốc) làm AC6 crash; sửa thành `plan.toVersion === current manifest` (khớp schemaVersion) + `plan.fromVersion==='0.9'` (đích). Test 1.0→1.0 kỳ vọng fail → thực tế none idempotent → đổi test dùng nguồn 0.8.
+- [x] `node scripts/test-project-registry.mjs` **124/124 PASS**; `pnpm verify` **94/94 PASS exit 0**; `git diff --check` sạch.
+- [x] Commit `e898380645309ea2720031b0abef614936fa5cf7`, push `3406b2e..e898380`; comment `[CLINE-FIX-076]`: PR issuecomment-5418611957 + Issue issuecomment-5418612391; labels read-back `agent:cline`+`agent:gpt`+`status:review-requested` (đã xóa dư `status:changes-requested`); CI Verify PASS HEAD mới.
+- [ ] CHỜ: GPT re-review vòng 7; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
+
+## 25/08/2026 23:18 — Issue #14: fix GPT-REV-075 (re-review vòng 5→6) — COMPLETED (chờ GPT re-review vòng 6)
+
+- [x] Bỏ hẳn tham số `added` (mảng key tùy ý) khỏi `migrateManifest` down; thay bằng `rollbackPlan` bắt buộc.
+- [x] up() trả rollbackPlan versioned fingerprint-bound: `{planVersion:1, fromVersion, toVersion, addedKeys, fingerprint}`; fingerprint = sha256(JSON({manifest sau up, fromVersion, toVersion, addedKeys})) — bám cả manifest lẫn plan core, sửa thành phần nào cũng mismatch.
+- [x] down() gate tuần tự fail-closed: ROLLBACK_PLAN_REQUIRED → VERSION_INVALID → DIRECTION_MISMATCH (plan.fromVersion phải == toVersion yêu cầu) → KEYS_INVALID (rỗng/non-string) → ILLEGAL_KEY (ngoài allowlist UPGRADE_ALLOWED_ADDED_KEYS, chặn repository/projectId/schemaVersion/extension) → FINGERPRINT_INVALID/MISMATCH. Mutation chỉ trên clone sau mọi gate PASS; không đụng `__migrationAdded`.
+- [x] Test 107/107 PASS: NEG-T1 plan thiếu/rỗng/null; NEG-T2 4 key cấm; NEG-T3 sửa addedKeys/fingerprint/version/hướng; NEG-T4 plan A áp B; NEG-T5 + AC10/AC12 lossless round-trip; AC13 register/load giữ extension.
+- [x] Fix giữa phiên: check hướng ban đầu so plan.toVersion với toVersion yêu cầu (luôn lệch) → đổi thành plan.fromVersion === toVersion; fingerprint chỉ bám manifest không bắt được sửa addedKeys → mở rộng bám plan core; test dedupe-duplicate-key bỏ (duplicate = plan đã sửa → mismatch là đúng spec).
+- [x] Lỗi test-authoring: expression rác trong assertion no-mutate (`createHash(...) && ...`) — cùng chủ đề L-033 mục 3, tự phát hiện khi chạy.
+- [x] `node scripts/test-project-registry.mjs` **107/107 PASS**; `pnpm verify` **94/94 PASS exit 0**; `git diff --check` sạch (fix blank line EOF consolidatedLearnings).
+- [x] Commit `3406b2ee45172d221c5e1d455a717ef355d1e9c0`, push `9fadfd4..3406b2e`; comment `[CLINE-FIX-075]`: PR issuecomment-5413334455 + Issue issuecomment-5413334416; labels read-back PR+Issue `agent:gpt`+`status:review-requested`; CI Verify PASS HEAD mới.
+- [ ] CHỜ: GPT re-review vòng 6; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
+
+## 25/08/2026 22:45 — Issue #14: fix GPT-REV-073 (re-review vòng 4→5) — COMPLETED (chờ GPT re-review vòng 5)
+
+- [x] `registerProject`: XÓA `delete clean.__migrationAdded`; sau remote gate chỉ deep-clone và lưu nguyên clone — không strip extension field nào, input không mutate ở mọi nhánh.
+- [x] `migrateManifest` down: bỏ fallback đọc `m.__migrationAdded` + bỏ `delete m.__migrationAdded`; rollback CHỈ dùng tham số `added` tường minh (mảng string do up trả về, validate kiểu + dedupe); thiếu/không hợp lệ → fail-closed `{ok:false,direction:'down',reason:'ROLLBACK_METADATA_REQUIRED'}`; không đoán metadata từ tên field (`additionalProperties: true`).
+- [x] AC12 round-trip: nguồn chứa `__migrationAdded {note}` + `customExtension {enabled,items[]}` → `down(up(src))` deep-equal tuyệt đối original, cả 2 extension field giữ nguyên, không key ẩn trên manifest output.
+- [x] AC13 persistence: register manifest 1.0 chứa cả 2 extension field → input deep-equal snapshot; `loadRegistry({registryPath})` persisted giữ nguyên cả 2. No-mutate cho validation failure / conflict / remote mismatch / success.
+- [x] Negative rollback: thiếu `added` → ROLLBACK_METADATA_REQUIRED, payload nguyên vẹn; added non-string → fail-closed; dedupe trùng key → lossless.
+- [x] Lỗi test-authoring trong phiên (3 lần: expression rác, direction:'none' không có added, loadRegistry sai signature) → học L-033 vào consolidatedLearnings.md.
+- [x] `node scripts/test-project-registry.mjs` **80/80 PASS**; `pnpm verify` **94/94 PASS exit 0**; `git diff --check` sạch.
+- [x] Commit `9fadfd4ee6d5e99ede96e39d98e426d3e3c8d542` (chỉ 2 file scripts; memory-bank giữ uncommitted), push `ec68dae..9fadfd4`.
+- [x] Comment `[CLINE-FIX-073]`: PR #16 issuecomment-5412913870 + Issue #14 issuecomment-5412915307; labels PR + Issue read-back `agent:gpt`+`status:review-requested`; CI Verify PASS HEAD 9fadfd4.
+- [ ] CHỜ: GPT re-review vòng 5; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
+
+## 25/08/2026 22:12 — Issue #14: fix GPT-REV-073/074 (re-review vòng 3→4) — COMPLETED (chờ GPT re-review vòng 4)
+
+- [x] [GPT-REV-073]: `migrateManifest` KHÔNG ghi `__migrationAdded` lên manifest payload (trước đây có thể đè/mất extension field cùng tên); added-keys trả về result, `down()` nhận `added` để rollback xác định, lossless.
+- [x] [GPT-REV-074]: `registerProject` KHÔNG mutate input trước remote (AC3: remote khớp trước mọi mutation); validate/conflict/remote read-only, clone+strip chỉ sau `assertWorkspaceRemote` pass.
+- [x] Test: thread `added` trong AC6/AC10; thêm AC12 (extension field giữ nguyên sau up) + AC13 (input không bị mutate trước/sau remote).
+- [x] `node scripts/test-project-registry.mjs` **58/58 PASS**; `pnpm verify` **94/94 PASS exit 0**.
+- [x] Commit `ec68dae`, push `972972c..ec68dae` origin `feat/issue-14-project-registry`; comment `[CLINE-FIX-073][CLINE-FIX-074]`; PR #16 labels read-back `agent:gpt`+`status:review-requested`.
+- [ ] CHỜ: GPT re-review vòng 4; approval qua `gpt-approval.mjs` (user-relay) -> user merge. Không merge/deploy.
+
 ## 25/08/2026 21:28 — Issue #14: fix GPT-REV-069/070/073 (re-review vòng 3) — COMPLETED (chờ GPT re-review)
 
 - [x] [GPT-REV-069]: gate policy canonical — `CANONICAL_POLICY_VERSION=''2026-08-23.7''`; `validateManifest` reject `POLICY_VERSION_MISMATCH` khi `policy.version` lệch canonical.
@@ -298,3 +397,11 @@ IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR 
 - [ ] Commit + push; mở Draft PR `Ref #14`; handoff GPT (`agent:gpt` + `status:review-requested`).
 - [ ] CHỜ: GPT review; approval qua `gpt-approval.mjs` (user-relay) → user merge. Không merge/deploy.
 
+
+## 26/08/2026 08:14 — Chạy orchestrator pre-review PR #16 HEAD 27196ed → PRE_REVIEW_FINDINGS (fail-closed) — DECISION GATE
+
+- [x] GPT re-review vòng 8 (comment PR #16 issuecomment-5418794712): TECHNICAL_PASS / APPROVAL_BLOCKED_BY_PROTOCOL — [076] resolved, 0 Critical/Important; chỉ thiếu marker `PRE_REVIEW_PASS:27196edc018448acd16643cbdf25ede0a98ec843`.
+- [x] Chạy `node scripts/unified-orchestrator.mjs --execute` tại HEAD `27196edc018448acd16643cbdf25ede0a98ec843` (config targetRepos tạm đổi sang AI_PR_REVIEWER, gỡ `agent:gpt` để orchestrator xử lý; sau đó restore cả hai).
+- [x] Kết quả: **PRE_REVIEW_FINDINGS (3 critical, openBlocking=3, outcome=request-fix)**. 3 findings đều FALSE POSITIVE: secret-scanner flag test fixtures giả trong `scripts/test-project-registry.mjs` dòng 66/134/137 (`'AKIAIOSFODNN7EXAMPLE'`, `'sk-1234567890abcdef'` — key giả để test AC4/AC10 của chính bộ quét). KHÔNG phải rò rỉ thật.
+- [x] Orchestrator deterministic fail-closed: set `status:changes-requested` + post comment issuecomment-5419225160. KHÔNG handoff GPT, KHÔNG merge/deploy, KHÔNG sửa code. Config + Temp đã restore/dọn.
+- [ ] DECISION GATE (Mức 3): Bố chọn (A) chấp nhận false positive + thủ công post marker/restore labels, (B) sửa test fixtures placeholder rồi re-run orchestrator, hoặc (C) để nguyên fail-closed chờ GPT. PR state: `agent:cline` + `status:changes-requested`.

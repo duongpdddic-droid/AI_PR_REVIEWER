@@ -1,13 +1,12 @@
 #!/usr/bin/env node
-// tg-notify-core.mjs — Lõi thuần (pure, không IO/network) cho Telegram Notification & Watchdog Protocol.
-// Issue #16: tái sử dụng notifier/watchdog hiện có; chỉ thêm lớp tính toán dùng chung để test được:
+// tg-notify-core.mjs — Lõi thuần (pure, không IO/network) cho Telegram Notification (shared contract).
+// Issue #15: dùng chung bởi notify-telegram.mjs và scripts/telegram-gateway/ (single source of truth).
 //   - buildMessage(): dựng nội dung Telegram tối thiểu (eventType, repo, issue/pr, state, summary,
 //     nextAction, link) với escape an toàn.
 //   - eventKey() + NotificationStore: khóa idempotency theo `repo + issue/pr + event type + state/version`;
 //     retry sau lỗi gửi được phép, retry sau khi đã SENT không tạo tin thứ hai.
-//   - silenceTimeoutLevels() + nextSilenceState(): watchdog 2 mức cảnh báo (level1 / level2) dựa timestamp
-//     thực tế, không suy đoán từ log; reset khi hoạt động trở lại.
-// Không dependency ngoài (chỉ Node stdlib). Các test ở scripts/test-tg-notify.mjs.
+//   - withRetry(): retry có giới hạn, backoff theo số lần fail.
+// Không dependency ngoài (chỉ Node stdlib). Test: scripts/test-tg-notify.mjs + scripts/test-telegram-gateway.mjs.
 
 // Retry có giới hạn cho thao tác gửi (Issue #2 A7): thử tối đa `attempts` lần,
 // nghỉ `delayMs * (số lần đã fail)` giữa các lần. Ném lỗi cuối cùng nếu hết lượt.
@@ -33,7 +32,7 @@ export function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
-// Nhãn sự kiện theo ma trận Issue #16.
+// Nhãn sự kiện theo ma trận Issue #16 / #15 (gateway events: done/blocked/needs-input/test-fail/approved/merged).
 export const EVENT_LABELS = {
   start: 'Bắt đầu Issue',
   'needs-input': 'Cần bạn quyết định',
@@ -41,6 +40,8 @@ export const EVENT_LABELS = {
   done: 'Hoàn thành / Bàn giao',
   'test-fail': 'Test/CI thất bại',
   resume: 'Đã tiếp tục',
+  approved: 'Đã duyệt (GPT)',
+  merged: 'Đã merge',
   'timeout-level1': 'Cảnh báo im lặng (lần 1)',
   'timeout-level2': 'Cảnh báo im lặng (nghiêm trọng)',
 };
@@ -89,83 +90,5 @@ export class NotificationStore {
   has(key) { return this.sent.has(key); }
 }
 
-// Mức cảnh báo im lặng watchdog dựa timestamp thực tế (ms). Không suy đoán từ log.
-// Trả 'active' (vẫn hoạt động) | 'level1' (quá hạn lần 1) | 'level2' (quá hạn nghiêm trọng) | 'none' (không có guard).
-// lastHeartbeat: ms cuối Cline ghi nhận hoạt động; armedAt: ms lúc arm guard; now: ms hiện tại (inject).
-// level1Ms / level2Ms: ngưỡng (level2 > level1).
-export function silenceTimeoutLevels({ armedAt, lastHeartbeat, now, level1Ms, level2Ms }) {
-  if (!armedAt) return 'none';
-  const base = lastHeartbeat || armedAt;
-  const elapsed = Math.max(0, now - base);
-  if (level2Ms && elapsed >= level2Ms) return 'level2';
-  if (elapsed >= level1Ms) return 'level1';
-  return 'active';
-}
-
-// Có nên gửi cảnh báo lần này không (tránh lặp cùng cấp độ): mới qua level1 hoặc level2 so với cấp đã gửi.
-// prev: 'active'|'level1'|'level2'|null. Trả { level, shouldSend, eventType }.
-export function nextSilenceState(prev, level) {
-  const shouldSend = level !== 'active' && prev !== level;
-  const eventType = level === 'level2' ? 'timeout-level2' : level === 'level1' ? 'timeout-level1' : null;
-  return { level, shouldSend, eventType };
-}
-
-// Reset trạng thái im lặng khi Cline hoạt động trở lại: trả guard với lastHeartbeat=now, silenceWarnLevel='active'.
-export function resetOnActivity(guard, now) {
-  return { ...guard, lastHeartbeat: now, silenceWarnLevel: 'active' };
-}
-
-// Ngưỡng im lặng watchdog mặc định (dùng chung daemon, --status và test).
-export const SILENCE_DEFAULTS = { level1Ms: 30 * 60_000, level2Ms: 60 * 60_000 };
-
-// Tick chu kỳ daemon (REV-020): tính cấp im lặng theo `now`, quyết định có gửi cảnh báo mới không.
-// Chống gửi lặp cùng cấp qua guard.silenceWarnLevel (lưu cấp đã gửi). KHÔNG tự đổi GitHub state,
-// KHÔNG kết luận trạng thái task. Heartbeat mới (lastHeartbeat cập nhật) → tính lại từ 'active'.
-// CHỈ trả event khi st.shouldSend === true (cấp mới chưa gửi) — cấp trùng prev KHÔNG phát lại.
-// Trả { guard, events }: guard = guard mới khi cần ghi cấp đã gửi (giữ nguyên nếu không gửi);
-// events = ['timeout-level1' | 'timeout-level2'] tối đa 1 phần tử.
-export function watchdogSilenceTick(guard, now, { level1Ms, level2Ms } = {}) {
-  if (!guard) return { guard: null, events: [] };
-  const l1 = level1Ms ?? SILENCE_DEFAULTS.level1Ms;
-  const l2 = level2Ms ?? SILENCE_DEFAULTS.level2Ms;
-  const level = silenceTimeoutLevels({ armedAt: guard.armedAt, lastHeartbeat: guard.lastHeartbeat, now, level1Ms: l1, level2Ms: l2 });
-  const st = nextSilenceState(guard.silenceWarnLevel || 'active', level);
-  if (!st.eventType || !st.shouldSend) return { guard, events: [] };
-  return { guard: { ...guard, silenceWarnLevel: level }, events: [st.eventType] };
-}
-
-// REV-023+025: commit cấp im lặng đã gửi vào guard TRÊN ĐĨA sau khi TRANSPORT gửi xong.
-// Race guard: trong lúc await sendTelegram, tiến trình khác (--heartbeat/--cancel/--arm) có thể
-// đã ghi guard mới. Hàm này chỉ ghi nếu guard hiện tại VẪN CÙNG observation (armedAt + lastHeartbeat
-// + pid + cancel khớp với guard đã dùng để tạo tick); ngược lại giữ nguyên trạng thái mới — KHÔNG
-// ghi snapshot cũ đè lên heartbeat/cancel/arm mới (REV-025). Ha: current guard bị xóa (null) -> null.
-// Khi hợp lệ -> MERGE duy nhất silenceWarnLevel, không thay toàn bộ object.
-export function commitSilenceLevel(guard, tick, currentGuard) {
-  if (!tick || tick.events.length === 0) return guard;
-  if (!currentGuard) return currentGuard; // guard bị xóa trong lúc send -> không ghi lại
-  const sameObservation =
-    guard != null &&
-    currentGuard.armedAt === guard.armedAt &&
-    currentGuard.lastHeartbeat === guard.lastHeartbeat &&
-    currentGuard.pid === guard.pid &&
-    currentGuard.cancel === guard.cancel;
-  if (!sameObservation) return currentGuard; // heartbeat/cancel/arm mới giữa lúc send -> giữ nguyên
-  return { ...currentGuard, silenceWarnLevel: tick.guard.silenceWarnLevel };
-}
-
-// PID còn sống? process.kill(pid, 0) không throw = sống (edge hiếm: pid bị tái sử dụng).
-export function isPidAlive(pid) {
-  const n = Number(pid);
-  if (!Number.isInteger(n) || n <= 0) return false;
-  try { process.kill(n, 0); return true; } catch { return false; }
-}
-
-// Guard có daemon hợp lệ đang chạy không — phân biệt guard sống vs guard mồ côi (REV-021).
-export function isGuardAlive(guard) {
-  return Boolean(guard && !guard.cancel && isPidAlive(guard.pid));
-}
-
-// Notifier có nên arm watchdog không: chỉ arm khi chưa có daemon hợp lệ (guard null hoặc mồ côi).
-export function shouldArm(guard) {
-  return !isGuardAlive(guard);
-}
+// NOTE (Issue #15): Watchdog hibernate / idle-reminder / shutdown /h logic đã XÓA hoàn toàn.
+// Gateway mới (scripts/telegram-gateway/) quản lý lock/heartbeat/supervisor thay thế, không nhắc ngủ đông.
