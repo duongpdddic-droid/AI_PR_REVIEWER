@@ -107,6 +107,7 @@ try {
     'test-protocol-drift.mjs',
     'test-project-registry.mjs',
     'test-test-evidence.mjs',
+    'test-temp-hygiene.mjs',
   ];
   for (const suite of optionalSuites) {
     const f = path.join(ROOT, 'scripts', suite);
