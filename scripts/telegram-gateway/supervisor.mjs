@@ -53,6 +53,33 @@ export function isCircuitOpen(consecutiveFails, windowStart, now) {
   return consecutiveFails >= MAX_CONSECUTIVE_FAILS && (now - windowStart) <= FAIL_WINDOW_MS;
 }
 
+// Vòng giám sát supervisor. GPT-REV-086: production PHẢI ngủ đúng backoff (computeBackoff lên tới
+// MAX_BACKOFF_MS) để thật sự tránh restart storm — KHÔNG clamp xuống 2s. Test chạy nhanh bằng cách
+// tiêm `sleepFn` rút ngắn, KHÔNG đụng thời gian production.
+export async function supervisorLoop({ runSupervisorOnceFn = runSupervisorOnce, sleepFn = sleep } = {}) {
+  let consecutiveFails = 0;
+  let windowStart = 0;
+  while (true) {
+    const r = await runSupervisorOnceFn();
+    if (['recovered', 'already-ready', 'already-ready-other', 'monitor-degraded'].includes(r.action)) {
+      consecutiveFails = 0; windowStart = 0;
+      await sleepFn(STALE_MS / 2);
+      continue;
+    }
+    consecutiveFails += 1;
+    if (windowStart === 0) windowStart = Date.now();
+    if (isCircuitOpen(consecutiveFails, windowStart, Date.now())) {
+      console.error(`supervisor: circuit-open sau ${consecutiveFails} lần recovery-failed; nghỉ ${MAX_BACKOFF_MS}ms. Kiểm tra log gateway.`);
+      await sleepFn(MAX_BACKOFF_MS);
+      consecutiveFails = 0; windowStart = 0;
+      continue;
+    }
+    const backoff = computeBackoff(consecutiveFails);
+    console.error(`supervisor: recovery-failed (lần ${consecutiveFails}); backoff ${backoff}ms`);
+    await sleepFn(backoff); // GPT-REV-086: ngủ ĐÚNG backoff, không clamp.
+  }
+}
+
 function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--stop')) {
@@ -75,29 +102,8 @@ function main() {
     runSupervisorOnce().then((r) => { console.log(JSON.stringify(r)); process.exit(0); });
     return;
   }
-  (async () => {
-    let consecutiveFails = 0;
-    let windowStart = 0;
-    while (true) {
-      const r = await runSupervisorOnce();
-      if (['recovered', 'already-ready', 'already-ready-other', 'monitor-degraded'].includes(r.action)) {
-        consecutiveFails = 0; windowStart = 0;
-        await sleep(STALE_MS / 2);
-        continue;
-      }
-      consecutiveFails += 1;
-      if (windowStart === 0) windowStart = Date.now();
-      if (isCircuitOpen(consecutiveFails, windowStart, Date.now())) {
-        console.error(`supervisor: circuit-open sau ${consecutiveFails} lần recovery-failed; nghỉ ${MAX_BACKOFF_MS}ms. Kiểm tra log gateway.`);
-        await sleep(MAX_BACKOFF_MS);
-        consecutiveFails = 0; windowStart = 0;
-        continue;
-      }
-      const backoff = computeBackoff(consecutiveFails);
-      console.error(`supervisor: recovery-failed (lần ${consecutiveFails}); backoff ${backoff}ms`);
-      await sleep(Math.min(backoff, 2000));
-    }
-  })();
+  // Production: chạy vòng giám sát với backoff ĐÚNG thời gian (GPT-REV-086).
+  supervisorLoop().catch((e) => { console.error('supervisor: ' + (e && e.message || e)); process.exit(1); });
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) main();

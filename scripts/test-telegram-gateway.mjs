@@ -374,6 +374,25 @@ test('supervisor backoff + circuit breaker (GPT-REV-079)', () => {
   assert.equal(supervisor.isCircuitOpen(5, 1000, 1000 + supervisor.FAIL_WINDOW_MS + 1), false); // quá window
 });
 
+// 18b. supervisor loop ngủ ĐÚNG backoff (KHÔNG clamp production) (GPT-REV-086).
+test('supervisor loop backs off with real backoff, not clamped (GPT-REV-086)', async () => {
+  // runSupervisorOnceFn luôn recovery-failed; sleepFn GHI nhận các ms được yêu cầu.
+  const sleeps = [];
+  let fails = 0;
+  await Promise.race([
+    supervisor.supervisorLoop({
+      runSupervisorOnceFn: async () => { fails += 1; return { action: 'recovery-failed' }; },
+      sleepFn: async (ms) => { sleeps.push(ms); if (sleeps.length >= 2) throw new Error('stop-loop'); },
+    }),
+    new Promise((r) => setTimeout(r, 3000)).then(() => { throw new Error('loop timeout'); }),
+  ]).catch(() => {});
+  // fails đầu → backoff computeBackoff(1)=60000 (STALE_MS*2^0). Không được ~2000 (clamp cũ).
+  assert.equal(fails >= 2, true);
+  assert.equal(sleeps[0], supervisor.computeBackoff(1)); // 60000, không phải Math.min(60000,2000)
+  assert.equal(sleeps[0] > 2000, true);
+  assert.equal(sleeps[1], supervisor.computeBackoff(2));
+});
+
 // 19. notifier dequeues duplicate (skipped) outbound so queue does not grow (GPT-REV-083).
 test('notifier dequeues duplicate outbound (GPT-REV-083)', async () => {
   cleanRuntime();
