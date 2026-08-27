@@ -33,6 +33,7 @@ import {
   resolveReviewPhase, scanDiffForSecrets,
 } from './review-contract.mjs';
 import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
+import { notifyRaw } from './telegram-gateway/adapter-ai-pr-reviewer.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -138,10 +139,14 @@ function defaultIo() {
     postComment(repo, number, body) {
       return this.gh(['pr', 'comment', String(number), '--repo', repo, '--body-file', '-'], { input: body });
     },
+    // Issue #15: route qua gateway (single source of truth). Gateway thực sự gửi async.
     notify(title, summary) {
-      const res = spawnSync(process.execPath, [path.join(HERE, 'notify-telegram.mjs'), title, summary], { encoding: 'utf8' });
-      const ok = res.status === 0;
-      return { ok, attempts: 1, evidence: ok ? 'SENT' : 'FAILED', detail: ((res.stderr || '') + (res.stdout || '')).trim().slice(0, 200) };
+      try {
+        const id = notifyRaw(title, summary);
+        return { ok: true, attempts: 1, evidence: 'QUEUED', detail: 'gateway outbound id=' + id };
+      } catch (e) {
+        return { ok: false, attempts: 0, evidence: 'FAILED', detail: String((e && e.message) || e).slice(0, 200) };
+      }
     },
     log(level, msg) { console.error(`[${level}] ${msg}`); },
   };

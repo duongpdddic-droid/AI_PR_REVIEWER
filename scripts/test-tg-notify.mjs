@@ -4,8 +4,7 @@
 // withRetry backoff, watchdog silence levels + reset.
 import assert from 'node:assert/strict';
 import {
-  buildMessage, eventKey, escapeHtml, nextSilenceState, NotificationStore,
-  resetOnActivity, silenceTimeoutLevels, withRetry,
+  buildMessage, eventKey, escapeHtml, NotificationStore, withRetry,
 } from './tg-notify-core.mjs';
 
 let passed = 0;
@@ -72,26 +71,7 @@ assert.equal(escapeHtml('<a href="x">&"'), '&lt;a href="x"&gt;&amp;"');
   assert.deepEqual(delays, [5], 'delay = delayMs * số lần đã fail');
 }
 
-// 6. Watchdog silence levels dựa timestamp thực tế; không arm -> none.
-{
-  const now = 1_000_000;
-  assert.equal(silenceTimeoutLevels({ armedAt: 0, now, level1Ms: 30, level2Ms: 60 }), 'none', 'không armed -> none');
-  assert.equal(silenceTimeoutLevels({ armedAt: now - 10, lastHeartbeat: 0, now, level1Ms: 30, level2Ms: 60 }), 'active');
-  assert.equal(silenceTimeoutLevels({ armedAt: now - 31, lastHeartbeat: 0, now, level1Ms: 30, level2Ms: 60 }), 'level1');
-  assert.equal(silenceTimeoutLevels({ armedAt: now - 61, lastHeartbeat: 0, now, level1Ms: 30, level2Ms: 60 }), 'level2');
-}
-
-// 7. nextSilenceState: mỗi cấp chỉ gửi 1 lần; active không gửi.
-assert.deepEqual(nextSilenceState('active', 'level1'),
-  { level: 'level1', shouldSend: true, eventType: 'timeout-level1' });
-assert.equal(nextSilenceState('level1', 'level1').shouldSend, false, 'cùng cấp không lặp');
-assert.equal(nextSilenceState('level1', 'active').shouldSend, false);
-
-// 8. resetOnActivity trả heartbeat mới + active.
-{
-  const g = resetOnActivity({ armedAt: 1, lastHeartbeat: 2, silenceWarnLevel: 'level1' }, 999);
-  assert.equal(g.lastHeartbeat, 999);
-  assert.equal(g.silenceWarnLevel, 'active');
-}
+// 6-8. Watchdog silence/heartbeat tests ĐÃ XÓA (Issue #15): logic hibernate/idle-reminder/shutdown /h
+// đã loại bỏ hoàn toàn khỏi production path. Xem scripts/test-telegram-gateway.mjs cho gateway tests.
 
 console.log(`\ntg-notify: ${passed} PASS${process.exitCode ? ' (có FAIL)' : ''}`);

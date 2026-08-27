@@ -33,4 +33,5 @@ Mặc định KHÔNG tự thực thi — thuộc nhóm hành động hệ thốn
 3. Báo Bố trước khi chạy (1 câu: lệnh gì, sẽ chạy).
 4. Không chạy nếu task còn defer issue chặn, tiến trình đang chạy quan trọng, hoặc có dấu hiệu máy đang dùng.
 
-Cơ chế watchdog tự động (`scripts/watchdog-hibernate.mjs`): xem đầy đủ điều kiện tại `01-execution-workflow.md` §7–8. Nguyên tắc chung: KHÔNG tự ý shutdown/sleep/hibernate ngoài 2 cơ chế đã liệt kê (chỉ thị trực tiếp / watchdog đã duyệt).
+Nguyên tắc chung: KHÔNG tự ý shutdown/sleep/hibernate — chỉ thực thi dưới chỉ thị trực tiếp của Bộ (xem `05-terminal-safety.md` §5).
+

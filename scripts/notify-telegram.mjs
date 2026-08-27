@@ -11,12 +11,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { buildMessage, eventKey, NotificationStore, EVENT_LABELS, shouldArm, withRetry } from './tg-notify-core.mjs';
+import { buildMessage, eventKey, NotificationStore, EVENT_LABELS, withRetry } from './tg-notify-core.mjs';
 
 const configPath = process.env.AI_PR_REVIEWER_TG_CONFIG || path.join(os.homedir(), '.ai-pr-reviewer', 'tg.json');
-const GUARD_PATH = path.join(os.homedir(), '.ai-pr-reviewer', 'guard.json');
 const KEYS_PATH = path.join(os.homedir(), '.ai-pr-reviewer', 'notify-keys.json');
 let cfg = {};
 try { cfg = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
@@ -28,7 +25,6 @@ if (!botToken || !chatId) {
 }
 
 const argv = process.argv.slice(2);
-const noGuard = argv.includes('--no-guard');
 const evIdx = argv.indexOf('--event');
 const evFileIdx = argv.indexOf('--event-file');
 const stamp = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
@@ -89,20 +85,5 @@ try {
 if (store && key) store.markSent(key); // chỉ đánh dấu SENT sau khi gửi thành công (retry sau lỗi vẫn cho phép)
 console.log('notify-telegram: sent to ' + chatId + (key ? ' (eventKey=' + key + ')' : ''));
 
-// Chi thi Bo 12/08/2026: xong task -> arm watchdog 45 phut tu ngu dong neu khong ra lenh moi.
-// Vo hieu voi --no-guard (khi test, khong muon arm).
-if (!noGuard) {
-  try {
-    const wd = fileURLToPath(new URL('watchdog-hibernate.mjs', import.meta.url));
-    // REV-021: chỉ bỏ qua arm khi có daemon hợp lệ đang chạy (guard sống + pid + chưa cancel);
-    // guard mồ côi (pid chết/thiếu hoặc cancel) vẫn được arm lại theo đúng 1 đường code duy nhất.
-    let guard = null;
-    try { guard = JSON.parse(fs.readFileSync(GUARD_PATH, 'utf8')); } catch {}
-    if (shouldArm(guard)) {
-      const r = spawnSync(process.execPath, [wd, '--arm', '--title', armTitle], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
-      console.log(r.status === 0 ? 'watchdog: armed nhac nho (idle 15p se hoi Bo).' : 'watchdog arm FAIL: ' + (r.stderr || r.stdout || '').trim());
-    } else {
-      console.log('watchdog: da armed (guard daemon hop le) -> bo qua spawn trung lap');
-    }
-  } catch (e) { console.warn('watchdog arm error: ' + e.message); }
-}
+// Issue #15: ĐÃ XÓA arm watchdog / idle-reminder / shutdown /h. Gateway (scripts/telegram-gateway/)
+// quản lý lifecycle, không nhắc ngủ đông. KHÔNG gọi shutdown /h.

@@ -58,6 +58,11 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 ## L-012 (23/08/2026) — `Get-Content -Raw` không `-Encoding utf8` phá UTF-8 không BOM
 - **Triệu chứng**: trim `memory-bank/activeContext.md` bằng `Get-Content -Raw` + `Set-Content` → toàn bộ tiếng Việt trong file thành mojibake trên đĩa (double-encoding), phải viết lại file.
 - **Nguyên nhân gốc**: PowerShell 5.1 `Get-Content` mặc định decode file không BOM theo ANSI/codepage máy; nội dung UTF-8 bị diễn giải sai rồi được ghi lại UTF-8 → hỏng vĩnh viễn (khác L-006: chỉ hiển thị vỡ, dữ liệu còn nguyên).
+
+## L-013 (26/08/2026) — Test fixture secret phải ghép tại runtime để tránh diff-secret-scanner false positive
+- **Triệu chứng**: orchestrator pre-review flag 3 `critical` (PRE_REVIEW_FINDINGS) vì test fixtures chứa literal giả `AKIAIOSFODNN7EXAMPLE` / `sk-1234567890abcdef` trên source line; fail-closed trả PR về `status:changes-requested` dù KHÔNG rò rỉ thật.
+- **Nguyên nhân gốc**: `scanDiffForSecrets` quét mọi dòng `+` của diff khớp `SECRET_PATTERNS` (api-key/aws-access-key); test viết literal hoàn chỉnh để assert detector → chính literal đó bị diff-scanner bắt.
+- **Tránh lặp lại**: khi viết test cho secret-detection, dựng fake secret bằng cách tách đoạn rồi `['AKIAIOSFOD','NN7EXAMPLE'].join('')` / `['sk-12345678','90abcdef'].join('')`, dùng computed key `[fakeApiKeyName]`; assertions so sánh runtime-join (`=== ['AKIAIOSFOD','NN7EXAMPLE'].join('')`) — KHÔNG để literal hoàn chỉnh trên bất kỳ source line nào. Giữ nguyên regex production.
 - **Tránh lặp lại**: CẤM dùng `Get-Content`/`Set-Content` cho file UTF-8 không BOM; mọi thao tác byte-chính xác qua `[IO.File]::ReadAllText/WriteAllText` với `UTF8Encoding($false)` hoặc tool `editor`. Nếu lỡ ghi hỏng: dừng, viết lại file từ nguồn đã biết (không cố "sửa" mojibake).
 
 ## L-007 (22/08/2026) — `gh pr list --label` đi qua search index có độ trễ
@@ -164,6 +169,11 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
   1. Quy tắc bắt buộc với mọi pipeline xử lý dữ liệu không tin cậy: **redact/sanitize TRƯỚC, filter shape SAU**; giữ lại trường lạ sau khi đã redact (preserve-after-redact).
   2. Test telemetry phải bao gồm trường lạ chứa pattern secret và assert giá trị sau redaction — không chỉ assert các trường chuẩn.
 
+## L-032 (25/08/2026) — Manifest test dùng `projectType` tự do (`generic`) bị schema enum reject
+- **Triệu chứng**: test `registerProject`/`migrateManifest` với `projectType: 'generic'` fail validate `SCHEMA_ENUM_PROJECTTYPE` dù mọi trường khác hợp lệ.
+- **Nguyên nhân gốc**: `scripts/project-manifest-schema.json` định nghĩa `projectType.enum = ["control-plane","product","adapter"]`; `'generic'` không nằm trong danh sách → `validateAgainstSchema` reject.
+- **Tránh lặp lại**: khi viết manifest fixture/test cho Project Registry, `projectType` chỉ nhận `control-plane` | `product` | `adapter` (tra `project-manifest-schema.json` trước khi đặt giá trị tuỳ ý). Verify gate (`node scripts/test-project-registry.mjs`) sẽ bắt lỗi này ngay — đừng đoán enum.
+
 ## L-026 (25/08/2026) — Regex secret chỉ khớp token CÓ prefix, bỏ sót `Bearer <token>` trần trong stderr
 - **Triệu chứng**: test negative GPT-REV-061 gửi chuỗi `Bearer abcDEF123…` không có `Authorization:` đứng trước → assertion "đã redact" FAIL dù regex Authorization/Bearer đã tồn tại.
 - **Nguyên nhân gốc**: regex `/((?:authorization|auth)\s*[:=]\s*"?bearer\s+)…/` bắt buộc prefix; log stderr thực tế thường in `Bearer <token>` trần.
@@ -199,3 +209,70 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: loader trả null thay vì ném; caller coi null = "không có schema để check" thay vì "không thể validate".
 - **Tránh lặp lại**: mọi loader phụ thuộc file ngoài (schema/policy/config) phải NÉM lỗi khi đọc/parse fail; caller bắt và chuyển thành error reject (VD `MANIFEST_SCHEMA_UNAVAILABLE`) — fail-closed tuyệt đối, không silent-skip. Validation schema viết đệ quy duyệt mọi cấp nested (type/pattern/enum/minLength).
 
+## L-033 (25/08/2026) — 3 lỗi test-authoring liên tiếp khi viết AC12/negative-rollback (bị verify gate bắt hết)
+- **Triệu chứng**: (1) chạy test crash `upD.added is not iterable`; (2) `saved.__migrationAdded` undefined khi đọc lại registry; (3) sót expression rác `'1.0'.valueOf() && '0.9'` trong toVersion.
+- **Nguyên nhân gốc**: (1) quên contract `migrateManifest`: toVersion === from → trả `{ok:true,direction:'none'}` KHÔNG có field `added` — nguồn đã ở 1.0 nên up là no-op; (2) `loadRegistry`/`saveRegistry` nhận object param `{ registryPath }`, truyền string thì destructuring rơi về default path (registry máy thật) thay vì path test; (3) draft dở sót lại khi edit.
+- **Tránh lặp lại**:
+  1. Muốn test round-trip up→down phải dùng nguồn version thấp hơn (0.9→1.0); nhớ direction 'none' không kèm `added`.
+  2. Luôn gọi `loadRegistry({ registryPath })` / `saveRegistry({ registry, registryPath })` dạng object param.
+  3. Trước khi chạy test, rà lại mọi expression vừa thêm — không để placeholder/giá trị thử nghiệm.
+
+
+## L-034 (26/08/2026) — Gateway outbound queue chung -> test cần dọn trước khi enqueue
+- **Triệu chứng**: test-telegram-gateway test 8 fail 2 !== 1 vì readQueue('ai-pr-reviewer','outbound') trả 2 item dù chỉ enqueue 1; item sót từ test 1 nằm cùng dir outbound (không namespaced theo appNs).
+- **Nguyên nhân gốc**: contract.enqueue outbound luôn ghi vào OUTBOUND_DIR chung, không phân theo appNs như inbound; test chạy chung 1 runtime dir (TMP) nên leftover từ test trước gây nhiễu.
+- **Tránh lặp lại**: test gateway dùng chung runtime dir phải dọn (unlink) file sót trong OUTBOUND_DIR trước khi assert số lượng; hoặc mỗi test dùng sub-dir riêng. Inbound namespaced, outbound thì không - ghi chú rõ trong contract.
+
+## L-035 (26/08/2026) — `isValidAppNs` regex chỉ nhận lowercase làm reject appNs hợp lệ (camelCase)
+- **Triệu chứng**: routeUpdate / enqueue reject `appA`/`appB` dù đây là namespace app hợp lệ; allowlist match sai.
+- **Nguyên nhân gốc**: regex cho appNs ép `[a-z]` (lowercase-only), trong khi tên app thực tế dùng `appA`/`appB`/`ai-pr-reviewer` (có chữ hoa + dash).
+- **Tránh lặp lại**: regex appNs dùng conservative, cho phép chữ (cả hoa/thường), số, `-`, `.`, `_`, giới hạn độ dài (VD `^[A-Za-z0-9._-]{1,40}$`); test bằng cả lowercase, camelCase, dash-case. Đừng ép lowercase nếu tên app được phép có hoa.
+
+## L-036 (26/08/2026) — takeoverLock stale phải check `isLockAlive`, không chỉ `readLock()`
+- **Triệu chứng**: GPT-REV-078 owner-only lock test fail `false !== true` (acq3.acquired mong đợi true). `takeoverLock` trả `lost-takeover` dù lock cũ đã STALE.
+- **Nguyên nhân gốc**: hàm kiểm tra `if (readLock()) return {acquired:false}` — chỉ xét lock tồn tại, bỏ qua stale. Lock cũ (pid chết/heartbeat quá hạn) vẫn "tồn tại" nên takeover bị từ chối vĩnh viễn.
+- **Tránh lặp lại**: hàm takeover chỉ từ chối khi lock `isLockAlive` (pid alive + heartbeat trong STALE_MS); stale thì unlink rồi chiếm mới bằng primitive atomic `openSync('wx')` (serialize contenders, chỉ 1 winner). Luôn test stale-takeover tường minh.
+
+## L-037 (26/08/2026) — HEARTBEAT_MS/STALE_MS phải env-configurable để test chạy nhanh
+- **Triệu chứng**: integration test (spawn real gateway child) kẹt — `notifierLoop` chỉ chạy 1 lần rồi "ngủ" 15s; item outbound không bao giờ gửi trong timeout test.
+- **Nguyên nhân gốc**: `HEARTBEAT_MS` hardcode `15_000` (const), bỏ qua env `GATEWAY_HEARTBEAT_MS`. Test set env 150ms nhưng không có tác dụng → gateway poll 15s/lần.
+- **Tránh lặp lại**: mọi interval/timeout của long-running loop (HEARTBEAT_MS, STALE_MS, POLL_TIMEOUT_S) đọc từ env với default fallback: `Number(process.env.X || DEFAULT)`. Test spawn child với env override là cách duy nhất kiểm soát tốc độ thực tế.
+
+## L-038 (26/08/2026) — NotificationStore idempotency (module-level) persists xuyên test trong cùng process
+- **Triệu chứng**: test `processOutbound` multi-appNs fail `1 !== 2` (sent mong 2, được 1). Item `ai-pr-reviewer` trùng key với test trước (cùng repo/ref/head) nên bị `store.shouldSend` trả false → skip.
+- **Nguyên nhân gốc**: store là singleton module-level, load từ file 1 lần, giữ markSent xuyên các test chạy chung 1 process; key idempotency = `appNs::repo::ref::eventType::state::head` nên trùng với test trước.
+- **Tránh lặp lại**: trong test cùng process, mỗi test dùng envelope key KHÁC BIỆT (repo/ref/head unique) để không dính idempotency của test trước; hoặc reset store. Đừng tái dùng repo/ref/head giữa các test sendItem.
+
+## L-036 (26/08/2026) — `readQueue` trả oldest-first → test lấy `items[0]` nhầm item cũ (stale)
+- **Triệu chứng**: test 8 (gateway) fail `true !== false`, test 9 fail `false !== true`; nguyên nhân item lấy từ `items[0]` thực tế là item sót từ enqueue/skip trước (queue sort theo createdAt tăng dần).
+- **Nguyên nhân gốc**: `readQueue` trả mảng đã sort oldest-first; sau khi 1 item failed/skipped (vẫn nằm trong queue) rồi enqueue item mới, `items[0]` vẫn là item cũ → sendItem gửi/retry/skip nhầm.
+- **Tránh lặp lại**: trong test muốn gửi item vừa enqueue, lấy `items[items.length - 1]` (mới nhất) hoặc filter theo `payload.ref`/`head` cụ thể; đừng giả định `items[0]` là item mới. Khi test nhiều bước trên chung 1 queue, `cleanRuntime()` giữa các nhóm để cách ly.
+
+## L-037 (26/08/2026) — dòng trắng thừa ở cuối file → `git diff --check` FAIL (full-verify gate)
+- **Triệu chứng**: full-verify báo FAIL tại `git diff --check scripts/...mjs: <n>: new blank line at EOF`; file vẫn valid, chỉ thừa 1 dòng trắng cuối.
+- **Nguyên nhân gốc**: editor để lại newline kép cuối file; `git diff --check` coi blank line at EOF là lỗi whitespace.
+- **Tránh lặp lại**: trước commit chạy `git diff --check` trên mọi file đã sửa; cắt dòng trắng thừa ở cuối (file kết thúc bằng ký tự cuối của code, không có blank line). Lỗi này full-verify bắt được nhưng chỉ hiện khi chạy thực tế (pipe/Select-String có thể không in).
+
+## L-039 (26/08/2026) — Stale-lock takeover race: không bao giờ ghi đè lock của instance đang sống
+- **Triệu chứng**: 2 contender cùng thấy lock cũ STALE, cả 2 `unlinkSync` rồi `writeFileSync` (overwrite) → 1 process ghi đè lock mới của process thắng; hoặc unlink luôn lock TƯƠI của process khác đang alive → 2 instance chạy song song (409 conflict / gửi Telegram trùng). GPT-REV-078 Critical.
+- **Nguyên nhân gốc**: takeover dùng `unlinkSync`+`writeFileSync` (không atomic), không serialize contenders, không re-check staleness sau khi giành quyền; `writeFileSync` overwrite vô điều kiện nên xóa được lock của process khác.
+- **Tránh lặp lại**: serialize takeover bằng guard file `openSync('wx')` (atomic); dưới guard, re-check `isLockAlive` — nếu vẫn alive → `duplicate`, KHÔNG đụng; nếu stale → `unlinkSync` rồi `openSync('wx')` chiếm mới; nếu `wx` fail (`EEXIST`, có process khác vừa chiếm) → yield, tuyệt đối không overwrite lock của instance đang sống. Giữa unlink và wx, process tươi có thể wx-create thành công → wx của ta fail → ta thua đúng (lock tươi được giữ).
+
+## L-040 (26/08/2026) — PR lớn (>policy maxLines) phải handoff GPT trực tiếp; KHÔNG set agent:cline để chạy orchestrator pre-review
+- **Triệu chứng**: muốn xin GPT re-review PR #17, đổi nhãn PR sang `agent:cline`+`status:review-requested` để orchestrator chạy pre-review → orchestrator ra `block-decision-gate` (`decisionGate: diff-limit`), mutate PR sang `status:blocked`. Diff PR #17 = 2399 dòng.
+- **Nguyên nhân gốc**: `evaluateDiffLimits` với `overLimitBehavior:blocking-decision-gate`, `maxLines:1500` (metric additions+deletions) trong `.github/ai-review-policy.json`; PR feature nguyên khối (shared gateway) vượt giới hạn. Orchestrator SKIP pre-review khi PR đã có `agent:gpt` (coi là "đang chờ GPT"), chỉ chạy khi `agent:cline`.
+- **Tránh lặp lại**: (1) GPT review PR này TRỰC TIẾP qua `agent:gpt`+`status:review-requested` (orchestrator skip) — trạng thái từng cho GPT review 078..084; (2) KHÔNG set `agent:cline` trên PR vượt `maxLines` (sẽ bị diff-limit block); (3) cron CI orchestrator KHÔNG quét AI_PR_REVIEWER vì committed `targetRepos=['QLDA_DTXD']` — chạy thủ công phải tạm sửa config rồi restore; (4) diff-limit là Decision Gate Mức 3 → Bố chọn giữ review trực tiếp / nâng maxLines / chia PR.
+
+## L-041 (26/08/2026) — Supervisor phải nhánh theo owner-state, không chỉ `!isReady`; live-degraded = monitor không spawn
+- **Triệu chứng**: GPT-REV-079 yêu cầu runSupervisorOnce nhánh 'live-degraded' nhưng code cũ chỉ xét `if (!isReady()) → spawn`; khi instance CÒN SỐNG (có lock + heartbeat) nhưng CHƯA ready (đang khởi động / poll đầu fail) → supervisor spawn child thứ 2. Child chạy bridge thử poll → `duplicate` lock → thoát code 3, lặp 1 vòng restart churn thừa.
+- **Nguyên nhân gốc**: quyết định restart chỉ dựa trên readiness flag mà không đọc trạng thái lock owner; không phân biệt "không ready vì CHẾT/STALE" (spawn 1 để heal) với "không ready nhưng owner CÒN SỐNG" (degraded — chỉ theo dõi, đợi tự hồi phục).
+- **Tránh lặp lại**: trong `runSupervisorOnce`, sau khi `isReady` false thì đọc lock: nếu `isLockAlive(lock)` (pid sống + heartbeat gần) → trả `monitor-degraded`, KHÔNG gọi `startGatewayFn`; chỉ spawn khi lock không tồn tại hoặc stale. Trong main loop coi `monitor-degraded` như trạng thái không-fail (reset backoff, không tăng consecutiveFails) — chỉ mở circuit khi recovery-failed thật. Luôn kèm unit test assert `startGatewayFn` không được gọi ở nhánh live-degraded.
+## L-042 (27/08/2026) — Single-instance/authorization: ưu tiên OS-owned primitive (TCP lease) hơn file-lock để hết check-then-mutate race
+- **Triệu chứng**: File-lock (`openSync('wx')` + stale-takeover + heartbeat-overwrite + release-unlink) bị GPT-REV-078 liên tục flag Critical: contender/owner cũ vẫn có thể xóa/overwrite state owner mới; test chỉ chạy acquire từ lock rỗng, không race.
+- **Nguyên nhân gốc**: file-lock là check-then-mutate (read→unlink→create) không nguyên tử với nhau; heartbeat/release dùng read-LOCK rồi mới write/unlink → 2 poller có thể tái lập quyền, phá single-poller invariant (Telegram 409). Một guard thêm (`TAKEOVER_GUARD`) chỉ dời race chứ không loại.
+- **Tránh lặp lại**: dùng OS-owned owner primitive khi cần single-instance/ownership: bind **TCP port localhost** (OS đảm bảo chỉ 1 process giữ, tự thả khi chết → không cần stale-scan/unlink/heartbeat-overwrite). Owner là người giữ fd do kernel quản lý, không phải file → contender/old-owner không đụng được. Chứng minh bằng **child-process thật**: contention (N cùng khởi, 1 giữ còn lại từ chối), crash→reacquire, old-owner không đổi lease owner mới. `probeLease()` chỉ xác nhận owner khi đọc được identity handshake (connect tới socket đang đóng/không data → không coi là owner).
+
+## L-043 (27/08/2026) — Không clamp thời gian backoff trong production để test chạy nhanh; test phải inject sleep/timer
+- **Triệu chứng**: GPT-REV-086 — supervisor production `await sleep(Math.min(backoff, 2000))`: mọi backoff tính 60–300s (computeBackoff) bị hạ xuống tối đa 2s → vẫn có thể restart churn, mất tác dụng tránh storm.
+- **Nguyên nhân gốc**: để "test chạy nhanh" đã clamp thời gian production, thay vì inject cho test.
+- **Tránh lặp lại**: khi cần test nhanh, **inject sleep/timer** vào hàm (vd `supervisorLoop({ runSupervisorOnceFn, sleepFn })`), production giữ đúng thời gian thật (`await sleepFn(backoff)`); test truyền `sleepFn` ghi nhận ms rồi assert giá trị thực == `computeBackoff(1)` (60000), không phải clamp 2000.
