@@ -1,48 +1,48 @@
 # Active Context
 ## Mục tiêu
-Issue #15 — Shared Telegram Gateway (Telegram control mode): single source of truth, queue name spacing,
-reliable notify, self-heal; xóa idle/sleep/hibernate + shutdown /h.
+Issue #19 — Shared Test Evidence Protocol v1 + compact reporter. Giai đoạn 1: schema + reporter + tests + full-verify --evidence. Giai đoạn 2: MCP server + executor + cache. Giai đoạn 3: orchestrator integration + QLDA_DTXD adoption.
 
 ## Chế độ
-Tự hành (kênh Cline, lệnh Bố trực tiếp). Bố chọn A (Full theo Acceptance Criteria) tại Issue #15.
-
-## Ranh giới kiến trúc (quyết định Bố)
-- Source gateway: scripts/telegram-gateway/ (Git-managed, review, test, rollback).
-- Runtime thực tế: ~/.ai-pr-reviewer/gateway/ (queue/lock/heartbeat/config — KHÔNG commit).
-- Xóa watchdog ngủ đông + mọi đường shutdown /h.
-- Giữ legacy adapter đến khi migration + soak test hoàn tất.
+Tự hành (kênh Cline, lệnh Bố trực tiếp).
 
 ## Kế hoạch thực thi
-1. [x] Claim #15, branch fix/issue-15-telegram-gateway từ origin/main (baseSha 0bedf104).
-2. [x] Xóa watchdog-hibernate.mjs (idle reminder + shutdown /h).
-3. [x] tg-notify-core.mjs: +events approved/merged; xóa hàm watchdog (silenceTimeoutLevels, nextSilenceState, resetOnActivity, SILENCE_DEFAULTS, watchdogSilenceTick, commitSilenceLevel, isPidAlive, isGuardAlive, shouldArm).
-4. [x] notify-telegram.mjs: xóa arm block + imports thừa.
-5. [x] Tạo scripts/telegram-gateway/: contract, transport, bridge (single getUpdates poller + lock chống 429), notifier (single outbound sender + idempotency), supervisor (self-heal), gateway (single instance), adapter-ai-pr-reviewer (legacy redirect), install, README.
-6. [x] Wire unified-orchestrator.io.notify + autonomous-run.notifyTelegram -> adapter (single source of truth).
-7. [x] Tests: test-telegram-gateway.mjs 9 PASS; test-tg-notify.mjs PASS; full-verify 110/110 PASS.
-8. [x] Smoke gateway: lock + heartbeat + ready tạo đúng (dummy token, 2s).
- 9. [x] GPT-REV-077..082 (PR #17): sửa allowlist+path-traversal (077), atomic lock+owner-only (078), verified-startup health gate (079), gatewayEventKey+head SHA+validateEnvelope fail-closed (080), sync test harness 12 case (081). Commit 3b1cea9, push; comment re-review PR #17; notify Telegram legacy (không arm watchdog/merge/deploy).
+1. [x] Claim Issue #19, branch `feat/issue-19-test-evidence-protocol-v1` từ `fa9fec3` (main sau merge PR #17).
+2. [x] Tạo `scripts/test-evidence-schema.json` — JSON Schema v1.0: TestManifest + CompactReport + FailureRecord.
+3. [x] Tạo `.agent/test-manifest.json` — manifest cho AI_PR_REVIEWER (5 gates: syntax, unit, integration, policy, drift).
+4. [x] Tạo `scripts/test-evidence-reporter.mjs` — core reporter: hash, format, validate, redact, save, progressive disclosure.
+5. [x] Tạo `scripts/test-test-evidence.mjs` — 59 tests: schema validation, output format, redaction, size limits, edge cases.
+6. [x] Sửa `scripts/full-verify.mjs` — +`--evidence` flag: compact one-line output `VERIFY PASS/FAIL`.
+7. [x] Verify: `pnpm test:evidence` 59/59 PASS; `pnpm verify` 121/121 PASS; `test:drift` 0 FAIL.
+8. [x] Commit + push + mở Draft PR #20.
+9. [ ] Local pre-review:labels + checks pass.
+10. [ ] Handoff GPT review (sau local PASS).
 
 ## Bước hiện tại
-Vòng fix GPT-REV-086 (bỏ clamp backoff) đã hoàn tất. PR #17 = `agent:gpt`+`status:review-requested`, HEAD mới đã push; chờ GPT re-review. Không merge/deploy/approve; soak-test thật trên máy Bố trước khi xóa legacy.
+PR #20 đã mở (Draft). Chờ CI/verify pass + local pre-review trước khi chuyển status:review-requested.
 
 ## Bằng chứng thực thi
-- **GPT-REV-078 (đã ĐÓNG)**: OS-owned TCP lease thay file-lock; probe chỉ confirm owner khi đọc identity handshake; connect socket đang đóng/không data → not-alive; supervisor dùng probeFn + await startGatewayFn; child-process test contention/crash-reacquire/old-owner. GPT xác nhận đóng tại 052f89c.
-- **GPT-REV-086 (Important, đã fix)**: trước production `await sleep(Math.min(backoff,2000))` clamp mọi backoff 60–300s xuống 2s → restart churn. Giờ `supervisorLoop({runSupervisorOnceFn, sleepFn})` exportable; `main()` → `supervisorLoop()` ngủ ĐÚNG `backoff`; test inject `sleepFn` (không đụng thời gian production). Test 18b assert sleep=60000>2000.
-- pnpm test:gateway **24/24 PASS** (tăng test 18b); pnpm test:gateway:mp **19/19 PASS**; pnpm test:drift 0 FAIL; node scripts/full-verify.mjs **116/116 PASS**.
-- Commit + push sang `fix/issue-15-telegram-gateway` (HEAD mới) → đồng bộ PR #17 → chờ GPT re-review (không merge/deploy/approve).
+- `scripts/test-evidence-schema.json` (120 dòng): TestManifest (5 required: schemaVersion/projectId/repository/headSha/gates), CompactReport (tests summary + reportId + failureCodes), FailureRecord (code/step/detail/logExcerpt).
+- `.agent/test-manifest.json` (35 dòng): self-repo AI_PR_REVIEWER gates.
+- `scripts/test-evidence-reporter.mjs` (~140 dòng): computeEnvironmentFingerprint, computeManifestHash, computeReportId, formatCompactLine, formatFullJson, saveReport, validateReport, validateManifest, redact, failureCodeFromStep, formatSummary, formatFailureDetail.
+- `scripts/test-test-evidence.mjs` (~240 dòng): 59 asserts覆盖hash, format, validate, redact, size, edge.
+- `scripts/full-verify.mjs` (+40/-9 dòng): +createHash import, +startTime, +--evidence flag, +compact output mode.
+- `package.json` (+1): +`"test:evidence"` script.
+
 ## Quyết định
-- Chỉ 1 getUpdates poller (lock + heartbeat) -> tránh 409 conflict.
-- 1 notifier duy nhất đọc shared OUTBOUND_DIR (readOutboundAll) xử lý TẤT CẢ registered appNs.
-- Outbound envelope validate TRƯỚC enqueue (fail-closed: sai -> ném, không ghi, không phát đi).
-- READY_FILE là JSON {instanceId}; isReady yêu cầu lock alive + instanceId khớp + lastSuccessfulPoll gần đây.
-- dispatcher.mjs CHỈ dispatch command (ping/status/help), KHÔNG verdict self-review (Issue #15).
-- Token/config runtime ~/.ai-pr-reviewer/gateway/config.json (copy từ legacy tg.json qua install.mjs), KHÔNG commit.
+- Compact PASS default 1 dòng: `VERIFY PASS head=<sha> tests=<p>/<t> blocking=0 duration=<ms> report=<id>`.
+- FAIL: failure codes + reportId; detail đọc progressive disclosure, không đưa vào output mặc định.
+- JSON PASS ≤4 KB enforced at save time.
+- Manifest command allowlist: chỉ `[a-z0-9._/-]+`, reject `rm -rf` etc.
+- Report ID = sha256(headSha:manifestHash)[0:16] — deterministic.
+- Environment fingerprint = sha256(node+platform+arch).
 
 ## Vấn đề trì hoãn
-- [ ] Soak test thực tế (chạy gateway trên máy Bố) trước khi xóa hẳn notify-telegram.mjs legacy.
-- [ ] Có thể mở rộng adapter QLDA_DTXD nếu Bố cần.
-- [ ] **DECISION GATE (Mức 3)**: diff PR #17 = 2399 dòng > giới hạn policy `maxLines:1500` (additions+deletions, `blocking-decision-gate`). Orchestrator pre-review luôn `block-decision-gate` nếu PR ở `agent:cline`. GPT review PR này TRỰC TIẾP (`agent:gpt`+`status:review-requested`, orchestrator skip). Bố chọn: (A) giữ review trực tiếp / (B) nâng `maxLines` / (C) chia PR nhỏ. Hiện giữ (A).
+- [ ] PR #17 diff >1500 dòng vẫn chưa có quyết định Bố (giữ A/B/C). Không chặn Issue #19.
+- [ ] Soak test thực tế trên máy Bố trước khi xóa legacy.
 
 ## Bước tiếp theo
-CHỜ GPT re-review tại HEAD `7ce22d1` (PR #17 = `agent:gpt`+`status:review-requested`, orchestrator skip). KHÔNG chạy orchestrator pre-review (sẽ `block-decision-gate` do diff > 1500). KHÔNG merge/deploy/approve. Soak test máy thật vẫn là bước thủ công trước xóa `notify-telegram.mjs` legacy.
+- Chờ CI PASS trên PR #20.
+- Local pre-review: +`status:review-requested` labels.
+- Handoff GPT review.
+
+## Status: IN PROGRESS

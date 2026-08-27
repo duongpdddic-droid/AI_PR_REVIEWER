@@ -1,3 +1,17 @@
+## 27/08/2026 — Issue #19 Phase 1: Test Evidence Protocol v1 + compact reporter — COMPLETED (PR #20, chờ GPT review)
+
+- [x] Branch `feat/issue-19-test-evidence-protocol-v1` từ main (`fa9fec3`).
+- [x] Tạo `scripts/test-evidence-schema.json` (JSON Schema v1.0: TestManifest + CompactReport + FailureRecord).
+- [x] Tạo `.agent/test-manifest.json` (5 gates: syntax, unit, integration, policy, drift).
+- [x] Tạo `scripts/test-evidence-reporter.mjs` (~140 dòng): hash, format, validate, redact, save, progressive disclosure.
+- [x] Tạo `scripts/test-test-evidence.mjs` (~240 dòng): 59 asserts.
+- [x] Sửa `scripts/full-verify.mjs`: +`--evidence` flag + startTime tracking.
+- [x] Verify: `pnpm test:evidence` **59/59 PASS**; `pnpm verify` **121/121 PASS**; `test:drift` 0 FAIL.
+- [x] Commit `c53e8c4` (6 files, +591/−9); push.
+- [x] Draft PR #20 opened → CI PASS → marked ready → `agent:gpt` + `status:review-requested`.
+- [x] Memory Bank updated (activeContext.md rewritten for Issue #19).
+- Known: PR #17 diff >1500 dòng chưa quyết định Bố; không chặn Issue #19.
+
 ## 27/08/2026 — PR #17: GPT re-review @ `052f89c` → đóng GPT-REV-078/079/085, mở GPT-REV-086 (Important) → đã fix, chờ re-review
 - [x] GPT re-review tại 052f89c (commit 5430008338): **GPT-REV-078 đã ĐÓNG** (TCP lease giải quyết đúng ownership race); 079/085 tiếp tục đóng. CI 33003956362 SUCCESS.
 - [x] **GPT-REV-086 (Important)** — backoff bị clamp: production `main()` gọi `await sleep(Math.min(backoff, 2000))` → mọi backoff 60–300s bị hạ xuống 2s → vẫn restart churn.
