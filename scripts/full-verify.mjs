@@ -13,11 +13,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const ROOT = process.cwd();
 const node = process.execPath;
 const results = [];
 const add = (name, ok, detail = '') => results.push({ name, ok, detail });
+const startTime = Date.now();
 
 const tmpFiles = [];
 const tmp = (ext = '.mjs') => {
@@ -105,6 +107,7 @@ try {
     'test-tg-notify.mjs',
     'test-protocol-drift.mjs',
     'test-project-registry.mjs',
+    'test-test-evidence.mjs',
   ];
   for (const suite of optionalSuites) {
     const f = path.join(ROOT, 'scripts', suite);
@@ -141,14 +144,34 @@ try {
   cleanup();
 }
 
-const w = Math.max(10, ...results.map((r) => r.name.length));
-const bar = (s) => '─'.repeat(s);
-console.log('\n=== FULL-VERIFY REPORT ===');
-console.log('┌' + bar(w + 2) + '┬───────┬──────────────────────────────────────┐');
-for (const r of results) {
-  console.log('│ ' + r.name.padEnd(w) + ' │ ' + (r.ok ? 'PASS' : 'FAIL').padEnd(5) + ' │ ' + (r.detail || '').slice(0, 38).padEnd(38) + ' │');
-}
-console.log('└' + bar(w + 2) + '┴───────┴──────────────────────────────────────┘');
 const pass = results.filter((r) => r.ok).length;
-console.log(`Tổng: ${pass}/${results.length} PASS`);
+
+// --evidence: compact one-line output (Test Evidence Protocol v1)
+const evidenceMode = process.argv.includes('--evidence');
+if (evidenceMode) {
+  const headSha = (() => {
+    try {
+      const { stdout } = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', cwd: ROOT });
+      return (stdout || '').trim();
+    } catch { return 'unknown'; }
+  })();
+  const failed = results.filter((r) => !r.ok);
+  const reportId = createHash('sha256').update(`${headSha}:${pass}/${results.length}`).digest('hex').slice(0, 16);
+  if (failed.length === 0) {
+    console.log(`VERIFY PASS head=${headSha} tests=${pass}/${results.length} blocking=0 duration=${Date.now() - startTime}ms report=${reportId}`);
+  } else {
+    const codes = failed.map((r) => `STEP_${r.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_FAIL`);
+    console.log(`VERIFY FAIL head=${headSha} blocking=${failed.length} codes=${codes.join(',')} report=${reportId}`);
+  }
+} else {
+  const w = Math.max(10, ...results.map((r) => r.name.length));
+  const bar = (s) => '─'.repeat(s);
+  console.log('\n=== FULL-VERIFY REPORT ===');
+  console.log('┌' + bar(w + 2) + '┬───────┬──────────────────────────────────────┐');
+  for (const r of results) {
+    console.log('│ ' + r.name.padEnd(w) + ' │ ' + (r.ok ? 'PASS' : 'FAIL').padEnd(5) + ' │ ' + (r.detail || '').slice(0, 38).padEnd(38) + ' │');
+  }
+  console.log('└' + bar(w + 2) + '┴───────┴──────────────────────────────────────┘');
+  console.log(`Tổng: ${pass}/${results.length} PASS`);
+}
 process.exit(results.every((r) => r.ok) ? 0 : 1);

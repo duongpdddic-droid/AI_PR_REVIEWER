@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://duongpdddic-droid.github.io/AI_PR_REVIEWER/schemas/test-evidence-1.0.json",
+  "title": "Test Evidence Protocol v1 — Issue #19",
+  "description": "Versioned schemas cho test manifest, compact report, failure record. Mọi output trải qua validateReport/validateManifest trước khi dùng. Report PASS mặc định ≤4 KB. Fail-closed: sai schema -> reject.",
+  "type": "object",
+  "definitions": {
+    "TestManifest": {
+      "type": "object",
+      "required": ["schemaVersion", "projectId", "repository", "headSha", "gates"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "1.0",
+          "description": "Schema version — hiện tại 1.0"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Project identifier, khớp .agent/project.json"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[\\w.-]+/[\\w.-]+$",
+          "description": "Repo canonical owner/name"
+        },
+        "headSha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Full 40-hex HEAD SHA"
+        },
+        "environmentFingerprint": {
+          "type": "string",
+          "description": "Hash(node+platform+arch) — được compute tự động nếu thiếu"
+        },
+        "gates": {
+          "type": "object",
+          "description": "Map gate ID → list steps",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/TestStep" }
+          }
+        }
+      }
+    },
+    "TestStep": {
+      "type": "object",
+      "required": ["id", "name", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "description": "Stable step identifier"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Executable command — chỉ allowlist, KHÔNG arbitrary shell"
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "timeout": {
+          "type": "number",
+          "description": "Timeout milliseconds (default 120000)"
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "Step fail có blocking review không (default true)"
+        }
+      }
+    },
+    "CompactReport": {
+      "type": "object",
+      "required": ["schemaVersion", "headSha", "passed", "tests", "duration", "reportId", "manifestHash"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "type": "string", "const": "1.0" },
+        "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "passed": { "type": "boolean" },
+        "tests": {
+          "type": "object",
+          "required": ["passed", "failed", "total"],
+          "properties": {
+            "passed": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "duration": { "type": "integer", "minimum": 0 },
+        "blocking": { "type": "integer", "minimum": 0 },
+        "failureCodes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "reportId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "Deterministic hash: headSha + manifestHash"
+        },
+        "manifestHash": { "type": "string" },
+        "environmentFingerprint": { "type": "string" },
+        "artifacts": {
+          "type": "object",
+          "properties": {
+            "reportPath": { "type": "string" },
+            "logPath": { "type": "string" }
+          }
+        },
+        "failures": {
+          "type": "array",
+          "description": "Detailed failures — KHÔNG đưa vào compact one-line",
+          "items": { "$ref": "#/definitions/FailureRecord" }
+        }
+      }
+    },
+    "FailureRecord": {
+      "type": "object",
+      "required": ["code", "step", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_-]*$",
+          "description": "Machine-readable failure code"
+        },
+        "step": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Step ID hoặc name"
+        },
+        "detail": {
+          "type": "string",
+          "description": "Error message — sẽ qua redaction"
+        },
+        "logExcerpt": {
+          "type": "string",
+          "description": "Log snippet (nhiều nhất 50 dòng)"
+        }
+      }
+    }
+  }
+}
