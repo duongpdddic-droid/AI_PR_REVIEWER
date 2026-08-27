@@ -1,4 +1,8 @@
-## 27/08/2026 17:52 — PR #20: GPT TECHNICAL PASS @ HEAD 3e79feb (Bố xác nhận, không re-review) — chờ merge
+## 27/08/2026 18:09 — PR #20: HEAD đổi 3e79feb→247670f, approval cũ vô hiệu; KHÔNG merge, chờ GPT re-pass HEAD mới
+
+- [x] GPT TECHNICAL PASS PR #20 @ `3e79feb` (17:52) nhưng **HEAD đã đổi** thành `247670f4224728e1db2f25502e3df4699a1645b6` (commit memory-bank). Policy Issue #2 A3/G: HEAD đổi sau approval → approval `3e79feb` **mất hiệu lực**.
+- [x] Bố quyết (18:09): **KHÔNG merge** bây giờ; GPT re-pass HEAD mới `247670f` rồi mới merge. PR #20 OPEN, mergeable CLEAN, labels `agent:gpt + status:review-requested`, HEAD `247670f`.
+- [ ] Cline không merge/approve/deploy; chờ GPT re-pass HEAD `247670f` + lệnh merge đích danh của Bố.
 
 - [x] GPT đã **TECHNICAL PASS** PR #20 tại HEAD `3e79feb02f5b4abe7a0ad3f02882474f44d1b9ca` (repo `duongpdddic-droid/AI_PR_REVIEWER`). Không re-review nữa. Labels hiện `agent:gpt + status:review-requested`; PR OPEN.
 - [x] Regression Issue #2 xong (17:17): 123/123 + live E2E 23/23 + gateway 24/24 + gateway-mp 19/19 + mcp 52 + determinism.

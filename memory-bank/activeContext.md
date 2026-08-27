@@ -84,6 +84,7 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp).
 2. ✅ Handoff GPT-2 `agent:gpt + status:review-requested` (marker PRE_REVIEW_PASS đúng HEAD).
 3. ✅ Fix round 3: nối E2E vào `verify` script (một lệnh gate duy nhất) → `3e79feb` + CI green + re-handoff GPT-2.
 4. ✅ Regression Issue #2: full-verify 123/123 + live E2E 23/23 + gateway 24 + gateway-mp 19 + mcp 52 + behavior-map determinism (17:17) — ALL PASS.
-5. ✅ GPT TECHNICAL PASS PR #20 tại HEAD `3e79feb02f5b4abe7a0ad3f02882474f44d1b9ca` (Bố 27/08) — không còn re-review. Chờ Bố quyết định merge (quyền người dùng).
+5. ✅ GPT TECHNICAL PASS PR #20 tại HEAD `3e79feb02f5b4abe7a0ad3f02882474f44d1b9ca` (Bố 27/08) — nhưng HEAD đã đổi thành `247670f` (commit memory-bank) → theo policy Issue #2 A3/G, approval `3e79feb` mất hiệu lực.
+6. [>] Bố quyết: GPT re-pass HEAD mới `247670f4224728e1db2f25502e3df4699a1645b6` rồi mới merge. KHÔNG merge PR #20 bây giờ.
 
-## Status: IN PROGRESS — chờ Bố merge PR #20
+## Status: IN PROGRESS — chờ GPT re-pass HEAD 247670f, chưa merge
