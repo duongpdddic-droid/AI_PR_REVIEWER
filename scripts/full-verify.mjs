@@ -18,6 +18,7 @@ const ROOT = process.cwd();
 const node = process.execPath;
 const results = [];
 const add = (name, ok, detail = '') => results.push({ name, ok, detail });
+const startTime = Date.now();
 
 const tmpFiles = [];
 const tmp = (ext = '.mjs') => {
@@ -105,11 +106,12 @@ try {
     'test-tg-notify.mjs',
     'test-protocol-drift.mjs',
     'test-project-registry.mjs',
+    'test-test-evidence.mjs',
   ];
   for (const suite of optionalSuites) {
     const f = path.join(ROOT, 'scripts', suite);
     if (!fs.existsSync(f)) { add(`${suite} (bỏ qua — chưa tồn tại)`, true, 'skip'); continue; }
-    const r = spawnSync(node, [f], { encoding: 'utf8' });
+    const r = spawnSync(node, [f], { encoding: 'utf8', env: { ...process.env, FULL_VERIFY_CHILD: '1' } });
     add(suite, r.status === 0, r.status === 0 ? '' : (r.stdout || r.stderr || '').trim().split('\n').filter((l) => /FAIL|Error|assert/i.test(l)).slice(-3).join(' | ') || (r.stderr || '').trim().split('\n').slice(-3).join(' | '));
   }
 
@@ -141,14 +143,84 @@ try {
   cleanup();
 }
 
-const w = Math.max(10, ...results.map((r) => r.name.length));
-const bar = (s) => '─'.repeat(s);
-console.log('\n=== FULL-VERIFY REPORT ===');
-console.log('┌' + bar(w + 2) + '┬───────┬──────────────────────────────────────┐');
-for (const r of results) {
-  console.log('│ ' + r.name.padEnd(w) + ' │ ' + (r.ok ? 'PASS' : 'FAIL').padEnd(5) + ' │ ' + (r.detail || '').slice(0, 38).padEnd(38) + ' │');
-}
-console.log('└' + bar(w + 2) + '┴───────┴──────────────────────────────────────┘');
 const pass = results.filter((r) => r.ok).length;
-console.log(`Tổng: ${pass}/${results.length} PASS`);
+
+// --evidence: compact one-line output (Test Evidence Protocol v1)
+const evidenceMode = process.argv.includes('--evidence');
+if (evidenceMode) {
+  const { loadManifest, computeManifestHash, computeReportId, validateReport, validateManifest, redactReport, saveReport, failureCodeFromStep, formatCompactLine } = await import('./test-evidence-reporter.mjs');
+  const headSha = (() => {
+    try {
+      const { stdout } = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', cwd: ROOT });
+      return (stdout || '').trim();
+    } catch { return 'unknown'; }
+  })();
+  const failed = results.filter((r) => !r.ok);
+  const duration = Date.now() - startTime;
+
+  // Load + validate manifest fail-closed
+  let manifest, manifestHash;
+  try {
+    manifest = loadManifest('.agent/test-manifest.json', ROOT);
+  } catch (e) {
+    console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['MANIFEST_LOAD_FAIL'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } }));
+    process.exit(1);
+  }
+  {
+    const mv = validateManifest(manifest);
+    if (!mv.valid) { console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['MANIFEST_INVALID'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } })); process.exit(1); }
+  }
+  manifestHash = computeManifestHash(manifest);
+
+  // GPT-REV-090: runtime manifest copy (headSha=HEAD) for hash; file stays immutable
+  const manifestForHash = manifest.headSha === headSha
+    ? manifest
+    : { ...manifest, headSha };
+  manifestHash = computeManifestHash(manifestForHash);
+
+  // Build report via canonical pipeline
+  const report = {
+    schemaVersion: '1.0',
+    headSha,
+    passed: failed.length === 0,
+    tests: { passed: pass, failed: failed.length, total: results.length },
+    duration,
+    reportId: computeReportId(headSha, manifestHash),
+    manifestHash,
+    blocking: failed.length,
+    failureCodes: failed.map((r) => failureCodeFromStep(r.name)),
+    failures: failed.map((r) => ({
+      code: failureCodeFromStep(r.name),
+      step: r.name,
+      detail: r.detail || 'no detail',
+    })),
+  };
+
+  const rv = validateReport(report);
+  if (!rv.valid) {
+    const failReport = { ...report, passed: false, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], failures: [{ code: 'ARTIFACT_WRITE_FAIL', step: 'evidence', detail: `report invalid: ${rv.errors.join('; ')}` }] };
+    console.error(formatCompactLine(failReport));
+    process.exit(1);
+  }
+
+  // GPT-REV-091: saveReport failure → VERIFY FAIL (not swallowed, not stack trace)
+  try {
+    saveReport(redactReport(report), path.join(ROOT, '.agent', 'test-evidence'));
+  } catch (e) {
+    const failReport = { ...report, passed: false, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], failures: [{ code: 'ARTIFACT_WRITE_FAIL', step: 'evidence', detail: e.message || String(e) }] };
+    console.error(formatCompactLine(failReport));
+    process.exit(1);
+  }
+  console.log(formatCompactLine(report));
+} else {
+  const w = Math.max(10, ...results.map((r) => r.name.length));
+  const bar = (s) => '─'.repeat(s);
+  console.log('\n=== FULL-VERIFY REPORT ===');
+  console.log('┌' + bar(w + 2) + '┬───────┬──────────────────────────────────────┐');
+  for (const r of results) {
+    console.log('│ ' + r.name.padEnd(w) + ' │ ' + (r.ok ? 'PASS' : 'FAIL').padEnd(5) + ' │ ' + (r.detail || '').slice(0, 38).padEnd(38) + ' │');
+  }
+  console.log('└' + bar(w + 2) + '┴───────┴──────────────────────────────────────┘');
+  console.log(`Tổng: ${pass}/${results.length} PASS`);
+}
 process.exit(results.every((r) => r.ok) ? 0 : 1);

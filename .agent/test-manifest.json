@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0",
+  "projectId": "ai-pr-reviewer",
+  "repository": "duongpdddic-droid/AI_PR_REVIEWER",
+  "headSha": "6045d7520b3667ae03bed86668d23d105a0cd208",
+  "gates": {
+    "verify": [
+      { "id": "syntax", "name": "node --check all JS/MJS", "command": "node", "args": ["scripts/full-verify.mjs"] },
+      { "id": "unit", "name": "test-pure-logic", "command": "node", "args": ["scripts/test-pure-logic.mjs"] },
+      { "id": "integration", "name": "integration tests", "command": "node", "args": ["scripts/test-integration-orchestrator.mjs"] },
+      { "id": "policy", "name": "policy + review-phases", "command": "node", "args": ["scripts/test-effective-policy.mjs"] },
+      { "id": "drift", "name": "protocol drift", "command": "node", "args": ["scripts/test-protocol-drift.mjs"] }
+    ]
+  }
+}

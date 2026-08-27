@@ -16,6 +16,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Run full‑verify
         run: node scripts/full-verify.mjs
+      - name: Run test evidence (unit + E2E entry‑point)
+        run: pnpm test:evidence
       - name: Run tests
         run: pnpm test
       - name: Smoke unified-orchestrator (dry-run)
