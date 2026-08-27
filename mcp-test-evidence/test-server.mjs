@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computeReportId, computeManifestHash } from "../scripts/test-evidence-reporter.mjs";
 
 const SERVER = fileURLToPath(new URL("./server.mjs", import.meta.url));
 const PASS_HEAD = "1111111111111111111111111111111111111111";
@@ -50,17 +51,22 @@ function buildFixture() {
   }));
   writeFileSync(path.join(agent, "test-manifest.json"), JSON.stringify(manifest, null, 2));
 
+  // reportId/manifestHash PHẢI canonical → lookup head bằng bind manifest hiện tại (G-PT-REV-095).
+  const mh = computeManifestHash(manifest);
+  const PASS_REPORT = computeReportId(PASS_HEAD, mh);
+  const FAIL_REPORT = computeReportId(FAIL_HEAD, mh);
+
   // PASS artifact
-  writeFileSync(path.join(artifacts, "aaaaaaaaaaaaaaaa.json"), JSON.stringify({
+  writeFileSync(path.join(artifacts, `${PASS_REPORT}.json`), JSON.stringify({
     schemaVersion: "1.0", headSha: PASS_HEAD, passed: true,
     tests: { passed: 10, failed: 0, total: 10 }, duration: 100,
-    reportId: "aaaaaaaaaaaaaaaa", manifestHash: "mh-pass", blocking: 0, failureCodes: [], failures: [],
+    reportId: PASS_REPORT, manifestHash: mh, blocking: 0, failureCodes: [], failures: [],
   }));
   // FAIL artifact gồm secret literal để assert redaction
-  writeFileSync(path.join(artifacts, "bbbbbbbbbbbbbbbb.json"), JSON.stringify({
+  writeFileSync(path.join(artifacts, `${FAIL_REPORT}.json`), JSON.stringify({
     schemaVersion: "1.0", headSha: FAIL_HEAD, passed: false,
     tests: { passed: 8, failed: 2, total: 10 }, duration: 120,
-    reportId: "bbbbbbbbbbbbbbbb", manifestHash: "mh-fail", blocking: 2,
+    reportId: FAIL_REPORT, manifestHash: mh, blocking: 2,
     failureCodes: ["STEP_UNIT_FAIL", "STEP_INTEGRATION_FAIL"],
     failures: [
       { code: "STEP_UNIT_FAIL", step: "unit", detail: "expected 2 to equal 3; token=\"supersecret123\"",
@@ -68,11 +74,10 @@ function buildFixture() {
       { code: "STEP_INTEGRATION_FAIL", step: "integration", detail: "timeout 500s" },
     ],
   }));
-  return root;
+  return { root, artifactDir: artifacts, manifest, mh, PASS_REPORT, FAIL_REPORT };
 }
 async function run() {
-  const root = buildFixture();
-  const artifactDir = path.join(root, ".agent", "test-evidence");
+  const { root, artifactDir, manifest, mh, PASS_REPORT, FAIL_REPORT } = buildFixture();
   try {
     // ── 1) Pure logic / security / findReport ───────────────────────
     console.log("[1] pure logic (findReport)");
@@ -82,12 +87,40 @@ async function run() {
       try { findReport(artifactDir, { reportId: bad }); } catch { threw = true; }
       ok(threw, `findReport chặn reportId bẩn '${bad}' (chống path traversal)`);
     }
-    const byHead = findReport(artifactDir, { headSha: PASS_HEAD });
-    ok(byHead.passed === true && byHead.reportId === "aaaaaaaaaaaaaaaa", "findReport theo headSha PASS");
+    const byHead = findReport(artifactDir, { headSha: PASS_HEAD, manifestHash: mh });
+    ok(byHead.passed === true && byHead.reportId === PASS_REPORT, "findReport theo headSha+PASS (bind manifest)");
     let threw = false;
     try { findReport(artifactDir, { headSha: "abcd" }); } catch { threw = true; }
     ok(threw, "findReport chặn headSha không 40-hex");
-    ok(findReport(artifactDir, { reportId: "bbbbbbbbbbbbbbbb" }).passed === false, "findReport theo reportId FAIL");
+    ok(findReport(artifactDir, { reportId: FAIL_REPORT }).passed === false, "findReport theo reportId FAIL");
+    // GPT-REV-095: chọn đúng 1 selector (không cả 2); bind identity filename↔reportId↔canonical.
+    threw = false;
+    try { findReport(artifactDir, { reportId: FAIL_REPORT, headSha: FAIL_HEAD }); } catch { threw = true; }
+    ok(threw, "findReport chặn 2 selector cùng lúc (fail-closed)");
+    threw = false;
+    try { findReport(artifactDir, { headSha: PASS_HEAD }); } catch { threw = true; }
+    ok(threw, "findReport headSha thiếu manifestHash → fail-closed cần binding");
+    // GPT-REV-095: identity lệch filename↔reportId → từ chối
+    const MIM = "fedcba9876543210";
+    writeFileSync(path.join(artifactDir, `${MIM}.json`), JSON.stringify({
+      schemaVersion: "1.0", headSha: FAIL_HEAD, passed: false,
+      tests: { passed: 0, failed: 1, total: 1 }, duration: 1,
+      reportId: FAIL_REPORT, manifestHash: mh, blocking: 1, failureCodes: [], failures: [],
+    }));
+    threw = false;
+    try { findReport(artifactDir, { reportId: MIM }); } catch { threw = true; }
+    ok(threw, "findReport từ chối artifact filename≠reportId (identity lệch)");
+    // headSha không có report khớp manifest hiện tại → fail-closed
+    const OHEAD = "4444444444444444444444444444444444444444";
+    const otherId = computeReportId(OHEAD, "other-manifest-hash");
+    writeFileSync(path.join(artifactDir, `${otherId}.json`), JSON.stringify({
+      schemaVersion: "1.0", headSha: OHEAD, passed: true,
+      tests: { passed: 1, failed: 0, total: 1 }, duration: 5,
+      reportId: otherId, manifestHash: "other-manifest-hash", blocking: 0, failureCodes: [], failures: [],
+    }));
+    threw = false;
+    try { findReport(artifactDir, { headSha: OHEAD, manifestHash: mh }); } catch { threw = true; }
+    ok(threw, "findReport headSha có artifact nhưng khác manifest → fail-closed yêu cầu reportId");
 
     // ── 2) E2E spawn server thật ────────────────────────────────────
     console.log("[2] e2e MCP NDJSON");
@@ -141,31 +174,39 @@ async function run() {
     ok(s1.data.summary.startsWith("VERIFY PASS head="), "test_status trả compact PASS line");
 
     // test_status theo reportId (FAIL) + projectId khớp
-    const s2 = await call("test_status", { reportId: "bbbbbbbbbbbbbbbb", projectId: "fixture-project" });
+    const s2 = await call("test_status", { reportId: FAIL_REPORT, projectId: "fixture-project" });
     ok(s2.data.passed === false && s2.data.blocking === 2, "test_status FAIL blocking=2");
     ok(s2.data.failureCodes.length === 2, "test_status trả failureCodes");
 
     // test_failures (mức 1)
-    const f = await call("test_failures", { reportId: "bbbbbbbbbbbbbbbb" });
+    const f = await call("test_failures", { reportId: FAIL_REPORT });
     ok(f.data.count === 2 && f.data.failures[0].code === "STEP_UNIT_FAIL", "test_failures trả code+step");
     ok(f.data.failures[0].step === "unit", "test_failures trả step");
 
     // test_failure_detail (mức 2) — secret bị redact
-    const d = await call("test_failure_detail", { reportId: "bbbbbbbbbbbbbbbb", failureIndex: 0 });
+    const d = await call("test_failure_detail", { reportId: FAIL_REPORT, failureIndex: 0 });
     ok(d.data.failure.includes("expected 2 to equal 3"), "test_failure_detail chứa detail");
     ok(!/supersecret123/.test(d.data.failure), "REDACT: secret literal không lọt ra output");
 
     // test_log_excerpt (mức 3) — cắt 1 dòng + truncate + redact
-    const l = await call("test_log_excerpt", { reportId: "bbbbbbbbbbbbbbbb", failureIndex: 0, maxLines: 1 });
+    const l = await call("test_log_excerpt", { reportId: FAIL_REPORT, failureIndex: 0, maxLines: 1 });
     ok(l.data.truncated === true && l.data.logExcerpt === "line1", "test_log_excerpt cắt đúng 1 dòng + truncate");
     ok(!/supersecret123/.test(l.data.logExcerpt), "REDACT: logExcerpt không chứa secret");
+    // GPT-REV-094: dòng CHỨA secret nằm trong phạm vi trả về phải bị redact (không còn dựa vào may-rủi maxLines=1).
+    const l2 = await call("test_log_excerpt", { reportId: FAIL_REPORT, failureIndex: 0, maxLines: 5 });
+    ok(l2.data.logExcerpt.includes("line1") && l2.data.logExcerpt.includes("[REDACTED_SECRET]"),
+      "REDACT: dòng chứa secret trả về NHƯNG đã redact thành [REDACTED_SECRET]");
+    ok(!/supersecret123/.test(l2.data.logExcerpt), "REDACT (GPT-REV-094): dòng secret trong phạm vi không lọt ra");
+    // GPT-REV-094: finding_map detail cũng redact
+    const m0 = await call("test_finding_map", { reportId: FAIL_REPORT });
+    ok(m0.data.findings.every((fi) => !/supersecret123/.test(fi.detail || "")), "REDACT: finding_map.detail không lọt secret");
 
     // test_finding_map — map finding → gate/test, lọc theo findingCode
-    const m = await call("test_finding_map", { reportId: "bbbbbbbbbbbbbbbb" });
+    const m = await call("test_finding_map", { reportId: FAIL_REPORT });
     ok(m.data.findings.length === 2 && m.data.findings[0].gate === "verify", "finding_map trả gate");
     ok(m.data.findings[0].test?.id === "unit" && m.data.findings[1].test?.id === "integration",
       "finding_map map đúng manifest step");
-    const m1 = await call("test_finding_map", { reportId: "bbbbbbbbbbbbbbbb", findingCode: "STEP_INTEGRATION_FAIL" });
+    const m1 = await call("test_finding_map", { reportId: FAIL_REPORT, findingCode: "STEP_INTEGRATION_FAIL" });
     ok(m1.data.findings.length === 1 && m1.data.findings[0].step === "integration",
       "finding_map lọc đúng 1 finding theo code");
 
@@ -173,9 +214,9 @@ async function run() {
     console.log("[3] negative fail-closed");
     for (const c of [
       { name: "test_status", args: { reportId: "../evil" }, expect: "reportId" },
-      { name: "test_status", args: { reportId: "bbbbbbbbbbbbbbbb", projectId: "wrong-project" }, expect: "Project Registry" },
-      { name: "test_failure_detail", args: { reportId: "bbbbbbbbbbbbbbbb", failureIndex: 9 }, expect: "failureIndex" },
-      { name: "test_finding_map", args: { reportId: "bbbbbbbbbbbbbbbb", findingCode: "NOPE" }, expect: "không tìm thấy finding" },
+      { name: "test_status", args: { reportId: FAIL_REPORT, projectId: "wrong-project" }, expect: "Project Registry" },
+      { name: "test_failure_detail", args: { reportId: FAIL_REPORT, failureIndex: 9 }, expect: "failureIndex" },
+      { name: "test_finding_map", args: { reportId: FAIL_REPORT, findingCode: "NOPE" }, expect: "không tìm thấy finding" },
     ]) {
       const r = await call(c.name, c.args);
       ok(r.result?.isError === true && c.expect && r.result.content[0].text.includes(c.expect),

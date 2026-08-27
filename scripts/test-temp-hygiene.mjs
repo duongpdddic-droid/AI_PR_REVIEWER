@@ -8,7 +8,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   isSafeSessionId, isInside, hasOwnershipMarker, redactHome, isAlive,
-  createSessionManager, recoverSession,
+  createSessionManager, recoverSession, snapshotWorkspace,
 } from './temp-hygiene.mjs';
 
 const checks = [];
@@ -46,13 +46,15 @@ try {
   m.createFile('note.json', JSON.stringify({ a: 1 }));
   tru('pass manifest có file+dir', m.manifest.files.length === 2 && m.manifest.dirs.length >= 2);
   tru('pass ownership marker đúng', hasOwnershipMarker(m.homeDir, m.sessionId));
-  const before = null; // workspace change not asserted in happy path
-  const r = m.cleanup({ projectRoot: ROOT, workspaceBefore: null });
+  // GPT-REV-097: baseline workspace BẮT BUỘC — không được truyền null rồi kệ nó.
+  const before = snapshotWorkspace(ROOT);
+  const r = m.cleanup({ projectRoot: ROOT, workspaceBefore: before });
   eq('pass verdict CLEAN', r.verdict, 'CLEAN');
   tru('pass homeGone read-back', r.readBack.homeGone);
   eq('pass leftover rỗng', r.leftover.length, 0);
   eq('pass removed >0', r.removed.length > 0, true);
-  tru('pass workspace không đổi', r.readBack.workspaceUnchanged); // snapshot()==after trong same repo ổn định nếu test sạch
+  tru('pass baseline workspace hiện diện', r.readBack.workspaceBaselinePresent);
+  tru('pass workspace không đổi', r.readBack.workspaceUnchanged);
   // tái cleanup (idempotent)
   const r2 = m.cleanup();
   eq('pass cleanup idempotent', r2.verdict === 'CLEAN', true);
@@ -102,6 +104,46 @@ try {
   eq('recovery unowned POC_CLEANUP_FAILED', r.verdict, 'POC_CLEANUP_FAILED');
   tru('recovery unowned không xóa dir', fs.existsSync(orphan));
   tru('recovery unowned báo leftover', r.leftover.length > 0);
+}
+
+{ // 6b. GPT-REV-096: manifest mất/hỏng khi recover → GIỮ dir, POC_CLEANUP_FAILED (không thể xác minh process).
+  const m = createSessionManager({ tempRoot: ROOT2, projectRoot: ROOT, purpose: 'test-rec-096' });
+  // ghi đè manifest thành JSON hỏng
+  fs.writeFileSync(path.join(m.homeDir, '.session-manifest.json'), '{"broken": truest');
+  const r = recoverSession({ sessionId: m.sessionId, tempRoot: ROOT2 });
+  eq('recovery manifest hỏng verdict POC_CLEANUP_FAILED', r.verdict, 'POC_CLEANUP_FAILED');
+  tru('recovery manifest hỏng KHÔNG xóa dir', fs.existsSync(m.homeDir));
+  tru('recovery manifest hỏng báo leftover', r.leftover.length > 0);
+  // process record không hợp lệ (string thay vì {pid}) → cũng giữ dir
+  const m2 = createSessionManager({ tempRoot: ROOT2, projectRoot: ROOT, purpose: 'test-rec-096b' });
+  m2.manifest.processes = [{ pid: "not-an-int" }];
+  fs.writeFileSync(path.join(m2.homeDir, '.session-manifest.json'), JSON.stringify(m2.manifest));
+  const r2 = recoverSession({ sessionId: m2.sessionId, tempRoot: ROOT2 });
+  eq('recovery process invalid verdict POC_CLEANUP_FAILED', r2.verdict, 'POC_CLEANUP_FAILED');
+  tru('recovery process invalid KHÔNG xóa dir', fs.existsSync(m2.homeDir));
+  m2.manifest.processes = [];
+  fs.writeFileSync(path.join(m2.homeDir, '.session-manifest.json'), JSON.stringify(m2.manifest));
+  fs.rmSync(m2.homeDir, { recursive: true, force: true }); // dọn
+  fs.rmSync(m.homeDir, { recursive: true, force: true }); // dọn
+}
+
+{ // 7. GPT-REV-097: baseline workspace BẮT BUỘC — null/missing → fail-closed, không CLEAN.
+  const m = createSessionManager({ tempRoot: ROOT2, projectRoot: ROOT, purpose: 'test-no-baseline' });
+  const r = m.cleanup({ projectRoot: ROOT, workspaceBefore: null });
+  eq('no-baseline verdict POC_CLEANUP_FAILED', r.verdict, 'POC_CLEANUP_FAILED');
+  eq('no-baseline workspaceUnchanged=false', r.readBack.workspaceUnchanged, false);
+  eq('no-baseline baseline present=false', r.readBack.workspaceBaselinePresent, false);
+}
+
+{ // 8. GPT-REV-097: workspace ĐỔI sau baseline → POC_CLEANUP_FAILED (read-back không được PASS).
+  const m = createSessionManager({ tempRoot: ROOT2, projectRoot: ROOT, purpose: 'test-wschg' });
+  const before = snapshotWorkspace(ROOT);
+  const flag = path.join(ROOT, '__temp_hygiene_ws_flag.txt');
+  fs.writeFileSync(flag, 'x');
+  const r = m.cleanup({ projectRoot: ROOT, workspaceBefore: before });
+  fs.rmSync(flag, { force: true });
+  eq('ws-change verdict POC_CLEANUP_FAILED', r.verdict, 'POC_CLEANUP_FAILED');
+  eq('ws-change workspaceUnchanged=false', r.readBack.workspaceUnchanged, false);
 }
 
 { // 6. pid-scoped kill: dừng ĐÚNG process của session mình, KHÔNG đụng process session khác.

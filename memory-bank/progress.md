@@ -1,4 +1,79 @@
-## 27/08/2026 18:09 — PR #20: HEAD đổi 3e79feb→247670f, approval cũ vô hiệu; KHÔNG merge, chờ GPT re-pass HEAD mới
+## 28/08/2026 00:19 — Re-handoff PR #21 khóa HEAD + Issue #22
+- A: chạy orchestrator THẬT tạo PRE_REVIEW_PASS mới khóa đúng HEAD `039c721` (policy 2026-08-23.7, openBlocking 0), labels `agent:gpt`+`status:review-requested`, CI success, HEAD frozen.
+- B: Issue follow-up #22 "HEAD-Lock Lifecycle & Handoff Gate" (labels rỗng, không auto-claim).
+- Chi tiết: activeContext.md "Re-handoff PR #21 khóa HEAD".
+## 27/08/2026 23:38 — PR #21 handoff hoàn tất
+- Pre-review PASS, CI fail cứu zombie POSIX, push HEAD `039c721`, PR ready, handoff GPT.
+- Chi tiết: activeContext.md mục "PR #21 — Handoff hoàn tất"; L-046/L-047.
+- Trạng thái: `agent:gpt` + `status:review-requested`, chờ GPT phê duyệt.
+
+
+# Progress
+
+## 27/08/2026 22:22 — Phase 2 CONTRACT CHỐT + conformance verified (read-only, no code change needed)
+
+- [x] PoC-A `additionalContext` (UserPromptSubmit): **VERIFIED** — hook fire, model nhận marker nguyên trạng.
+- [x] PoC-B `cancel:true`: **CANCEL_NOT_VERIFIED** — hook không fire, thiếu bằng chứng cả hai chiều.
+- [x] Claude-Mem store (verification persistence, `type=learning`): **UNKNOWN** — investigation chỉ là Test Evidence MCP, không phải Claude-Mem; không suy diễn.
+- [x] Contract Phase 2 CHỐT (Bố): 1 server = 1 canonical root (startup config/CWD, không route args); projectId/repo chỉ assert fail-closed; immutable artifact JSON là evidence source; chưa thêm gate/step/type filter.
+- [x] Conformance verified: `pnpm test:evidence:mcp` **28/28 PASS exit 0** — 5 read-only tools, fail-closed (Project Registry/reportId/path-traversal), redaction hoạt động. Server hiện tại khớp contract → **không thay đổi code** (YAGNI).
+- [x] Cleanup PoC ownership-safe: temp root `ai-pr-reviewer-temp-v1` (driver/template/baseline) GONE; hooks GONE; không leftover process/session MCP. Read-back: HEAD `4c9fe22` không đổi, `git status` chỉ memory-bank dirty (baseline).
+- Không implement experience retrieval; không sửa upstream claude-mem; không đưa Memory Bank vào commit code.
+
+---
+# Progress
+
+- [x] Policy `.clinerules/08-temp-hygiene.md` + tóm tắt AGENTS.md.
+- [x] Module `scripts/temp-hygiene.mjs` (zero-dep): `createSessionManager` / `cleanupSession` / `recoverSession` + helpers path/owner/snapshot.
+- [x] **Hardening (đợt 2)**: (1) chống PID reuse — `verifyProcessIdentity` đọc cmdline (Win=CIM/PowerShell, POSIX=`ps`), không verify/identity lệch → KHÔNG kill + fail-closed (`unverified`, `POC_CLEANUP_FAILED`); (2) chống symlink/junction escape — `realPathOrNull`/`isCanonicalInside` canonical realpath, từ chối symlink/junction/target thoát root ở `cleanupSession` + `recoverSession`.
+- [x] Test `scripts/test-temp-hygiene.mjs` **43/43 PASS** (PASS, FAILURE, TIMEOUT, RECOVERY, pid-scoped kill + NEW: pid-reuse identity lệch không kill + junction không xóa target ngoài). Đăng ký `test:temp-hygiene` + `optionalSuites` `full-verify.mjs`.
+- [x] Verify: `node --check` pass; `pnpm verify` **128/128 PASS exit 0**; `git diff --check` pass.
+- [x] **Commit độc lập `4c9fe22`** trên `feat/issue-19-phase2-readonly-mcp` — 6 files (.clinerules, AGENTS.md, package.json, full-verify.mjs, temp-hygiene.mjs, test-temp-hygiene.mjs), KHÔNG kèm Memory Bank. Chưa push, chưa handoff.
+
+---
+# Progress
+
+## 27/08/2026 20:19 — TEMP HYGIENE (policy + module dùng lại) — implemented + verified (chưa commit)
+
+- [x] Policy `.clinerules/08-temp-hygiene.md` + tóm tắt AGENTS.md.
+- [x] Module `scripts/temp-hygiene.mjs` (zero-dep): `createSessionManager` / `cleanupSession` (finally, idempotent, read-back, verdict CLEAN|POC_CLEANUP_FAILED) / `recoverSession` (theo sessionId, chỉ resource có marker) + helpers path/owner/pid.
+- [x] Test `scripts/test-temp-hygiene.mjs` **33/33 PASS** (PASS cleanup, FAILURE verdict, TIMEOUT process, RECOVERY tích cực + từ chối unowned, pid-scoped kill). Đăng ký `test:temp-hygiene` trong `package.json` + `optionalSuites` `full-verify.mjs`.
+- [x] Verify: `node --check` mới pass; `pnpm verify` **128/128 PASS exit 0**; `git diff --check` pass.
+- [ ] Chưa commit — giữ nguyên trên `feat/issue-19-phase2-readonly-mcp`, chờ Bố quyết. Chưa áp cho module khác (giữ scope Phase 2).
+
+---
+
+## 27/08/2026 — Issue #19 Phase 2: Read-only Test Evidence MCP — implemented + verified (chưa commit/PR)
+
+- [x] Audit Memory Bank: 2 file uncommitted (activeContext.md, progress.md — nội dung PR #20 squash@e087d76), 0 untracked. Stash → checkout main → `reset --hard origin/main` (e087d76) → tạo branch `feat/issue-19-phase2-readonly-mcp` → `stash pop` sạch không conflict. main giữ đúng e087d76; branch mang 2 file memory.
+- [x] `mcp-test-evidence/server.mjs` (zero-dep MCP stdio NDJSON JSON-RPC 2.0): tái dùng helper từ `scripts/test-evidence-reporter.mjs` (loadManifest, safePath, redactReport, formatSummary, formatFailureDetail, validateReport, MAX_LOG_EXCERPT_LINES). 5 read-only tools: `test_status`, `test_failures`, `test_failure_detail`, `test_log_excerpt`, `test_finding_map`. Bảo mật: `assertSecurity` (projectId/repo khớp manifest + `git remote get-url origin` khớp `manifest.repository`, trừ `MCP_TEST_EVIDENCE_SKIP_REMOTE=1`); `findReport` (reportId 16-hex qua safePath, headSha 40-hex, artifact mới nhất).
+- [x] `mcp-test-evidence/test-server.mjs`: fixture tạm, **28 assertions PASS** (pure findReport + E2E spawn server thật + negative fail-closed).
+- [x] Đăng ký `.mcp.json` (`mcp-test-evidence`: node + `mcp-test-evidence/server.mjs`) + `package.json` `test:evidence:mcp`.
+- [x] Verify: `node --check` pass; `pnpm test:evidence:mcp` 28/28; `pnpm verify` **123/123 exit 0** (fix trailing newline `.mcp.json`).
+- [x] Commit `9f199ff` (code Phase 2) + push `feat/issue-19-phase2-readonly-mcp` + mở Draft PR **#21** `Ref #19` (body qua file tạm đã xóa). 2 file memory giữ uncommitted để PR diff sạch. Không deploy, không executor/cache Phase 3.
+
+---
+## 27/08/2026 19:19 — PR #20: MERGE squash tại frozen HEAD 10c9e27 — hoàn tất (Bố lệnh đích danh)
+
+- [x] Bố lệnh merge: `gh pr merge 20 --repo duongpdddic-droid/AI_PR_REVIEWER --squash` tại frozen HEAD `10c9e278e66b7798fac694550dde710b7d0d8931`.
+- [x] Preflight: HEAD `10c9e27` OPEN, `mergeStateStatus: CLEAN`, `status:approved` (agent:gpt), main = origin/main `fa9fec3`.
+- [x] **Squashed and merged**: PR #20 state **MERGED** (mergedAt 2026-08-27T12:18:58Z), merge commit `e087d76643f73898964deab40983e51b630ee066`.
+- [x] Read-back main HEAD = `e087d76` (= merge commit, khớp origin/main sau fetch `fa9fec3..e087d76`).
+- [x] Branch remote `feat/issue-19-test-evidence-protocol-v1` đã xóa (`git/refs/heads/...` DELETE 204 → GET 404 "Branch not found").
+- [x] KHÔNG deploy. KHÔNG push thay đổi Memory Bank local phát sinh sau FREEZE (giữ uncommitted).
+
+## 27/08/2026 19:08 — PR #20: relay approval GPT → status:approved (sẵn sàng merge, chờ Bố lệnh)
+
+- [x] Bố lệnh "Thực hiện bước 2, chưa merge": chạy `node scripts/gpt-approval.mjs --repo duongpdddic-droid/AI_PR_REVIEWER --pr 20 --payload-file 10c9e... .agent/tmp-approval-pr20.json` với payload `{repository,prNumber:20,headSha:10c9e278e66b7798fac694550dde710b7d0d8931,policyVersion:2026-08-23.7,decisionId:gpt-pr20-10c9e27-20260827}` → gate trả **ĐÃ GHI approval agent:gpt ... status:approved**.
+- [x] Read-back (read-after-write): labels `agent:gpt + status:approved` — chỉ một status:* duy nhất (status:review-requested đã gỡ); PR state OPEN (KHÔNG merge); HEAD `10c9e278e66b7798fac694550dde710b7d0d8931` không đổi; CI verify SUCCESS; marker approval `<!-- ai-review-approval:{...} -->` comment id `543891943` (user duongpdddic-dro, created 2026-08-27T12:06:11Z) khóa full HEAD+policyVersion+decisionId.
+- [x] Temp payload đã xóa (`.agent/tmp-approval-pr20.json`).
+- [x] KHÔNG merge/deploy/approve — quyền người dùng. Chờ Bố lệnh merge đích danh (`gh pr merge 20 --squash|--merge|--rebase` + xác nhận HEAD không drift).
+
+## 27/08/2026 18:15 — PR #20: FREEZE HEAD @ 10c9e27 (Bố lệnh) — chờ GPT re-pass, không merge
+
+- [x] **FREEZE HEAD PR #20 tại `10c9e278e66b7798fac694550dde710b7d0d8931`** (Bố 18:15). Cấm thêm commit/push lên branch `feat/issue-19-test-evidence-protocol-v1` cho tới khi GPT re-pass + Bố lệnh merge.
+- [x] HEAD xác nhận GitHub = `10c9e278e66b7798fac694550dde710b7d0d8931` (OPEN). Worktree sạch.
+- [ ] Chờ GPT re-pass HEAD `10c9e27`; sau đó Bố ra lệnh merge đích danh (Cline không tự merge/approve/deploy).
 
 - [x] GPT TECHNICAL PASS PR #20 @ `3e79feb` (17:52) nhưng **HEAD đã đổi** thành `247670f4224728e1db2f25502e3df4699a1645b6` (commit memory-bank). Policy Issue #2 A3/G: HEAD đổi sau approval → approval `3e79feb` **mất hiệu lực**.
 - [x] Bố quyết (18:09): **KHÔNG merge** bây giờ; GPT re-pass HEAD mới `247670f` rồi mới merge. PR #20 OPEN, mergeable CLEAN, labels `agent:gpt + status:review-requested`, HEAD `247670f`.
@@ -533,3 +608,6 @@ IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR 
 - [x] Tests: `test-telegram-gateway.mjs` 22/22 (+6: 078-clobber, 079-proof×2, 079-backoff, 083, 084); `test-gateway-mp.mjs` 9/9 (+1 qldadtxd inbound); `full-verify` 116/116; `pnpm test` 192/192 PASS.
 - [x] Commit `9978677` push `eb05ab4..9978677` (fix/issue-15-telegram-gateway). Comment CLINE-FIX trên PR #17. Labels Issue #15 = `agent:gpt`+`status:review-requested` (đúng). Notify Telegram 816272951 EXIT=0.
 - [ ] Chờ GPT re-review tại HEAD `9978677`. KHÔNG merge/deploy/approve. Soak test máy thật vẫn là bước thủ công trước xóa `notify-telegram.mjs` legacy.
+## 28/08/2026 01:53 — PR #21 vòng review-fix GPT-REV-094..097 (Issue #19 Phase 2 MCP + temp-hygiene)
+- GPT CHANGES_REQUESTED (0 Critical, 4 Important): redact-bypass (opLogExcerpt/collectFindings), findReport thiếu binding + nondeterministic headSha, recoverSession xóa dir khi mất manifest, cleanup read-back thiếu workspace baseline.
+- Fix + verify: 4 file code — `mcp-test-evidence/server.mjs`, `scripts/temp-hygiene.mjs` + 2 test; `full-verify` 128/128, temp-hygiene 54/54, mcp-test 35/35. Đang commit/push/handoff GPT.

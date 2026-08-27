@@ -252,12 +252,13 @@ export function cleanupSession(mgr, { timeoutMs = 1500, projectRoot = null, work
     res.leftover.push(redactHome(homeDir));
   }
 
-  // 4. read-back: workspace/poc hết, marker/manifest hết, process con hết, repo không đổi.
+  // 4. read-back: baseline workspace BẮT BUỘC khi có projectRoot (null → fail-closed, workspaceUnchanged=false).
   const homeGone = !fs.existsSync(homeDir);
   const procGone = (manifest.processes || []).every((p) => !isAlive(p.pid));
+  const hasBaseline = !projectRoot || Array.isArray(workspaceBefore);
   const ws = projectRoot ? workspaceChange(projectRoot, workspaceBefore) : null;
-  const workspaceUnchanged = !projectRoot || (ws && ws.length === 0);
-  res.readBack = { homeGone, processesGone: procGone, workspaceUnchanged };
+  const workspaceUnchanged = !projectRoot ? hasBaseline : (hasBaseline && ws && ws.length === 0);
+  res.readBack = { homeGone, processesGone: procGone, workspaceUnchanged, workspaceBaselinePresent: hasBaseline };
   res.leftover = res.leftover.map(redactHome);
 
   const ok = homeGone && procGone && res.leftover.length === 0 && res.errors.length === 0 && workspaceUnchanged;
@@ -277,13 +278,29 @@ export function recoverSession({ sessionId, tempRoot = DEFAULT_TEMP_ROOT() }) {
   if (!hasOwnershipMarker(home, sessionId)) {
     return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: ['thiếu ownership marker — không tự xóa'] };
   }
+  // manifest bắt buộc đọc + schema hợp lệ mới được xóa dir. Fail-closed: manifest mất/hỏng/
+  // version không hỗ trợ/session lệch/process record invalid → GIỮ NGUYÊN dir (không thể xác minh
+  // process tracked khi mất manifest) — không bao giờ tuyên bố CLEAN mà thiếu trạng thái process verified.
+  let procRecs;
   try {
-    const proc = JSON.parse(fs.readFileSync(path.join(home, MANIFEST_NAME), 'utf8')).processes || [];
-    const stp = stopTrackedProcesses(proc, { timeoutMs: 800, sessionId });
-    if (stp.unverified.length > 0) {
-      return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: ['process unverified (PID reuse nghi ngờ) — chưa kill'] };
+    const parsed = JSON.parse(fs.readFileSync(path.join(home, MANIFEST_NAME), 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || parsed.version !== 1) {
+      return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: ['manifest thiếu/version không hỗ trợ — giữ nguyên'] };
     }
-  } catch { /* manifest hỏng không chặn xóa dir có marker */ }
+    if (parsed.sessionId !== sessionId) {
+      return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: ['manifest sessionId lệch — giữ nguyên'] };
+    }
+    if (!Array.isArray(parsed.processes) || parsed.processes.some((r) => !r || !Number.isInteger(r.pid))) {
+      return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: ['manifest processes không hợp lệ — giữ nguyên'] };
+    }
+    procRecs = parsed.processes;
+  } catch (e) {
+    return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: [`manifest JSON không đọc/parse được: ${e.message} — giữ nguyên`] };
+  }
+  const stp = stopTrackedProcesses(procRecs, { timeoutMs: 800, sessionId });
+  if (stp.unverified.length > 0) {
+    return { verdict: 'POC_CLEANUP_FAILED', removed: [], leftover: [redactHome(home)], errors: ['process unverified (PID reuse nghi ngờ) — chưa kill'] };
+  }
   try {
     fs.rmSync(home, { recursive: true, force: true });
     const gone = !fs.existsSync(home);

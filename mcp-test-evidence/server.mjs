@@ -30,8 +30,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  loadManifest, safePath, redactReport, formatSummary, formatFailureDetail,
-  validateReport, MAX_LOG_EXCERPT_LINES,
+  loadManifest, safePath, redactReport, redact, formatSummary, formatFailureDetail,
+  validateReport, MAX_LOG_EXCERPT_LINES, computeReportId, computeManifestHash,
 } from '../scripts/test-evidence-reporter.mjs';
 
 export const SERVER_INFO = { name: 'mcp-test-evidence', version: '0.1.0' };
@@ -103,8 +103,13 @@ function listReports(artifactDir) {
   return reports;
 }
 
-export function findReport(artifactDir, { reportId, headSha }) {
-  if (reportId !== undefined && reportId !== null) {
+export function findReport(artifactDir, { reportId, headSha, manifestHash }) {
+  const hasId = reportId !== undefined && reportId !== null;
+  const hasSha = headSha !== undefined && headSha !== null;
+  if (hasId && hasSha) {
+    throw new Error('chọn đúng 1 selector: reportId HOẶC headSha, không cả 2');
+  }
+  if (hasId) {
     if (typeof reportId !== 'string' || !HEX16.test(reportId)) {
       throw new Error('reportId: cần 16-hex (chống path traversal)');
     }
@@ -113,17 +118,47 @@ export function findReport(artifactDir, { reportId, headSha }) {
     const report = readJson(safe.filePath);
     const v = validateReport(report);
     if (!v.valid) throw new Error(`report artifact sai schema: ${v.errors.join('; ')}`);
+    // bind identity tuyệt đối: filename/requested id === report.reportId === canonical(head+manifestHash)
+    if (report.reportId !== reportId) {
+      throw new Error(`report artifact identity lệch: file=${reportId} reportId=${report.reportId}`);
+    }
+    const canonical = computeReportId(report.headSha, report.manifestHash);
+    if (report.reportId !== canonical) {
+      throw new Error(`report artifact reportId ${report.reportId} không khớp canonical (head+manifestHash)`);
+    }
     return report;
   }
-  if (headSha !== undefined && headSha !== null) {
+  if (hasSha) {
     if (typeof headSha !== 'string' || !HEX40.test(headSha)) {
       throw new Error('headSha: cần full 40-hex');
     }
-    const matches = listReports(artifactDir).filter((r) => r.headSha === headSha);
-    if (matches.length === 0) throw new Error(`không tìm thấy report artifact cho head=${headSha}`);
-    return matches[matches.length - 1];
+    const candidates = listReports(artifactDir).filter(
+      (r) => r.headSha === headSha && validateReport(r).valid
+        && r.reportId === computeReportId(r.headSha, r.manifestHash),
+    );
+    if (candidates.length === 0) {
+      throw new Error(`head=${headSha}: không có report artifact hợp lệ (schema + canonical binding)`);
+    }
+    if (manifestHash !== undefined && manifestHash !== null) {
+      const bound = candidates.filter((r) => r.manifestHash === manifestHash);
+      if (bound.length === 1) return bound[0];
+      if (bound.length === 0) {
+        throw new Error(`head=${headSha}: không có report artifact khớp manifest hiện tại — yêu cầu reportId`);
+      }
+      throw new Error(`head=${headSha}: nhiều report khớp manifest hiện tại (ambiguous) — yêu cầu reportId`);
+    }
+    throw new Error(`head=${headSha}: ${candidates.length} report hợp lệ, thiếu binding manifest hiện tại — yêu cầu reportId`);
   }
   throw new Error('cần reportId hoặc headSha');
+}
+
+// resolveReport: threading manifestHash hiện tại để lookup theo headSha là deterministic + fail-closed.
+function resolveReport(args, ctx) {
+  return findReport(ctx.artifactDir, {
+    reportId: args.reportId,
+    headSha: args.headSha,
+    manifestHash: computeManifestHash(ctx.manifest),
+  });
 }
 
 function normalizeIndex(v, size) {
@@ -151,7 +186,7 @@ function collectFindings(manifest, report) {
       step: f.step,
       gate: m?.gate ?? null,
       test: m ? { id: m.id, name: m.name, command: m.command, args: m.args ?? [] } : null,
-      detail: f.detail,
+      detail: redact(f.detail),
     };
   });
 }
@@ -209,7 +244,7 @@ export const TOOLS = [
 
 function opStatus(args, ctx) {
   assertSecurity(args, ctx);
-  const report = findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
+  const report = resolveReport(args, ctx);
   const red = redactReport(report);
   return {
     projectId: ctx.project.projectId,
@@ -227,7 +262,7 @@ function opStatus(args, ctx) {
 
 function opFailures(args, ctx) {
   assertSecurity(args, ctx);
-  const report = findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
+  const report = resolveReport(args, ctx);
   const red = redactReport(report);
   const list = (red.failures || []).map((f) => ({ code: f.code, step: f.step }));
   return { reportId: report.reportId, headSha: report.headSha, count: list.length, failures: list };
@@ -235,7 +270,7 @@ function opFailures(args, ctx) {
 
 function opFailureDetail(args, ctx) {
   assertSecurity(args, ctx);
-  const report = findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
+  const report = resolveReport(args, ctx);
   const idx = normalizeIndex(args.failureIndex, (report.failures || []).length);
   const detail = formatFailureDetail(report, idx);
   return { reportId: report.reportId, headSha: report.headSha, failureIndex: idx, failure: detail };
@@ -243,9 +278,9 @@ function opFailureDetail(args, ctx) {
 
 function opLogExcerpt(args, ctx) {
   assertSecurity(args, ctx);
-  const report = findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
+  const report = resolveReport(args, ctx);
   const idx = normalizeIndex(args.failureIndex, (report.failures || []).length);
-  const f = report.failures[idx];
+  const f = redactReport(report).failures[idx];
   const maxLines = clampLines(args.maxLines);
   const text = f.logExcerpt ?? '';
   const lines = text.split('\n');
@@ -262,8 +297,8 @@ function opLogExcerpt(args, ctx) {
 
 function opFindingMap(args, ctx) {
   assertSecurity(args, ctx);
-  const report = findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
-  let findings = collectFindings(ctx.manifest, report);
+  const report = resolveReport(args, ctx);
+  let findings = collectFindings(ctx.manifest, redactReport(report));
   if (args.findingCode !== undefined && args.findingCode !== null) {
     findings = findings.filter((f) => f.code === args.findingCode);
     if (findings.length === 0) throw new Error(`không tìm thấy finding code '${args.findingCode}'`);
