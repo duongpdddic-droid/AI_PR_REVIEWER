@@ -152,13 +152,23 @@ export function findReport(artifactDir, { reportId, headSha, manifestHash }) {
   throw new Error('cần reportId hoặc headSha');
 }
 
-// resolveReport: threading manifestHash hiện tại để lookup theo headSha là deterministic + fail-closed.
+// resolveReport: lookup theo headSha hash canonical giống reporter — hash manifest RUNTIME
+// sau khi thay headSha bằng requested HEAD (GPT-REV-098). Reporter (full-verify) giữ file manifest
+// immutable (headSha stale) nhưng bind artifact bằng `{...manifest, headSha: currentHead}`. Áp
+// đồng quy tắc đó ở đây để test_status({headSha}) đọc đúng artifact canonical. reportId lookup
+// độc lập (đã bind canonical sớm trong findReport, không phụ thuộc manifest hiện tại).
 function resolveReport(args, ctx) {
-  return findReport(ctx.artifactDir, {
-    reportId: args.reportId,
-    headSha: args.headSha,
-    manifestHash: computeManifestHash(ctx.manifest),
-  });
+  if (args.headSha !== undefined && args.headSha !== null) {
+    const manifestForHash = ctx.manifest.headSha === args.headSha
+      ? ctx.manifest
+      : { ...ctx.manifest, headSha: args.headSha };
+    return findReport(ctx.artifactDir, {
+      reportId: args.reportId,
+      headSha: args.headSha,
+      manifestHash: computeManifestHash(manifestForHash),
+    });
+  }
+  return findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
 }
 
 function normalizeIndex(v, size) {

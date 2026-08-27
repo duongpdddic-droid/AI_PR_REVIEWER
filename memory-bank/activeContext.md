@@ -7,7 +7,19 @@
   - **097** `cleanupSession` read-back workspace không có baseline → null trả `[]` như "không đổi".
 - Fix: redact tại nguồn (`redact`); `findReport` enforce 1 selector + bind canonical `computeReportId` + head-by-manifestHash fail-closed; `recoverSession` giữ dir khi manifest invalid; `cleanupSession` yêu cầu baseline (null → POC_CLEANUP_FAILED).
 - Verify: `node scripts/full-verify.mjs` **128/128 PASS**; `test-temp-hygiene` 54/54; `test-server` (mcp) 35/35. HEAD frozen.
-- Trạng thái hiện tại: ĐANG trong vòng fix; sau commit+push → comment `[CLINE-FIX-001..004]` → handoff GPT (`agent:gpt`+`status:review-requested`).
+- Trạng thái hiện tại: vòng fix XONG + verify 128/128 → commit `a28d446` + push + comment `[CLINE-FIX-001..004]` → handoff GPT (labels `agent:gpt`+`status:review-requested`). Chờ GPT re-review HEAD `a28d446`.
+
+## Re-handoff PR #21 khóa HEAD — theo lệnh Bố (28/08/2026)
+- Bố phát hiện handoff trước (`a28d446`) chưa hợp lệ do chưa có PRE_REVIEW_PASS canonical khóa HEAD mới → yêu cầu tái chạy quy trình A.
+- Sequences: labels tạm `agent:cline+status:review-requested` → CI run `33105837021` (Verify CI) = **success** trên full HEAD `a28d446` → patch `.agent/config.json` targetRepos tạm = AI_PR_REVIEWER (backup `%TEMP%`, BOM-issue L-043: `Set-Content -Encoding utf8` gây BOM → JSON.parse fail → dùng node strip-BOM) → `node scripts/unified-orchestrator.mjs --execute` → **PRE_REVIEW_PASS, openBlocking 0, decisionGate null, outcome handoff-gpt** → đăng marker comment canonical `key=...::21::a28d4463059ae5afab402733b6611e9f912b1f1b::2026-08-23.7::pre-review:PRE_REVIEW_PASS` + `pre-review=PRE_REVIEW_PASS:a28d446...` → config restored (`QLDA_DTXD`).
+- **Read-back chuẩn**: PR #21 state OPEN, head `a28d446` = local = remote; labels `agent:gpt` + `status:review-requested` (duy nhất); CI Verify success @`a28d446`; marker canonical PRE_REVIEW_PASS khóa full SHA `a28d446` + policy `2026-08-23.7`; config restored — không sửa/commit/push code. Chờ GPT re-review HEAD `a28d446`.
+
+## Vòng fix GPT-REV-098 — PR #21 (28/08/2026)
+- GPT delta re-review @ `a28d446`: CHANGES_REQUESTED — **0 Critical, 1 Important [GPT-REV-098]**.
+- **098**: lookup theo headSha hash manifest COMMITTED (headSha stale `6045d752`) thay vì runtime → `test_status({headSha})` derive manifestHash khác, reject artifact canonical. Reporter (full-verify) giữ file immutable nhưng bind artifact bằng `{...manifest, headSha: currentHead}`.
+- **Fix**: `resolveReport` (server.mjs) khi selector headSha → hash `{...ctx.manifest, headSha: args.headSha}` (cùng canonical rule reporter); reportId lookup độc lập. Fixture test-server viết lại đúng reporter: manifest committed STALE, mỗi HEAD có manifestHash canonical riêng; thêm E2E (a) test_status({headSha}) thành công dù manifest stale, (b) artifact từ manifest nội dung sai → fail-closed.
+- Verify: `node mcp-test-evidence/test-server.mjs` **38/38 PASS** (thêm 3 test); `node scripts/full-verify.mjs` **128/128 PASS**.
+- Trạng thái: fix XONG + verify PASS. Bước tiếp: commit + push lên branch PR #21 → chạy lại handoff canonical (CI + PRE_REVIEW_PASS @ HEAD mới) → gửi GPT re-review.
 
 ## Mục tiêu
 Issue #19 Phase 2 — Read-only Test Evidence MCP server. Không deploy, không mở rộng Phase 3 (executor/cache).

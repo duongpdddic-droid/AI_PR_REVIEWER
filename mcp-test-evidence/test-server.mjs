@@ -49,24 +49,28 @@ function buildFixture() {
   writeFileSync(path.join(agent, "project.json"), JSON.stringify({
     schemaVersion: "1.0", projectId: "fixture-project", repository: "duongpdddic-droid/AI_PR_REVIEWER", projectType: "fixture",
   }));
+  // GPT-REV-098: manifest committed (file immutable) có headSha STALE, KHÁC requested HEAD.
+  // Reporter bind artifact bằng manifest RUNTIME copy với headSha=HEAD của report đó (full-verify),
+  // vậy mỗi HEAD có manifestHash canonical RIÊNG theo `{...manifest, headSha: <HEAD>}`.
+  const STALE_HEAD = "3333333333333333333333333333333333333333";
+  manifest.headSha = STALE_HEAD;
   writeFileSync(path.join(agent, "test-manifest.json"), JSON.stringify(manifest, null, 2));
+  const mhPass = computeManifestHash({ ...manifest, headSha: PASS_HEAD });
+  const mhFail = computeManifestHash({ ...manifest, headSha: FAIL_HEAD });
+  const PASS_REPORT = computeReportId(PASS_HEAD, mhPass);
+  const FAIL_REPORT = computeReportId(FAIL_HEAD, mhFail);
 
-  // reportId/manifestHash PHẢI canonical → lookup head bằng bind manifest hiện tại (G-PT-REV-095).
-  const mh = computeManifestHash(manifest);
-  const PASS_REPORT = computeReportId(PASS_HEAD, mh);
-  const FAIL_REPORT = computeReportId(FAIL_HEAD, mh);
-
-  // PASS artifact
+  // PASS artifact (bind manifestHash của PASS_HEAD)
   writeFileSync(path.join(artifacts, `${PASS_REPORT}.json`), JSON.stringify({
     schemaVersion: "1.0", headSha: PASS_HEAD, passed: true,
     tests: { passed: 10, failed: 0, total: 10 }, duration: 100,
-    reportId: PASS_REPORT, manifestHash: mh, blocking: 0, failureCodes: [], failures: [],
+    reportId: PASS_REPORT, manifestHash: mhPass, blocking: 0, failureCodes: [], failures: [],
   }));
-  // FAIL artifact gồm secret literal để assert redaction
+  // FAIL artifact gồm secret literal để assert redaction (bind manifestHash của FAIL_HEAD)
   writeFileSync(path.join(artifacts, `${FAIL_REPORT}.json`), JSON.stringify({
     schemaVersion: "1.0", headSha: FAIL_HEAD, passed: false,
     tests: { passed: 8, failed: 2, total: 10 }, duration: 120,
-    reportId: FAIL_REPORT, manifestHash: mh, blocking: 2,
+    reportId: FAIL_REPORT, manifestHash: mhFail, blocking: 2,
     failureCodes: ["STEP_UNIT_FAIL", "STEP_INTEGRATION_FAIL"],
     failures: [
       { code: "STEP_UNIT_FAIL", step: "unit", detail: "expected 2 to equal 3; token=\"supersecret123\"",
@@ -74,10 +78,10 @@ function buildFixture() {
       { code: "STEP_INTEGRATION_FAIL", step: "integration", detail: "timeout 500s" },
     ],
   }));
-  return { root, artifactDir: artifacts, manifest, mh, PASS_REPORT, FAIL_REPORT };
+  return { root, artifactDir: artifacts, manifest, mhPass, mhFail, PASS_REPORT, FAIL_REPORT, STALE_HEAD };
 }
 async function run() {
-  const { root, artifactDir, manifest, mh, PASS_REPORT, FAIL_REPORT } = buildFixture();
+  const { root, artifactDir, manifest, mhPass, mhFail, PASS_REPORT, FAIL_REPORT, STALE_HEAD } = buildFixture();
   try {
     // ── 1) Pure logic / security / findReport ───────────────────────
     console.log("[1] pure logic (findReport)");
@@ -87,7 +91,7 @@ async function run() {
       try { findReport(artifactDir, { reportId: bad }); } catch { threw = true; }
       ok(threw, `findReport chặn reportId bẩn '${bad}' (chống path traversal)`);
     }
-    const byHead = findReport(artifactDir, { headSha: PASS_HEAD, manifestHash: mh });
+    const byHead = findReport(artifactDir, { headSha: PASS_HEAD, manifestHash: mhPass });
     ok(byHead.passed === true && byHead.reportId === PASS_REPORT, "findReport theo headSha+PASS (bind manifest)");
     let threw = false;
     try { findReport(artifactDir, { headSha: "abcd" }); } catch { threw = true; }
@@ -105,7 +109,7 @@ async function run() {
     writeFileSync(path.join(artifactDir, `${MIM}.json`), JSON.stringify({
       schemaVersion: "1.0", headSha: FAIL_HEAD, passed: false,
       tests: { passed: 0, failed: 1, total: 1 }, duration: 1,
-      reportId: FAIL_REPORT, manifestHash: mh, blocking: 1, failureCodes: [], failures: [],
+      reportId: FAIL_REPORT, manifestHash: mhFail, blocking: 1, failureCodes: [], failures: [],
     }));
     threw = false;
     try { findReport(artifactDir, { reportId: MIM }); } catch { threw = true; }
@@ -119,7 +123,7 @@ async function run() {
       reportId: otherId, manifestHash: "other-manifest-hash", blocking: 0, failureCodes: [], failures: [],
     }));
     threw = false;
-    try { findReport(artifactDir, { headSha: OHEAD, manifestHash: mh }); } catch { threw = true; }
+    try { findReport(artifactDir, { headSha: OHEAD, manifestHash: mhFail }); } catch { threw = true; }
     ok(threw, "findReport headSha có artifact nhưng khác manifest → fail-closed yêu cầu reportId");
 
     // ── 2) E2E spawn server thật ────────────────────────────────────
@@ -209,6 +213,27 @@ async function run() {
     const m1 = await call("test_finding_map", { reportId: FAIL_REPORT, findingCode: "STEP_INTEGRATION_FAIL" });
     ok(m1.data.findings.length === 1 && m1.data.findings[0].step === "integration",
       "finding_map lọc đúng 1 finding theo code");
+
+    // ── GPT-REV-098: headSha hash manifest RUNTIME (thay headSha), không hash manifest committed stale ─
+    // Manifest committed (STALE_HEAD) ≠ FAIL_HEAD. Server phải hash {manifest, headSha: FAIL_HEAD}
+    // (giống reporter full-verify) để test_status({headSha}) đọc đúng artifact canonical dù file stale.
+    ok(manifest.headSha === STALE_HEAD, "fixture: manifest committed có headSha STALE (khác requested HEAD)");
+    const sStale = await call("test_status", { headSha: FAIL_HEAD });
+    ok(sStale.result && !sStale.result.isError && sStale.data.passed === false && sStale.data.blocking === 2,
+      "GPT-REV-098: test_status theo headSha thành công dù manifest committed headSha stale (hash runtime)");
+    // Artifact built từ manifest NỘI DUNG sai (headSha đúng nhưng phần còn lại lệch) → manifestHash
+    // khác canonical hiện tại → findReport theo headSha+manifestHash phải fail-closed.
+    const WRONG = "abcdef0123456789abcdef0123456789abcdef01";
+    const wrongMh = computeManifestHash({ ...manifest, headSha: WRONG, projectId: "tampered-project" });
+    const wrongId = computeReportId(WRONG, wrongMh);
+    writeFileSync(path.join(artifactDir, `${wrongId}.json`), JSON.stringify({
+      schemaVersion: "1.0", headSha: WRONG, passed: true,
+      tests: { passed: 1, failed: 0, total: 1 }, duration: 5,
+      reportId: wrongId, manifestHash: wrongMh, blocking: 0, failureCodes: [], failures: [],
+    }));
+    const wrongR = await call("test_status", { headSha: WRONG });
+    ok(wrongR.result?.isError === true && /không có report artifact/.test(wrongR.result.content[0].text),
+      "GPT-REV-098: artifact từ manifest nội dung sai → test_status(headSha) fail-closed (không khớp canonical)");
 
     // ── Negative fail-closed ────────────────────────────────────────
     console.log("[3] negative fail-closed");
