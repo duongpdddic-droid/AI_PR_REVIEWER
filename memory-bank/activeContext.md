@@ -15,8 +15,8 @@ Tự hành (kênh Cline, lệnh Bố trực tiếp).
    5a. [x] GPT-REV-087: `--evidence` đi qua pipeline (load+validate manifest, computeReportId canonical, save artifact, progressive disclosure).
    5b. [x] GPT-REV-088: deep-redact trước mọi format/save/summary/detail.
    5c. [x] GPT-REV-089: strict validators (reject extra props, empty/invalid headSha/projectId), saveReport validate + path-traversal guard (safePath).
-6. [ ] Commit fix + push lên branch PR #20.
-7. [ ] Local pre-review (full-verify + test:evidence PASS) → re-handoff GPT (labels agent:gpt + status:review-requested).
+6. [x] Commit fix `858b701` + push lên branch PR #20; CI Verify success.
+7. [x] Local pre-review PASS → re-handoff GPT (labels agent:gpt + status:review-requested, comment [CLINE-FIX-087/088/089]).
 
 ## Bước hiện tại
 Đã fix xong 3 findings, verify local PASS. Chuẩn bị commit + push + re-handoff GPT re-review.

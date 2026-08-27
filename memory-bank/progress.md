@@ -8,7 +8,8 @@
 - [x] `scripts/test-test-evidence.mjs`: **59 → 94 tests** (35 mới cover 3 findings).
 - [x] Verify: `pnpm test:evidence` **94/94 PASS**; `pnpm verify` **121/121 PASS** (~7.3s, hết treo do bỏ test #57 đệ quy full-verify); `--evidence` thực tế ra `VERIFY PASS head=851fed8... tests=121/121 report=8022a4c63075dc29`, artifact đúng schema, reportId khớp `sha256(head:manifestHash)[:16]`.
 - [x] `git diff --check` sạch; node --check 3 file OK; không BOM.
-- [ ] Commit + push branch; re-handoff GPT (labels agent:gpt + status:review-requested, comment `[CLINE-FIX-...]`).
+- [x] Commit `858b701` (7 files, +404/−53); push branch; CI Verify **success** @ `858b701`.
+- [x] Re-handoff GPT: comment `[CLINE-FIX-087/088/089]` trên PR #20; labels `agent:gpt` + `status:review-requested`. Chờ GPT re-review.
 
 ## 27/08/2026 — Issue #19 Phase 1: Test Evidence Protocol v1 + compact reporter — COMPLETED (PR #20, chờ GPT review)
 
