@@ -36,6 +36,18 @@ export const isInside = (rootDir, target) => {
 
 export const isAlive = (pid) => {
   if (!Number.isInteger(pid)) return false;
+  // POSIX: process bị kill thành zombie (state 'Z') vẫn đang trong bảng process,
+  // nhưng đã dead. kill(pid,0) trên zombie vẫn thành công → false positive
+  // khiến cleanup báo POC_CLEANUP_FAILED. Đọc /proc/<pid>/stat để loại zombie.
+  if (process.platform !== 'win32') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // format: pid (comm) state ... — state là ký tự sau dấu ')' cuối cùng.
+      const close = stat.lastIndexOf(')');
+      const state = close >= 0 && close + 2 <= stat.length ? stat[close + 2] : '';
+      if (state === 'Z') return false;
+    } catch { /* không đọc được /proc → fall back xuống kill(pid,0) */ }
+  }
   try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === 'EPERM'; }
 };
 

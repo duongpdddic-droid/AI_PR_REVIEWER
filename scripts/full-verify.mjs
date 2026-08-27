@@ -113,17 +113,7 @@ try {
     const f = path.join(ROOT, 'scripts', suite);
     if (!fs.existsSync(f)) { add(`${suite} (bỏ qua — chưa tồn tại)`, true, 'skip'); continue; }
     const r = spawnSync(node, [f], { encoding: 'utf8', env: { ...process.env, FULL_VERIFY_CHILD: '1' } });
-    if (r.status === 0) {
-      add(suite, true, 'PASS');
-    } else {
-      // FAIL: in toàn bộ stdout/stderr của suite để chẩn đoán assertion thật
-      // (detail bảng bị cắt 38 ký tự → ẩn dòng fail trong CI log).
-      const out = (r.stdout || '') + (r.stderr || '');
-      const lines = out.trim().split('\n').filter(Boolean).slice(-60);
-      add(suite, false, lines.join(' | '));
-      console.log(`\n[FULL-VERIFY] ${suite} FAILED (exit ${r.status}):`);
-      console.log(out.trim());
-    }
+    add(suite, r.status === 0, r.status === 0 ? '' : (r.stdout || r.stderr || '').trim().split('\n').filter((l) => /FAIL|Error|assert/i.test(l)).slice(-3).join(' | ') || (r.stderr || '').trim().split('\n').slice(-3).join(' | '));
   }
 
   // 4b. git diff --check (whitespace errors / conflict markers trong thay đổi staged+unstaged).
