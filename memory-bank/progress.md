@@ -1,3 +1,15 @@
+## 27/08/2026 10:03 — Issue #19 PR #20: fix GPT re-review findings GPT-REV-087/088/089 — COMPLETED (chờ GPT re-review)
+
+- [x] GPT re-review PR #20 @ `851fed8`: CHANGES_REQUESTED, 0 Critical / 3 Important (GPT-REV-087/088/089).
+- [x] **GPT-REV-087 (execution path)**: `--evidence` giờ đi qua pipeline duy nhất — loadManifest → validateManifest → computeManifestHash → computeReportId(head, manifestHash) → validateReport → saveReport(redact) → formatCompactLine. Không còn ad-hoc hash.
+- [x] **GPT-REV-088 (redaction)**: thêm `redactReport()` deep-redact `failures[].detail`+`logExcerpt`; `formatFullJson`/`formatSummary`/`formatFailureDetail`/`saveReport` đều gọi trước output/write.
+- [x] **GPT-REV-089 (fail-closed)**: validators strict — reject extra props, empty/invalid headSha (40-hex), empty projectId, invalid step timeout/args/extra props, invalid failure code; `saveReport` validate + `safePath` chặn traversal `../`/non-hex16 reportId.
+- [x] `.agent/test-manifest.json`: headSha = `851fed852d7434bf31601ccf494ed7600cee11b7` (40-hex hợp lệ).
+- [x] `scripts/test-test-evidence.mjs`: **59 → 94 tests** (35 mới cover 3 findings).
+- [x] Verify: `pnpm test:evidence` **94/94 PASS**; `pnpm verify` **121/121 PASS** (~7.3s, hết treo do bỏ test #57 đệ quy full-verify); `--evidence` thực tế ra `VERIFY PASS head=851fed8... tests=121/121 report=8022a4c63075dc29`, artifact đúng schema, reportId khớp `sha256(head:manifestHash)[:16]`.
+- [x] `git diff --check` sạch; node --check 3 file OK; không BOM.
+- [ ] Commit + push branch; re-handoff GPT (labels agent:gpt + status:review-requested, comment `[CLINE-FIX-...]`).
+
 ## 27/08/2026 — Issue #19 Phase 1: Test Evidence Protocol v1 + compact reporter — COMPLETED (PR #20, chờ GPT review)
 
 - [x] Branch `feat/issue-19-test-evidence-protocol-v1` từ main (`fa9fec3`).

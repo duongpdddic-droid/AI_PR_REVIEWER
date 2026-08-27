@@ -1,48 +1,57 @@
 # Active Context
 ## Mục tiêu
-Issue #19 — Shared Test Evidence Protocol v1 + compact reporter. Giai đoạn 1: schema + reporter + tests + full-verify --evidence. Giai đoạn 2: MCP server + executor + cache. Giai đoạn 3: orchestrator integration + QLDA_DTXD adoption.
+Issue #19 — Shared Test Evidence Protocol v1 + compact reporter. Giai đoạn 1: schema + reporter + tests + full-verify --evidence.
+Xử lý GPT re-review findings trên PR #20 (GPT-REV-087..089).
 
 ## Chế độ
 Tự hành (kênh Cline, lệnh Bố trực tiếp).
 
 ## Kế hoạch thực thi
-1. [x] Claim Issue #19, branch `feat/issue-19-test-evidence-protocol-v1` từ `fa9fec3` (main sau merge PR #17).
-2. [x] Tạo `scripts/test-evidence-schema.json` — JSON Schema v1.0: TestManifest + CompactReport + FailureRecord.
-3. [x] Tạo `.agent/test-manifest.json` — manifest cho AI_PR_REVIEWER (5 gates: syntax, unit, integration, policy, drift).
-4. [x] Tạo `scripts/test-evidence-reporter.mjs` — core reporter: hash, format, validate, redact, save, progressive disclosure.
-5. [x] Tạo `scripts/test-test-evidence.mjs` — 59 tests: schema validation, output format, redaction, size limits, edge cases.
-6. [x] Sửa `scripts/full-verify.mjs` — +`--evidence` flag: compact one-line output `VERIFY PASS/FAIL`.
-7. [x] Verify: `pnpm test:evidence` 59/59 PASS; `pnpm verify` 121/121 PASS; `test:drift` 0 FAIL.
-8. [x] Commit + push + mở Draft PR #20.
-9. [ ] Local pre-review:labels + checks pass.
-10. [ ] Handoff GPT review (sau local PASS).
+1. [x] Claim Issue #19, branch `feat/issue-19-test-evidence-protocol-v1`.
+2. [x] Tạo schema + reporter + tests + full-verify --evidence (Phase 1).
+3. [x] Commit + push + mở Draft PR #20 → CI PASS → handoff GPT.
+4. [x] GPT re-review: CHANGES_REQUESTED, 3 findings (GPT-REV-087/088/089).
+5. [>] Fix 3 findings (đang thực hiện + verify + commit + re-handoff).
+   5a. [x] GPT-REV-087: `--evidence` đi qua pipeline (load+validate manifest, computeReportId canonical, save artifact, progressive disclosure).
+   5b. [x] GPT-REV-088: deep-redact trước mọi format/save/summary/detail.
+   5c. [x] GPT-REV-089: strict validators (reject extra props, empty/invalid headSha/projectId), saveReport validate + path-traversal guard (safePath).
+6. [ ] Commit fix + push lên branch PR #20.
+7. [ ] Local pre-review (full-verify + test:evidence PASS) → re-handoff GPT (labels agent:gpt + status:review-requested).
 
 ## Bước hiện tại
-PR #20 đã mở (Draft). Chờ CI/verify pass + local pre-review trước khi chuyển status:review-requested.
+Đã fix xong 3 findings, verify local PASS. Chuẩn bị commit + push + re-handoff GPT re-review.
 
 ## Bằng chứng thực thi
-- `scripts/test-evidence-schema.json` (120 dòng): TestManifest (5 required: schemaVersion/projectId/repository/headSha/gates), CompactReport (tests summary + reportId + failureCodes), FailureRecord (code/step/detail/logExcerpt).
-- `.agent/test-manifest.json` (35 dòng): self-repo AI_PR_REVIEWER gates.
-- `scripts/test-evidence-reporter.mjs` (~140 dòng): computeEnvironmentFingerprint, computeManifestHash, computeReportId, formatCompactLine, formatFullJson, saveReport, validateReport, validateManifest, redact, failureCodeFromStep, formatSummary, formatFailureDetail.
-- `scripts/test-test-evidence.mjs` (~240 dòng): 59 asserts覆盖hash, format, validate, redact, size, edge.
-- `scripts/full-verify.mjs` (+40/-9 dòng): +createHash import, +startTime, +--evidence flag, +compact output mode.
-- `package.json` (+1): +`"test:evidence"` script.
+### Fix GPT-REV-087/088/089
+- `scripts/test-evidence-reporter.mjs`:
+  - Thêm `loadManifest()` — load + parse `.agent/test-manifest.json` (fail-closed).
+  - Thêm `redactReport(report)` — deep-redact `failures[].detail` + `logExcerpt`.
+  - Thêm `safePath(reportId, dir)` — reject reportId chứa `../` / non-hex16, đảm bảo resolved nằm trong artifact root.
+  - `formatFullJson` / `formatSummary` / `formatFailureDetail` gọi `redactReport` trước output.
+  - `saveReport` validate report + safePath + redact trước write.
+  - `validateReport`/`validateManifest` strict: reject extra props, empty headSha (cần 40-hex), empty projectId, invalid step timeout/args/extra props, invalid failure code.
+- `scripts/full-verify.mjs` `--evidence`: build report qua pipeline — loadManifest → validateManifest → computeManifestHash → computeReportId(head, manifestHash) → validateReport → saveReport(redact) → formatCompactLine. Không còn ad-hoc hash.
+- `.agent/test-manifest.json`: headSha hợp lệ 40-hex (`851fed852d7434bf31601ccf494ed7600cee11b7`) để thỏa schema.
+- `scripts/test-test-evidence.mjs`: +35 tests (59→94) cover loadManifest, safePath, strict validate, redactReport, saveReport redaction + traversal, formatSummary/detail redaction, pipeline.
+
+### Verify
+- `pnpm test:evidence` (test-test-evidence.mjs): **94/94 PASS** exit 0.
+- `pnpm verify` (full-verify.mjs): **121/121 PASS** exit 0, ~7.3s (đã hết treo do loại bỏ test #57 spawn đệ quy full-verify).
+- `--evidence` chạy thực tế: `VERIFY PASS head=851fed852d7434bf31601ccf494ed7600cee11b7 tests=121/121 blocking=0 duration=7864ms report=8022a4c63075dc29`; artifact `.agent/test-evidence/8022a4c63075dc29.json` đúng schema, reportId khớp công thức `sha256(head:manifestHash)[:16]` (MATCH).
+- `git diff --check` sạch; node --check 3 file OK; không BOM.
 
 ## Quyết định
-- Compact PASS default 1 dòng: `VERIFY PASS head=<sha> tests=<p>/<t> blocking=0 duration=<ms> report=<id>`.
-- FAIL: failure codes + reportId; detail đọc progressive disclosure, không đưa vào output mặc định.
-- JSON PASS ≤4 KB enforced at save time.
-- Manifest command allowlist: chỉ `[a-z0-9._/-]+`, reject `rm -rf` etc.
-- Report ID = sha256(headSha:manifestHash)[0:16] — deterministic.
-- Environment fingerprint = sha256(node+platform+arch).
+- Giữ hand-written validators (không thêm ajv dependency — princípio lazy/no-new-dep). Strict parity với JSON Schema qua reject-extra-props + pattern checks.
+- Report FAIL artifact có thể >4KB (chỉ PASS bị giới hạn) — giữ nguyên.
+- Bỏ test #57 spawn `full-verify.mjs --evidence` (gây đệ quy vô hạn vì full-verify chạy test-test-evidence.mjs ở step 4) → đổi thành test pipeline trực tiếp.
 
 ## Vấn đề trì hoãn
-- [ ] PR #17 diff >1500 dòng vẫn chưa có quyết định Bố (giữ A/B/C). Không chặn Issue #19.
+- [ ] PR #17 diff >1500 dòng vẫn chưa có quyết định Bố. Không chặn Issue #19.
 - [ ] Soak test thực tế trên máy Bố trước khi xóa legacy.
 
 ## Bước tiếp theo
-- Chờ CI PASS trên PR #20.
-- Local pre-review: +`status:review-requested` labels.
-- Handoff GPT review.
+1. Commit fix + push branch `feat/issue-19-test-evidence-protocol-v1`.
+2. Re-handoff GPT: labels `agent:gpt` + `status:review-requested`, comment `[CLINE-FIX-...]` tóm tắt fix 3 findings.
+3. Đợi GPT re-review.
 
 ## Status: IN PROGRESS

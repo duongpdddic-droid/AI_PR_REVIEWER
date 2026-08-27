@@ -13,7 +13,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 
 const ROOT = process.cwd();
 const node = process.execPath;
@@ -149,6 +148,7 @@ const pass = results.filter((r) => r.ok).length;
 // --evidence: compact one-line output (Test Evidence Protocol v1)
 const evidenceMode = process.argv.includes('--evidence');
 if (evidenceMode) {
+  const { loadManifest, computeManifestHash, computeReportId, validateReport, validateManifest, redactReport, saveReport, failureCodeFromStep, formatCompactLine } = await import('./test-evidence-reporter.mjs');
   const headSha = (() => {
     try {
       const { stdout } = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', cwd: ROOT });
@@ -156,13 +156,42 @@ if (evidenceMode) {
     } catch { return 'unknown'; }
   })();
   const failed = results.filter((r) => !r.ok);
-  const reportId = createHash('sha256').update(`${headSha}:${pass}/${results.length}`).digest('hex').slice(0, 16);
-  if (failed.length === 0) {
-    console.log(`VERIFY PASS head=${headSha} tests=${pass}/${results.length} blocking=0 duration=${Date.now() - startTime}ms report=${reportId}`);
-  } else {
-    const codes = failed.map((r) => `STEP_${r.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_FAIL`);
-    console.log(`VERIFY FAIL head=${headSha} blocking=${failed.length} codes=${codes.join(',')} report=${reportId}`);
+  const duration = Date.now() - startTime;
+
+  // Load + validate manifest fail-closed
+  let manifest, manifestHash;
+  try {
+    manifest = loadManifest('.agent/test-manifest.json', ROOT);
+    const mv = validateManifest(manifest);
+    if (!mv.valid) { console.error(`VERIFY FAIL manifest invalid: ${mv.errors.join('; ')}`); process.exit(1); }
+    manifestHash = computeManifestHash(manifest);
+  } catch (e) {
+    console.error(`VERIFY FAIL manifest load error: ${e.message}`); process.exit(1);
   }
+
+  // Build report via canonical pipeline
+  const report = {
+    schemaVersion: '1.0',
+    headSha,
+    passed: failed.length === 0,
+    tests: { passed: pass, failed: failed.length, total: results.length },
+    duration,
+    reportId: computeReportId(headSha, manifestHash),
+    manifestHash,
+    blocking: failed.length,
+    failureCodes: failed.map((r) => failureCodeFromStep(r.name)),
+    failures: failed.map((r) => ({
+      code: failureCodeFromStep(r.name),
+      step: r.name,
+      detail: r.detail || 'no detail',
+    })),
+  };
+
+  const rv = validateReport(report);
+  if (!rv.valid) { console.error(`VERIFY FAIL report invalid: ${rv.errors.join('; ')}`); process.exit(1); }
+
+  try { saveReport(redactReport(report), path.join(ROOT, '.agent', 'test-evidence')); } catch {}
+  console.log(formatCompactLine(report));
 } else {
   const w = Math.max(10, ...results.map((r) => r.name.length));
   const bar = (s) => '─'.repeat(s);

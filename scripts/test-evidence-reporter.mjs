@@ -4,15 +4,42 @@
 // JSON PASS ≤4 KB. Chi tiết lưu artifact, đọc progressive disclosure.
 // Schema validation, redaction, output limits. Không arbitrary shell.
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const REPORT_SCHEMA_VERSION = '1.0';
 const MAX_PASS_JSON_BYTES = 4096;
 const MAX_LOG_EXCERPT_LINES = 50;
 
+const REPORT_FIELDS = new Set([
+  'schemaVersion', 'headSha', 'passed', 'tests', 'duration', 'reportId',
+  'manifestHash', 'blocking', 'failureCodes', 'failures', 'environmentFingerprint', 'artifacts',
+]);
+const MANIFEST_FIELDS = new Set([
+  'schemaVersion', 'projectId', 'repository', 'headSha', 'gates', 'environmentFingerprint', 'generatedAt',
+]);
+const FAILURE_FIELDS = new Set(['code', 'step', 'detail', 'logExcerpt']);
+
 function sha256hex(input) {
   return createHash('sha256').update(input).digest('hex');
+}
+
+// ── Manifest loading ───────────────────────────────────────────────
+export function loadManifest(manifestPath, cwd) {
+  const p = path.resolve(cwd || process.cwd(), manifestPath || '.agent/test-manifest.json');
+  const raw = readFileSync(p, 'utf8');
+  return JSON.parse(raw);
+}
+
+// ── Path traversal guard ───────────────────────────────────────────
+export function safePath(reportId, dir) {
+  if (!/^[0-9a-f]{16}$/.test(reportId)) return { ok: false, reason: 'reportId: invalid hex 16' };
+  const resolved = path.resolve(dir, `${reportId}.json`);
+  const root = path.resolve(dir);
+  if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+    return { ok: false, reason: `path traversal: resolved ${resolved} escapes ${root}` };
+  }
+  return { ok: true, filePath: resolved };
 }
 
 export function computeEnvironmentFingerprint() {
@@ -40,27 +67,35 @@ export function formatCompactLine(report) {
 }
 
 export function formatFullJson(report) {
-  return JSON.stringify(report, null, 2);
+  return JSON.stringify(redactReport(report), null, 2);
 }
 
 // ── Artifact storage ───────────────────────────────────────────────
 export function saveReport(report, artifactDir) {
+  const v = validateReport(report);
+  if (!v.valid) throw new Error(`saveReport: invalid report: ${v.errors.join('; ')}`);
   const dir = path.resolve(artifactDir || path.join(process.cwd(), '.agent', 'test-evidence'));
   mkdirSync(dir, { recursive: true });
-  const json = formatFullJson(report);
+  const safe = safePath(report.reportId, dir);
+  if (!safe.ok) throw new Error(`saveReport: ${safe.reason}`);
+  const redacted = redactReport(report);
+  const json = formatFullJson(redacted);
   if (Buffer.byteLength(json, 'utf8') > MAX_PASS_JSON_BYTES && report.passed) {
     throw new Error(`PASS report JSON exceeds ${MAX_PASS_JSON_BYTES} bytes`);
   }
-  const filePath = path.join(dir, `${report.reportId}.json`);
-  writeFileSync(filePath, json, 'utf8');
-  return filePath;
+  writeFileSync(safe.filePath, json, 'utf8');
+  return safe.filePath;
 }
 
-// ── Schema validation (minimal, no deps) ───────────────────────────
+// ── Schema validation (strict — rejects extra properties) ──────────
 export function validateReport(report) {
   const errors = [];
-  for (const f of ['schemaVersion', 'headSha', 'passed', 'tests', 'duration', 'reportId', 'manifestHash']) {
+  const required = ['schemaVersion', 'headSha', 'passed', 'tests', 'duration', 'reportId', 'manifestHash'];
+  for (const f of required) {
     if (!(f in report)) errors.push(`missing: ${f}`);
+  }
+  for (const key of Object.keys(report)) {
+    if (!REPORT_FIELDS.has(key)) errors.push(`unexpected property: ${key}`);
   }
   if (errors.length) return { valid: false, errors };
   if (report.schemaVersion !== REPORT_SCHEMA_VERSION) errors.push(`schemaVersion: want "${REPORT_SCHEMA_VERSION}"`);
@@ -75,30 +110,55 @@ export function validateReport(report) {
     if (t.passed + t.failed !== t.total) errors.push('tests: passed+failed != total');
   }
   if (!Number.isInteger(report.duration) || report.duration < 0) errors.push('duration: invalid');
-  if (!/^[0-9a-f]{16}$/.test(report.reportId)) errors.push('reportId: invalid');
+  if (typeof report.reportId !== 'string' || !/^[0-9a-f]{16}$/.test(report.reportId)) errors.push('reportId: invalid');
   if (!report.passed) {
     if (!Array.isArray(report.failureCodes) || !report.failureCodes.length) errors.push('failureCodes: required for FAIL');
     if (typeof report.blocking !== 'number' || report.blocking < 1) errors.push('blocking: >= 1 for FAIL');
+  }
+  if (Array.isArray(report.failures)) {
+    for (const [i, f] of report.failures.entries()) {
+      if (!f.code || !/^[A-Z][A-Z0-9_-]*$/.test(f.code)) errors.push(`failures[${i}].code: invalid`);
+      if (!f.step || typeof f.step !== 'string') errors.push(`failures[${i}].step: required`);
+      if (typeof f.detail !== 'string') errors.push(`failures[${i}].detail: required string`);
+      for (const fk of Object.keys(f)) {
+        if (!FAILURE_FIELDS.has(fk)) errors.push(`failures[${i}]: unexpected property ${fk}`);
+      }
+    }
   }
   return { valid: errors.length === 0, errors };
 }
 
 export function validateManifest(manifest) {
   const errors = [];
-  for (const f of ['schemaVersion', 'projectId', 'repository', 'headSha', 'gates']) {
+  const required = ['schemaVersion', 'projectId', 'repository', 'headSha', 'gates'];
+  for (const f of required) {
     if (!(f in manifest)) errors.push(`missing: ${f}`);
+  }
+  for (const key of Object.keys(manifest)) {
+    if (!MANIFEST_FIELDS.has(key)) errors.push(`unexpected property: ${key}`);
   }
   if (errors.length) return { valid: false, errors };
   if (manifest.schemaVersion !== '1.0') errors.push('schemaVersion: must be "1.0"');
+  if (typeof manifest.projectId !== 'string' || !manifest.projectId) errors.push('projectId: required');
   if (typeof manifest.repository !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(manifest.repository)) errors.push('repository: invalid');
+  if (typeof manifest.headSha !== 'string' || !/^[0-9a-f]{40}$/.test(manifest.headSha)) errors.push('headSha: invalid (must be 40-hex)');
   if (!manifest.gates || typeof manifest.gates !== 'object') errors.push('gates: not object');
   else {
     for (const [gid, steps] of Object.entries(manifest.gates)) {
       if (!Array.isArray(steps)) { errors.push(`gates.${gid}: not array`); continue; }
       for (const [i, s] of steps.entries()) {
         if (!s.id || typeof s.id !== 'string') errors.push(`gates.${gid}[${i}]: missing id`);
+        if (!s.name || typeof s.name !== 'string') errors.push(`gates.${gid}[${i}]: missing name`);
         if (!s.command || typeof s.command !== 'string') errors.push(`gates.${gid}[${i}]: missing command`);
         if (s.command && !/^[a-z0-9._/-]+$/i.test(s.command)) errors.push(`gates.${gid}[${i}]: command not allowlisted`);
+        if (s.args !== undefined && !Array.isArray(s.args)) errors.push(`gates.${gid}[${i}]: args not array`);
+        if (s.timeout !== undefined && (typeof s.timeout !== 'number' || s.timeout <= 0)) errors.push(`gates.${gid}[${i}]: timeout invalid`);
+        if (s.blocking !== undefined && typeof s.blocking !== 'boolean') errors.push(`gates.${gid}[${i}]: blocking not boolean`);
+        for (const sk of Object.keys(s)) {
+          if (!['id', 'name', 'command', 'args', 'timeout', 'blocking'].includes(sk)) {
+            errors.push(`gates.${gid}[${i}]: unexpected property ${sk}`);
+          }
+        }
       }
     }
   }
@@ -122,23 +182,38 @@ export function redact(text) {
   return r;
 }
 
+/** Deep-redact failures[].detail + failures[].logExcerpt trước save/format. */
+export function redactReport(report) {
+  const r = { ...report };
+  if (Array.isArray(r.failures)) {
+    r.failures = r.failures.map((f) => ({
+      ...f,
+      detail: redact(f.detail),
+      logExcerpt: f.logExcerpt ? redact(f.logExcerpt) : f.logExcerpt,
+    }));
+  }
+  return r;
+}
+
 // ── Failure code generation ────────────────────────────────────────
 export function failureCodeFromStep(stepId) {
   return `STEP_${stepId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_FAIL`;
 }
 
-// ── Progressive disclosure ─────────────────────────────────────────
+// ── Progressive disclosure (redacted) ─────────────────────────────
 export function formatSummary(report) {
   if (report.passed) return formatCompactLine(report);
-  const lines = [formatCompactLine(report)];
-  for (const f of (report.failures || [])) {
+  const redacted = redactReport(report);
+  const lines = [formatCompactLine(redacted)];
+  for (const f of (redacted.failures || [])) {
     lines.push(`  [${f.code}] ${f.step}: ${f.detail.slice(0, 120)}`);
   }
   return lines.join('\n');
 }
 
 export function formatFailureDetail(report, failureIndex) {
-  const f = (report.failures || [])[failureIndex];
+  const redacted = redactReport(report);
+  const f = (redacted.failures || [])[failureIndex];
   if (!f) return null;
   const lines = [`Code: ${f.code}`, `Step: ${f.step}`, `Detail: ${f.detail}`];
   if (f.logExcerpt) {

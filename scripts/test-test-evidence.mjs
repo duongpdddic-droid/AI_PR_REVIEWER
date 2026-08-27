@@ -4,11 +4,12 @@
 import {
   computeEnvironmentFingerprint, computeManifestHash, computeReportId,
   formatCompactLine, formatFullJson, saveReport,
-  validateReport, validateManifest, redact,
+  validateReport, validateManifest, redact, redactReport,
   failureCodeFromStep, formatSummary, formatFailureDetail,
+  loadManifest, safePath,
   MAX_PASS_JSON_BYTES,
 } from './test-evidence-reporter.mjs';
-import { mkdtempSync, readFileSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -230,6 +231,228 @@ eq('bad schemaVersion rejected', vBadPV.valid, false);
 // ── 36. validateManifest — bad schemaVersion ──────────────────────
 const vmBadPV = validateManifest({ ...m, schemaVersion: '2.0' });
 eq('manifest bad schemaVersion rejected', vmBadPV.valid, false);
+
+// ── 36. loadManifest — valid file ──────────────────────────────────
+{
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ev-test-'));
+  const mf = { schemaVersion: '1.0', projectId: 'x', repository: 'o/r', headSha: SHA, gates: { v: [{ id: 's1', name: 'step1', command: 'node' }] } };
+  writeFileSync(join(tmpDir, 'test-manifest.json'), JSON.stringify(mf), 'utf8');
+  const loaded = loadManifest('test-manifest.json', tmpDir);
+  eq('loadManifest returns object', typeof loaded, 'object');
+  eq('loadManifest projectId', loaded.projectId, 'x');
+  rmSync(tmpDir, { recursive: true, force: true });
+}
+
+// ── 37. safePath — valid hex16 ─────────────────────────────────────
+{
+  const sp = safePath('a'.repeat(16), '/tmp/artifacts');
+  eq('safePath valid ok', sp.ok, true);
+  tru('safePath valid filePath ends with reportId', sp.filePath.includes('aaaaaaaaaaaaaaaa.json'));
+}
+
+// ── 38. safePath — rejects non-hex ─────────────────────────────────
+{
+  const sp = safePath('../../etc/passwd', '/tmp/artifacts');
+  eq('safePath traversal rejected', sp.ok, false);
+}
+
+// ── 39. safePath — rejects short id ────────────────────────────────
+{
+  const sp = safePath('abc', '/tmp/artifacts');
+  eq('safePath short id rejected', sp.ok, false);
+}
+
+// ── 40. validateReport — rejects extra properties ──────────────────
+{
+  const v = validateReport({ ...passReport, extraField: 'bad' });
+  eq('extra property rejected', v.valid, false);
+  tru('extra property error message', v.errors.some((e) => e.includes('unexpected property')));
+}
+
+// ── 41. validateReport — rejects extra in failures ─────────────────
+{
+  const v = validateReport({
+    ...failReport,
+    failures: [{ code: 'STEP_X_FAIL', step: 'x', detail: 'd', extraField: 'bad' }],
+  });
+  eq('failure extra property rejected', v.valid, false);
+}
+
+// ── 42. validateReport — rejects bad failure code format ───────────
+{
+  const v = validateReport({
+    ...failReport,
+    failures: [{ code: 'lowercase', step: 'x', detail: 'd' }],
+  });
+  eq('bad failure code format rejected', v.valid, false);
+}
+
+// ── 43. validateManifest — rejects extra properties ────────────────
+{
+  const v = validateManifest({ ...m, extraField: 'bad' });
+  eq('manifest extra property rejected', v.valid, false);
+}
+
+// ── 44. validateManifest — rejects empty projectId ─────────────────
+{
+  const v = validateManifest({ ...m, projectId: '' });
+  eq('manifest empty projectId rejected', v.valid, false);
+}
+
+// ── 45. validateManifest — rejects empty headSha ───────────────────
+{
+  const v = validateManifest({ ...m, headSha: '' });
+  eq('manifest empty headSha rejected', v.valid, false);
+}
+
+// ── 46. validateManifest — rejects step extra properties ───────────
+{
+  const v = validateManifest({ ...m, gates: { v: [{ id: 's1', name: 'x', command: 'node', extra: 'bad' }] } });
+  eq('step extra property rejected', v.valid, false);
+}
+
+// ── 47. validateManifest — rejects invalid step timeout ────────────
+{
+  const v = validateManifest({ ...m, gates: { v: [{ id: 's1', name: 'x', command: 'node', timeout: -1 }] } });
+  eq('step invalid timeout rejected', v.valid, false);
+}
+
+// ── 48. validateManifest — rejects non-array args ──────────────────
+{
+  const v = validateManifest({ ...m, gates: { v: [{ id: 's1', name: 'x', command: 'node', args: 'bad' }] } });
+  eq('step non-array args rejected', v.valid, false);
+}
+
+// ── 49. redactReport — deep redact failures ────────────────────────
+{
+  const report = {
+    ...failReport,
+    failures: [{
+      code: 'STEP_X_FAIL', step: 'x',
+      detail: 'api_key = "supersecretkeyvalue1234567890"',
+      logExcerpt: 'password = "hunter2" in log',
+    }],
+  };
+  const redacted = redactReport(report);
+  eq('redactReport detail redacted', redacted.failures[0].detail, '[REDACTED_API_KEY]');
+  eq('redactReport logExcerpt redacted', redacted.failures[0].logExcerpt, '[REDACTED_SECRET] in log');
+  tru('redactReport preserves original', report.failures[0].detail.includes('supersecretkey'));
+}
+
+// ── 50. formatFullJson — redacts secrets in output ─────────────────
+{
+  const report = {
+    ...failReport,
+    failures: [{
+      code: 'STEP_X_FAIL', step: 'x',
+      detail: 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.test',
+      logExcerpt: 'mongodb://user:pass@host:27017/db',
+    }],
+  };
+  const json = formatFullJson(report);
+  eq('formatFullJson no Bearer token', json.includes('eyJhbGciOiJIUzI1NiJ9.test'), false);
+  eq('formatFullJson no conn string', json.includes('mongodb://user:pass'), false);
+}
+
+// ── 51. saveReport — rejects invalid report ────────────────────────
+{
+  let threw = false;
+  try { saveReport({ bad: true }, '/tmp'); } catch { threw = true; }
+  eq('saveReport rejects invalid', threw, true);
+}
+
+// ── 52. saveReport — rejects bad reportId ──────────────────────────
+{
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ev-test-'));
+  const bad = { ...passReport, reportId: 'zzzzzzzzzzzzzzzz' };
+  let threw = false;
+  try { saveReport(bad, tmpDir); } catch { threw = true; }
+  eq('saveReport rejects bad reportId', threw, true);
+  rmSync(tmpDir, { recursive: true, force: true });
+}
+
+// ── 53. saveReport — writes redacted content ───────────────────────
+{
+  const tmpDir = mkdtempSync(join(tmpdir(), 'ev-test-'));
+  const report = {
+    ...failReport,
+    failures: [{
+      code: 'STEP_X_FAIL', step: 'x',
+      detail: 'api_key = "supersecretkeyvalue1234567890"',
+      logExcerpt: 'token = "ghp_abc123def456"',
+    }],
+  };
+  const fpath = saveReport(report, tmpDir);
+  const content = readFileSync(fpath, 'utf8');
+  eq('saved file no plaintext secret', content.includes('supersecretkeyvalue1234567890'), false);
+  eq('saved file no plaintext token', content.includes('ghp_abc123def456'), false);
+  tru('saved file has REDACTED_API_KEY', content.includes('[REDACTED_API_KEY]'));
+  rmSync(tmpDir, { recursive: true, force: true });
+}
+
+// ── 54. formatSummary — redacts secrets in FAIL output ─────────────
+{
+  const report = {
+    ...failReport,
+    failures: [{ code: 'STEP_X_FAIL', step: 'x', detail: 'password = "hunter2" leaked' }],
+  };
+  const summary = formatSummary(report);
+  eq('summary no plaintext password', summary.includes('hunter2'), false);
+  tru('summary has REDACTED', summary.includes('[REDACTED_SECRET]'));
+}
+
+// ── 55. formatFailureDetail — redacts secrets ──────────────────────
+{
+  const report = {
+    ...failReport,
+    failures: [{
+      code: 'STEP_X_FAIL', step: 'x',
+      detail: 'api_key = "supersecretkeyvalue1234567890"',
+      logExcerpt: 'Bearer eyJhbGciOiJIUzI1NiJ9.test',
+    }],
+  };
+  const detail = formatFailureDetail(report, 0);
+  eq('detail redacted api_key', detail.includes('supersecretkeyvalue1234567890'), false);
+  eq('detail redacted Bearer', detail.includes('eyJhbGciOiJIUzI1NiJ9.test'), false);
+}
+
+// ── 56. loadManifest — throws on missing file ──────────────────────
+{
+  let threw = false;
+  try { loadManifest('nonexistent.json', '/tmp'); } catch { threw = true; }
+  eq('loadManifest throws on missing', threw, true);
+}
+
+// ── 57. evidence pipeline builds canonical report (mirrors full-verify --evidence) ──
+{
+  const manifest = loadManifest('.agent/test-manifest.json', process.cwd());
+  const mv = validateManifest(manifest);
+  tru('pipeline manifest valid', mv.valid);
+  const manifestHash = computeManifestHash(manifest);
+  const report = {
+    schemaVersion: '1.0',
+    headSha: SHA,
+    passed: true,
+    tests: { passed: 5, failed: 0, total: 5 },
+    duration: 1234,
+    reportId: computeReportId(SHA, manifestHash),
+    manifestHash,
+    blocking: 0,
+    failureCodes: [],
+    failures: [],
+  };
+  const rv = validateReport(report);
+  tru('pipeline report valid', rv.valid);
+  const line = formatCompactLine(report);
+  eq('pipeline line format', line, `VERIFY PASS head=${SHA} tests=5/5 blocking=0 duration=1234ms report=${report.reportId}`);
+}
+
+// ── 58. manifest load + validate in pipeline ───────────────────────
+{
+  const loaded = loadManifest('.agent/test-manifest.json', process.cwd());
+  const v = validateManifest(loaded);
+  tru('self-repo manifest valid', v.valid);
+}
 
 // ── Runner ─────────────────────────────────────────────────────────
 let fail = 0;

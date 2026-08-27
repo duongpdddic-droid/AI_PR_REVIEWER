@@ -16,3 +16,6 @@ __pycache__/
 
 # Ad-hoc debug
 .vscode/
+
+# Test evidence generated artifacts (produced by full-verify --evidence)
+.agent/test-evidence/
