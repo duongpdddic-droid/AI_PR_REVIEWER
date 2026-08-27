@@ -6,6 +6,10 @@
       "env": {
         "MCP_TASK_REPOS": "duongpdddic-droid/QLDA_DTXD"
       }
+    },
+    "mcp-test-evidence": {
+      "command": "node",
+      "args": ["mcp-test-evidence/server.mjs"]
     }
   }
 }

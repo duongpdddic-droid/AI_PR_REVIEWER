@@ -19,6 +19,7 @@
     "test:baseline": "node scripts/extract-behavior-map.mjs && cp scripts/behavior-map-current.json scripts/behavior-map-baseline.json",
     "test:mcp": "node mcp-task-server/test-server.mjs",
     "test:evidence": "node scripts/test-test-evidence.mjs && node scripts/test-evidence-e2e.mjs",
+    "test:evidence:mcp": "node mcp-test-evidence/test-server.mjs",
     "map": "node scripts/extract-behavior-map.mjs",
     "intake": "node scripts/github-task-intake.mjs",
     "orchestrate": "node scripts/unified-orchestrator.mjs",
