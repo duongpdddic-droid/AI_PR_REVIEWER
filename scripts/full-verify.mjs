@@ -162,13 +162,15 @@ if (evidenceMode) {
   let manifest, manifestHash;
   try {
     manifest = loadManifest('.agent/test-manifest.json', ROOT);
-    const mv = validateManifest(manifest);
-    if (!mv.valid) { console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } })); process.exit(1); }
-    manifestHash = computeManifestHash(manifest);
   } catch (e) {
-    console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } }));
+    console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['MANIFEST_LOAD_FAIL'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } }));
     process.exit(1);
   }
+  {
+    const mv = validateManifest(manifest);
+    if (!mv.valid) { console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['MANIFEST_INVALID'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } })); process.exit(1); }
+  }
+  manifestHash = computeManifestHash(manifest);
 
   // GPT-REV-090: runtime manifest copy (headSha=HEAD) for hash; file stays immutable
   const manifestForHash = manifest.headSha === headSha
