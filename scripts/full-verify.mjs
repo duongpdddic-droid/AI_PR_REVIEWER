@@ -111,7 +111,7 @@ try {
   for (const suite of optionalSuites) {
     const f = path.join(ROOT, 'scripts', suite);
     if (!fs.existsSync(f)) { add(`${suite} (bỏ qua — chưa tồn tại)`, true, 'skip'); continue; }
-    const r = spawnSync(node, [f], { encoding: 'utf8' });
+    const r = spawnSync(node, [f], { encoding: 'utf8', env: { ...process.env, FULL_VERIFY_CHILD: '1' } });
     add(suite, r.status === 0, r.status === 0 ? '' : (r.stdout || r.stderr || '').trim().split('\n').filter((l) => /FAIL|Error|assert/i.test(l)).slice(-3).join(' | ') || (r.stderr || '').trim().split('\n').slice(-3).join(' | '));
   }
 
@@ -163,11 +163,18 @@ if (evidenceMode) {
   try {
     manifest = loadManifest('.agent/test-manifest.json', ROOT);
     const mv = validateManifest(manifest);
-    if (!mv.valid) { console.error(`VERIFY FAIL manifest invalid: ${mv.errors.join('; ')}`); process.exit(1); }
+    if (!mv.valid) { console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } })); process.exit(1); }
     manifestHash = computeManifestHash(manifest);
   } catch (e) {
-    console.error(`VERIFY FAIL manifest load error: ${e.message}`); process.exit(1);
+    console.error(formatCompactLine({ passed: false, headSha, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], reportId: '0'.repeat(16), tests: { passed: pass, failed: failed.length + 1, total: results.length } }));
+    process.exit(1);
   }
+
+  // GPT-REV-090: runtime manifest copy (headSha=HEAD) for hash; file stays immutable
+  const manifestForHash = manifest.headSha === headSha
+    ? manifest
+    : { ...manifest, headSha };
+  manifestHash = computeManifestHash(manifestForHash);
 
   // Build report via canonical pipeline
   const report = {
@@ -188,9 +195,20 @@ if (evidenceMode) {
   };
 
   const rv = validateReport(report);
-  if (!rv.valid) { console.error(`VERIFY FAIL report invalid: ${rv.errors.join('; ')}`); process.exit(1); }
+  if (!rv.valid) {
+    const failReport = { ...report, passed: false, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], failures: [{ code: 'ARTIFACT_WRITE_FAIL', step: 'evidence', detail: `report invalid: ${rv.errors.join('; ')}` }] };
+    console.error(formatCompactLine(failReport));
+    process.exit(1);
+  }
 
-  try { saveReport(redactReport(report), path.join(ROOT, '.agent', 'test-evidence')); } catch {}
+  // GPT-REV-091: saveReport failure → VERIFY FAIL (not swallowed, not stack trace)
+  try {
+    saveReport(redactReport(report), path.join(ROOT, '.agent', 'test-evidence'));
+  } catch (e) {
+    const failReport = { ...report, passed: false, blocking: 1, failureCodes: ['ARTIFACT_WRITE_FAIL'], failures: [{ code: 'ARTIFACT_WRITE_FAIL', step: 'evidence', detail: e.message || String(e) }] };
+    console.error(formatCompactLine(failReport));
+    process.exit(1);
+  }
   console.log(formatCompactLine(report));
 } else {
   const w = Math.max(10, ...results.map((r) => r.name.length));

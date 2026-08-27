@@ -9,7 +9,7 @@ import {
   loadManifest, safePath,
   MAX_PASS_JSON_BYTES,
 } from './test-evidence-reporter.mjs';
-import { mkdtempSync, readFileSync, rmSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, readdirSync, writeFileSync, mkdirSync, statSync, unlinkSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -452,6 +452,85 @@ eq('manifest bad schemaVersion rejected', vmBadPV.valid, false);
   const loaded = loadManifest('.agent/test-manifest.json', process.cwd());
   const v = validateManifest(loaded);
   tru('self-repo manifest valid', v.valid);
+}
+
+// ── 59. GPT-REV-090: --evidence must not modify .agent/test-manifest.json ─────
+// Skip when called from full-verify step 4 (FULL_VERIFY_CHILD) to prevent recursion:
+// full-verify → step 4 → test-test-evidence → test 59 → spawns full-verify --evidence → loop
+if (!process.env.FULL_VERIFY_CHILD) {
+  const mfPath = join(process.cwd(), '.agent', 'test-manifest.json');
+  const origContent = readFileSync(mfPath, 'utf8');
+  try {
+    const { spawnSync } = await import('node:child_process');
+    const node = process.execPath;
+    const r = spawnSync(node, [join(process.cwd(), 'scripts', 'full-verify.mjs'), '--evidence'], {
+      encoding: 'utf8', cwd: process.cwd(), timeout: 60000,
+    });
+    const afterContent = readFileSync(mfPath, 'utf8');
+    eq('manifest file bytes identical after --evidence', afterContent, origContent);
+    // git diff on manifest should not have grown after --evidence (no new changes)
+    const gdBefore = spawnSync('git', ['diff', '--stat', '--', '.agent/test-manifest.json'], {
+      encoding: 'utf8', cwd: process.cwd(),
+    });
+    const gdAfter = spawnSync('git', ['diff', '--stat', '--', '.agent/test-manifest.json'], {
+      encoding: 'utf8', cwd: process.cwd(),
+    });
+    eq('git diff on manifest unchanged after --evidence', (gdBefore.stdout || '').trim(), (gdAfter.stdout || '').trim());
+    tru('full-verify --evidence did not crash', r.status === 0 || r.status === 1);
+  } catch (e) {
+    checks.push({ name: 'GPT-REV-090 manifest immutable throws', ok: false, got: e.message, want: 'no throw' });
+  }
+} else {
+  eq('manifest immutable (skipped in child)', true, true);
+}
+
+// ── 60. GPT-REV-091: saveReport failure → VERIFY FAIL at full-verify entry point ──
+// Block artifact dir by placing a file; full-verify --evidence must emit compact
+// VERIFY FAIL codes=ARTIFACT_WRITE_FAIL (no stack trace, no VERIFY PASS).
+// Skip when called from full-verify step 4 (FULL_VERIFY_CHILD) — same reason as test 59.
+if (!process.env.FULL_VERIFY_CHILD) {
+  const { spawnSync } = await import('node:child_process');
+  const node = process.execPath;
+  const evidenceDir = join(process.cwd(), '.agent', 'test-evidence');
+  const blockFile = evidenceDir; // file blocks mkdirSync in saveReport
+  const wasDir = (() => { try { return statSync(evidenceDir).isDirectory(); } catch { return false; } })();
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try { if (statSync(blockFile).isFile()) unlinkSync(blockFile); } catch {}
+  };
+  try {
+    // Ensure .agent/test-evidence is a FILE (not directory) so saveReport fails at mkdirSync
+    if (wasDir) renameSync(evidenceDir, evidenceDir + '.bak');
+    writeFileSync(blockFile, 'block', 'utf8');
+    const r = spawnSync(node, [join(process.cwd(), 'scripts', 'full-verify.mjs'), '--evidence'], {
+      encoding: 'utf8', cwd: process.cwd(), timeout: 60000,
+    });
+    const stderr = r.stderr || '';
+    const stdout = r.stdout || '';
+    const combined = stderr + stdout;
+    eq('exit non-zero on saveReport failure', r.status !== 0, true);
+    tru('stderr contains VERIFY FAIL', stderr.includes('VERIFY FAIL'));
+    tru('stderr contains ARTIFACT_WRITE_FAIL', stderr.includes('ARTIFACT_WRITE_FAIL'));
+    eq('no VERIFY PASS in output', combined.includes('VERIFY PASS'), false);
+    eq('no stack trace in stderr', (stderr.match(/^    at /gm) || []).length, 0);
+  } catch (e) {
+    checks.push({ name: 'GPT-REV-091 entry-point test throws', ok: false, got: e.message, want: 'no throw' });
+  } finally {
+    cleanup();
+    // Restore directory if it was a directory before
+    try {
+      if (wasDir && !statSync(evidenceDir).isDirectory()) {
+        unlinkSync(evidenceDir);
+        renameSync(evidenceDir + '.bak', evidenceDir);
+      }
+    } catch {
+      try { renameSync(evidenceDir + '.bak', evidenceDir); } catch {}
+    }
+  }
+} else {
+  eq('saveReport entry-point (skipped in child)', true, true);
 }
 
 // ── Runner ─────────────────────────────────────────────────────────

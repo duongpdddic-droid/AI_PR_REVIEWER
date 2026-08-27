@@ -2,7 +2,7 @@
   "schemaVersion": "1.0",
   "projectId": "ai-pr-reviewer",
   "repository": "duongpdddic-droid/AI_PR_REVIEWER",
-  "headSha": "851fed852d7434bf31601ccf494ed7600cee11b7",
+  "headSha": "6045d7520b3667ae03bed86668d23d105a0cd208",
   "gates": {
     "verify": [
       { "id": "syntax", "name": "node --check all JS/MJS", "command": "node", "args": ["scripts/full-verify.mjs"] },
