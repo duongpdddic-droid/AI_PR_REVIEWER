@@ -378,6 +378,132 @@ export function planApprovalDrift({ labels, comments, headSha, repository, prNum
   };
 }
 
+// ---------------------------------------------------------------- HEAD-Lock Lifecycle (Issue #22)
+
+// Trích toàn bộ SHA từ marker pre-review PASS: `<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:<sha> -->`.
+// Trả danh sách { sha(40-hex lowercase), createdAt? } theo thứ tự comment; marker hỏng/sai cú pháp → bỏ qua.
+export function parsePreReviewPassShas(comments) {
+  const out = [];
+  for (const c of Array.isArray(comments) ? comments : []) {
+    const body = c && typeof c === 'object' && c.body != null ? String(c.body) : String(c);
+    const re = /ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:([0-9a-f]{40})/gi;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      out.push({
+        sha: m[1].toLowerCase(),
+        createdAt: c && typeof c === 'object' && c.created_at != null ? String(c.created_at) : '',
+      });
+    }
+  }
+  return out;
+}
+
+// Chọn SHA khóa LOCK MỚI NHẤT từ một danh sách { sha, createdAt }, mặc định entry cuối cùng
+// (comments issue theo thứ tự ASC trên GitHub — bài mới ở cuối). Trả { sha, createdAt } hoặc null.
+function latestShaOf(entries, orderKey) {
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+  let best = entries[entries.length - 1];
+  for (const e of entries) {
+    if (e[orderKey] && (!best[orderKey] || String(e[orderKey]) > String(best[orderKey]))) best = e;
+  }
+  return { sha: best.sha, createdAt: best[orderKey] || '' };
+}
+
+// Approval marker MỚI NHẤT cho BẤT KỲ head SHA nào (KHÔNG lọc theo headSha hiện tại) — dùng để
+// phát hiện drift: approval cũ khóa sha X nhưng PR đang ở sha Y → invalidate. Chỉ tin marker có
+// provenance + author thuộc allowlist (fail-closed, giống isApprovalValid nhưng bỏ ràng buộc headSha).
+export function latestApprovalShaAnyHead(records, { repository, prNumber, policyVersion, gptApprovers, localApprovers } = {}) {
+  let latest = null;
+  let latestAt = '';
+  for (const entry of parseApprovalMarkers(records)) {
+    const r = entry.marker;
+    // Provenance + scope (repo/pr) bắt buộc; KHÔNG ràng buộc headSha để bắt drift.
+    if (!entry.commentId || !entry.authorLogin) continue;
+    if (String(r.repository) !== String(repository) || Number(r.prNumber) !== Number(prNumber)) continue;
+    if (policyVersion != null && String(r.policyVersion) !== String(policyVersion)) continue;
+    if (!/^[0-9a-f]{40}$/i.test(String(r.headSha || ''))) continue;
+    // reviewer: gpt (mọi pha) hoặc reviewer:local scheme — kiểm tra author theo loại.
+    if (String(r.reviewer) === AGENTS.gpt) {
+      const gpt = Array.isArray(gptApprovers) ? gptApprovers.map((a) => String(a)) : [];
+      if (gpt.length === 0 || !gpt.includes(entry.authorLogin)) continue;
+    } else if (String(r.reviewer) === REVIEWER_LOCAL) {
+      const loc = Array.isArray(localApprovers) ? localApprovers.map((a) => String(a)) : [];
+      if (loc.length === 0 || !loc.includes(entry.authorLogin)) continue;
+    } else {
+      continue; // reviewer không hợp lệ
+    }
+    const at = String(r.reviewedAt || entry.createdAt || '');
+    if (!latest || (at && at > latestAt)) { latest = { sha: r.headSha.toLowerCase(), createdAt: at }; latestAt = at; }
+  }
+  return latest;
+}
+
+// Trích danh sách marker unfreeze: `<!-- ai-pr-reviewer:unfreeze:reason=<nội dung> -->`.
+// Trả mảng { reason, createdAt? } theo thứ tự comment; marker hỏng → bỏ qua phần reason rỗng.
+export function parseUnfreezeMarkers(comments) {
+  const out = [];
+  for (const c of Array.isArray(comments) ? comments : []) {
+    const body = c && typeof c === 'object' && c.body != null ? String(c.body) : String(c);
+    // Reason BẮT BUỘC (Issue #22: "explicit unfreeze kèm reason") — marker thiếu reason bị bỏ qua.
+    const re = /ai-pr-reviewer:unfreeze:reason=([^\s*][^>]*?)-->/gi;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      out.push({
+        reason: m[1].trim(),
+        createdAt: c && typeof c === 'object' && c.created_at != null ? String(c.created_at) : '',
+      });
+    }
+  }
+  return out;
+}
+
+// Có marker unfreeze MỚI HƠN lock mới nhất không? Dùng để cho phép push override sau khi bị
+// freeze (Issue #22): người dùng chủ động comment unfreeze kèm lý do → gate công nhận, vẫn bắt
+// chạy lại CI + pre-review cho HEAD mới trước khi handoff lại GPT.
+export function isUnfrozenAfter(comments, lockCreatedAt = '') {
+  const newest = parseUnfreezeMarkers(comments).pop();
+  return Boolean(newest && newest.createdAt && (!lockCreatedAt || String(newest.createdAt) > String(lockCreatedAt)));
+}
+// Mỗi giai đoạn khóa HEAD (CI/pre-review PASS/GPT approval) chỉ có hiệu lực với đúng một full
+// HEAD SHA. Hàm thuần xác định: PR hiện có "đang bị khóa" (frozen) không, và HEAD hiện tại có khớp
+// lock hay không. Kết quả:
+//   { frozen:false }                     — chưa handoff/duyệt → không áp gate
+//   { frozen:true, valid:true, lockSha } — HEAD khớp lock → cho phép handoff/giữ approved
+//   { frozen:true, valid:false, drift:true, lockSha } — HEAD đổi/lệch → invalidate, phải chạy lại
+//   { frozen:true, valid:false, drift:true, lockSha:null, reason } — frozen nhưng KHÔNG có bằng
+//     chứng PASS/approval nào khóa HEAD → fail-closed (không handoff GPT).
+// Fail-closed: mọi bất định/thiếu bằng chứng → valid:false + drift:true (không tự cho handoff).
+export function planHeadLock({ labels, comments, headSha, repository, prNumber, policyVersion, gptApprovers, localApprovers } = {}) {
+  const norm = normalizeStatusLabels(labels);
+  const hasGpt = (Array.isArray(labels) ? labels : []).map((l) => String(l && l.name ? l.name : l)).includes(AGENTS.gpt);
+  // Gate CHỈ áp cho trạng thái "chờ bên ngoài" của vòng review: approved (đã duyệt) hoặc
+  // review-requested ĐÃ CÓ agent:gpt (bàn tay GPT sau handoff). KHÔNG gồm `reviewing`
+  // (trạng thái tạm chính orchestrator tự đặt ngay trước pre-review — sẽ tự ghi PASS marker mới
+  // cho HEAD hiện tại trong cùng vòng, không drift) và KHÔNG gồm review-requested + agent:cline
+  // (mới khởi đầu, chưa pre-review) → flow CI/pre-review chạy bình thường.
+  const frozenStatus =
+    norm.keepStatus === LABELS.approved
+    || (norm.keepStatus === LABELS.reviewRequested && hasGpt);
+  if (!frozenStatus) return { frozen: false };
+  const pass = latestShaOf(parsePreReviewPassShas(comments), 'createdAt');
+  const approval = latestApprovalShaAnyHead(comments, { repository, prNumber, policyVersion, gptApprovers, localApprovers });
+  // approval (đủ mạnh nhất) ưu tiên; ngược lại dùng PASS gần nhất
+  const lockSha = approval ? approval.sha : (pass ? pass.sha : null);
+  const lockCreatedAt = approval ? approval.createdAt : (pass ? pass.createdAt : '');
+  if (!lockSha) {
+    return {
+      frozen: true, valid: false, drift: true, lockSha: null, lockCreatedAt: '',
+      reason: 'PR đang ở trạng thái duyệt/handoff nhưng KHÔNG có bằng chứng PASS/approval nào khóa HEAD — không thể xác nhận lock, fail-closed.',
+    };
+  }
+  const matches = String(lockSha).toLowerCase() === String(headSha || '').toLowerCase();
+  if (matches) return { frozen: true, valid: true, drift: false, lockSha, lockCreatedAt };
+  return {
+    frozen: true, valid: false, drift: true, lockSha, lockCreatedAt,
+    reason: `HEAD đã đổi sau giai đoạn khóa (lock ${String(lockSha).slice(0, 12)} → HEAD ${String(headSha || '').slice(0, 12)}) — trạng thái cũ vô hiệu, phải chạy lại CI + pre-review cho HEAD mới.`,
+  };
+}
+
 // ---------------------------------------------------------------- event muộn & mutation an toàn
 
 // Event cũ (đính kèm headSha cũ) đến sau khi PR đã tiến xa hơn → bỏ qua, KHÔNG lùi trạng thái.

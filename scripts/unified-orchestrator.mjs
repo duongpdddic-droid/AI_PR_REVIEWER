@@ -30,7 +30,8 @@ import {
   evaluateSteadyApprovalGates, gateOpenFindings, isStaleEvent, mutationKey,
   normalizeStatusLabels, planEscalationForPhase,
   planApprovalDrift, planCiRouting, planPhaseActivation, planPreReviewOutcome,
-  resolveReviewPhase, scanDiffForSecrets,
+  planHeadLock, resolveReviewPhase, scanDiffForSecrets,
+  isUnfrozenAfter,
 } from './review-contract.mjs';
 import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
 import { notifyRaw } from './telegram-gateway/adapter-ai-pr-reviewer.mjs';
@@ -322,6 +323,51 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     result.mutated = true;
     if (!dryRun) {
       result.notified = io.notify('Approval-drift bị vô hiệu', `${repo}#${number} — approval cũ lệch HEAD/policy, chuyển về status:review-requested, chờ GPT review lại.`);
+    }
+    return result;
+  }
+
+  // HEAD-Lock Lifecycle (Issue #22): pre-review/approval/CI khóa chặt full HEAD SHA. Nếu PR
+  // đang ở trạng thái duyệt/handoff (reviewing | review-requested | approved) mà HEAD đổi so
+  // lock (hoặc thiếu bằng chứng khóa HEAD) → invalidate trạng thái cũ, trả về Cline chạy lại
+  // CI + pre-review cho HEAD mới. KHÔNG bao giờ handoff GPT / giữ approved với HEAD drift.
+  const aa = policyNow && policyNow.policy ? policyNow.policy.approvalAuthorities : null;
+  const hlock = planHeadLock({
+    labels: view.labels,
+    comments,
+    headSha,
+    repository: repo,
+    prNumber: number,
+    policyVersion: aa && policyNow.policy ? policyNow.policy.policyVersion : undefined,
+    gptApprovers: aa ? aa.gptApprovalCommentAuthors : undefined,
+    localApprovers: aa ? aa.localApprovalCommentAuthors : undefined,
+  });
+  if (hlock.frozen && !hlock.valid) {
+    const unfrozen = isUnfrozenAfter(comments, hlock.lockSha ? hlock.lockCreatedAt : '');
+    const hkey = mutationKey({
+      repository: repo, prNumber: number, headSha,
+      policyVersion: hlock.lockSha && policyNow.policy ? policyNow.policy.policyVersion : 'unknown',
+      action: 'head-lock-invalidate',
+    });
+    if (hasMarkerFor(comments, hkey)) { result.skipped = 'HEAD-lock invalidation đã ghi nhận cho HEAD này'; return result; }
+    if (!dryRun) {
+      applyHandoff(io, repo, number, {
+        addLabels: [LABELS.reviewRequested, AGENTS.cline],
+        removeLabels: view.labels.filter((l) => ![LABELS.reviewRequested, AGENTS.cline].includes(l)),
+      });
+      io.postComment(repo, number, [
+        `🔓 **HEAD-LOCK DRIFT** — ${hlock.reason}`,
+        `Trạng thái cũ đã bị vô hiệu. Chuyển lại \`status:review-requested\` + \`${AGENTS.cline}\`: phải chạy lại CI + pre-review cho HEAD mới \`${String(headSha || '').slice(0, 12)}\` rồi mới được handoff lại ${AGENTS.gpt}.`,
+        unfrozen
+          ? `⚠️ Đã ghi nhận unfreeze marker — push override được cho phép, nhưng vẫn bắt buộc chạy lại CI + pre-review cho HEAD mới trước khi handoff lại ${AGENTS.gpt}.`
+          : `Muốn sửa tiếp sau freeze: thêm marker \`<!-- ai-pr-reviewer:unfreeze:reason=<lý do> -->\` (mới hơn lần khóa HEAD) để mở khóa cho push override — nhưng vẫn PHẢI chạy lại CI + pre-review.`,
+        `${markerBlock(hkey)}`,
+      ].join('\n\n'));
+    }
+    result.mutated = true;
+    result.preReview = { verdict: 'HEAD_LOCK_DRIFT', outcome: 'unfreeze-request', lockSha: hlock.lockSha };
+    if (!dryRun) {
+      result.notified = io.notify('HEAD-Lock drift bị vô hiệu', `${repo}#${number}: HEAD đổi sau giai đoạn khóa → chuyển về ${AGENTS.cline} chạy lại CI + pre-review.`);
     }
     return result;
   }

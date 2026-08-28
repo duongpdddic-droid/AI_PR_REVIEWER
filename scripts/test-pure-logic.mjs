@@ -23,6 +23,8 @@ import {
   validateApprovalPayload,
   LOCAL_APPROVAL_REQUIRED_FIELDS, parseActivationComment, scanDuplicateObjectKeys,
   resolveRebuttalOutcome, steadyLocalApproval,
+  planHeadLock, parsePreReviewPassShas, latestApprovalShaAnyHead,
+  parseUnfreezeMarkers, isUnfrozenAfter,
 } from './review-contract.mjs';
 import { runSemanticPreReview } from './unified-orchestrator.mjs';
 import { withRetry } from './tg-notify-core.mjs';
@@ -490,6 +492,110 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   const wrongHead = { id: 'h', user: { login: 'duongpdddic-droid' }, created_at: '-', body: `x ${mkGpt({ headSha: 'b'.repeat(40) })}` };
   const best = effectiveApproval([good, wrongAuthor, wrongHead], { headSha: SHA, repository: 'o/r', prNumber: 7, policyVersion: 'v1', gptApprovers: ALLOW });
   eq('C.23 chỉ marker đúng author + HEAD hợp lệ được chọn', Boolean(best) && best.decisionId === 'dec-1' && best.headSha === SHA, true);
+}
+
+// --- C.24 [Issue #22] HEAD-Lock Lifecycle & Handoff Gate ---
+{
+  const REPO = 'o/r';
+  const PRN = 7;
+  const PV = 'v1';
+  const headA = SHA;            // 'a'*40
+  const headB = SHA2;           // 'b'*40 — HEAD đổi sau khi lock
+  const passComment = (sha, at) => ({ id: `p-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ local pre-review PASS\n<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
+  const gptCom = (sha, at, decisionId = 'gpt-x') => ({ id: `g-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ GPT approval\n<!-- ai-review-approval:${JSON.stringify({ repository: REPO, prNumber: PRN, reviewer: RA.gpt, headSha: sha, policyVersion: PV, decisionId, ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: at })} -->` });
+  const base = { repository: REPO, prNumber: PRN, policyVersion: PV, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic'] };
+
+  // (e) valid frozen HEAD — review-requested+agent:gpt, HEAD khớp lock PASS
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z')], headSha: headA, ...base });
+    eq('C.24 (e) frozen hợp lệ: HEAD khớp lock → valid, không drift', r.valid === true && r.drift === false && r.frozen === true, true);
+  }
+  // (a) sau pre-review PASS khóa headA, HEAD đổi headB → drift invalid
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z')], headSha: headB, ...base });
+    eq('C.24 (a) drift sau pre-review: HEAD đổi → invalid + drift', r.valid === false && r.drift === true && r.lockSha === headA, true);
+  }
+  // (b) sau approval khóa headA, HEAD đổi headB → drift invalid
+  {
+    const r = planHeadLock({ labels: [RL.approved], comments: [gptCom(headA, '2026-08-23T00:00:00Z')], headSha: headB, ...base });
+    eq('C.24 (b) drift sau approval: HEAD đổi → invalid + drift, lockSha = SHA approval', r.valid === false && r.drift === true && r.lockSha === headA, true);
+  }
+  // (b2) approved + HEAD khớp approval → valid
+  {
+    const r = planHeadLock({ labels: [RL.approved], comments: [gptCom(headA, '2026-08-23T00:00:00Z')], headSha: headA, ...base });
+    eq('C.24 (b2) approved + HEAD khớp approval → valid, không drift', r.valid === true && r.drift === false, true);
+  }
+  // (c) Memory Bank-only commit: HEAD KHÔNG đổi (marker PASS khóa headA, HEAD vẫn headA) → valid
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z'), { id: 'mb', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-23T01:00:00Z', body: '📝 Memory Bank update (không đổi code)' }], headSha: headA, ...base });
+    eq('C.24 (c) Memory Bank-only commit (HEAD ko đổi) → vẫn valid', r.valid === true && r.drift === false, true);
+  }
+  // (d) `reviewing` KHÔNG frozen: trạng thái tạm chính orchestrator đặt ngay trước pre-review,
+  // sẽ tự ghi PASS marker mới cho HEAD hiện tại trong cùng vòng → không bị gate drift.
+  {
+    const r = planHeadLock({ labels: [RL.reviewing], comments: [passComment(headA, '2026-08-23T00:00:00Z')], headSha: headB, ...base });
+    eq('C.24 (d) reviewing (trạng thái tạm của orchestrator) → frozen=false, không gate', r.frozen === false, true);
+  }
+  // non-frozen: review-requested + agent:cline (mới, chưa pre-review) → KHÔNG bị gate
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, 'agent:cline'], comments: [], headSha: headB, ...base });
+    eq('C.24 non-frozen: review-requested+cline chưa pre-review → frozen=false', r.frozen === false, true);
+  }
+  // non-frozen: changes-requested + agent:cline (vòng fix Cline) với marker cũ → KHÔNG bị gate
+  {
+    const r = planHeadLock({ labels: [RL.changesRequested, 'agent:cline'], comments: [passComment(headA, '2026-08-23T00:00:00Z')], headSha: headB, ...base });
+    eq('C.24 non-frozen: changes-requested+cline (vòng fix) → frozen=false', r.frozen === false, true);
+  }
+  // fail-closed: frozen (review-requested+agent:gpt) nhưng KHÔNG có bằng chứng PASS/approval → drift
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [{ id: 'x', user: { login: 'bot' }, created_at: '-', body: 'plain text' }], headSha: headA, ...base });
+    eq('C.24 fail-closed: frozen mà thiếu bằng chứng khóa HEAD → invalid + drift', r.valid === false && r.drift === true && r.lockSha === null, true);
+  }
+}
+
+// parsePreReviewPassShas: bóc tách đúng SHA, bỏ qua marker hỏng
+{
+  const headA = SHA, headB = SHA2;
+  const shas = parsePreReviewPassShas([
+    { id: '1', body: `abc\n<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headA} -->` },
+    { id: '2', body: `<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headB} -->` },
+    { id: '3', body: '<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_FAIL:x -->' },
+    { id: '4', body: 'plain' },
+  ]);
+  eq('C.24 parsePreReviewPassShas trích đủ SHA hợp lệ (thứ tự ASC)', shas.length === 2 && shas[0].sha === headA && shas[1].sha === headB, true);
+  eq('C.24 parsePreReviewPassShas SHA lowercase chuẩn', shas[1].sha === headB, true);
+}
+
+// latestApprovalShaAnyHead: trả SHA approval MỚI NHẤT cho bất kỳ HEAD nào (bắt drift), bỏ qua author sai
+{
+  const REPO = 'o/r', PRN = 7, PV = 'v1';
+  const headA = SHA, headB = SHA2;
+  const mkG = (sha, at, decisionId, login = 'duongpdddic-droid') => ({ id: decisionId, user: { login }, created_at: at, body: `x <!-- ai-review-approval:${JSON.stringify({ repository: REPO, prNumber: PRN, reviewer: RA.gpt, headSha: sha, policyVersion: PV, decisionId, ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: at })} -->` });
+  const base = { repository: REPO, prNumber: PRN, policyVersion: PV, gptApprovers: ['duongpdddic-droid'], localApprovers: [] };
+  const good = mkG(headA, '2026-08-23T00:00:00Z', 'g-1');
+  const newer = mkG(headB, '2026-08-23T02:00:00Z', 'g-2');
+  const badAuthor = mkG(headB, '2026-08-23T03:00:00Z', 'g-3', 'attacker');
+  eq('C.24 latestApprovalShaAnyHead chọn approval mới nhất (không lọc HEAD)', latestApprovalShaAnyHead([good, newer], base).sha === headB, true);
+  eq('C.24 latestApprovalShaAnyHead bỏ qua author ngoài allowlist', latestApprovalShaAnyHead([good, badAuthor], base).sha === headA, true);
+  eq('C.24 latestApprovalShaAnyHead rỗng → null', latestApprovalShaAnyHead([], base) === null, true);
+}
+
+// parseUnfreezeMarkers + isUnfrozenAfter (Issue #22 unfreeze gate)
+{
+  const lockAt = '2026-08-23T00:00:00Z';
+  const uf = (reason, at) => ({ id: `u-${at}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `🔓 user push override\n<!-- ai-pr-reviewer:unfreeze:reason=${reason} -->` });
+  const parsed = parseUnfreezeMarkers([
+    uf('fix CI typing', '2026-08-23T01:00:00Z'),
+    { id: 'bad', created_at: '-', body: '<!-- ai-pr-reviewer:unfreeze -->' },
+    { id: 'plain', created_at: '-', body: 'plain text' },
+  ]);
+  eq('C.24 parseUnfreezeMarkers trích reason + bỏ qua marker hỏng', parsed.length === 1 && parsed[0].reason === 'fix CI typing', true);
+  eq('C.24 isUnfrozenAfter: unfreeze mới hơn lock → true',
+    isUnfrozenAfter([uf('r', '2026-08-23T02:00:00Z')], lockAt), true);
+  eq('C.24 isUnfrozenAfter: unfreeze cũ hơn lock → false',
+    isUnfrozenAfter([uf('r', '2026-08-22T00:00:00Z')], lockAt), false);
+  eq('C.24 isUnfrozenAfter: không có unfreeze → false',
+    isUnfrozenAfter([{ id: 'x', created_at: '2026-08-23T02:00:00Z', body: 'plain' }], lockAt), false);
 }
 
 let fail = 0;
