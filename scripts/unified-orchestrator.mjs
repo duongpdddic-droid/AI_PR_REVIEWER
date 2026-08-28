@@ -343,7 +343,9 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     localApprovers: aa ? aa.localApprovalCommentAuthors : undefined,
   });
   if (hlock.frozen && !hlock.valid) {
-    const unfrozen = isUnfrozenAfter(comments, hlock.lockSha ? hlock.lockCreatedAt : '');
+    const unfrozen = isUnfrozenAfter(comments, hlock.lockSha ? hlock.lockCreatedAt : '', {
+      authorizedLogins: [CANONICAL_REPO.split('/')[0]],
+    });
     const hkey = mutationKey({
       repository: repo, prNumber: number, headSha,
       policyVersion: hlock.lockSha && policyNow.policy ? policyNow.policy.policyVersion : 'unknown',

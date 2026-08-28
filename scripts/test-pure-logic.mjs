@@ -24,7 +24,7 @@ import {
   LOCAL_APPROVAL_REQUIRED_FIELDS, parseActivationComment, scanDuplicateObjectKeys,
   resolveRebuttalOutcome, steadyLocalApproval,
   planHeadLock, parsePreReviewPassShas, latestApprovalShaAnyHead,
-  parseUnfreezeMarkers, isUnfrozenAfter,
+  parseUnfreezeMarkers, isUnfrozenAfter, decidePrePushGuard,
 } from './review-contract.mjs';
 import { runSemanticPreReview } from './unified-orchestrator.mjs';
 import { withRetry } from './tg-notify-core.mjs';
@@ -583,22 +583,62 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
 // parseUnfreezeMarkers + isUnfrozenAfter (Issue #22 unfreeze gate)
 {
   const lockAt = '2026-08-23T00:00:00Z';
-  const uf = (reason, at) => ({ id: `u-${at}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `🔓 user push override\n<!-- ai-pr-reviewer:unfreeze:reason=${reason} -->` });
+  const OW = ['duongpdddic-droid'];
+  const uf = (reason, at, login = 'duongpdddic-droid') => ({ id: `u-${at}`, user: { login }, created_at: at, body: `🔓 user push override\n<!-- ai-pr-reviewer:unfreeze:reason=${reason} -->` });
   const parsed = parseUnfreezeMarkers([
     uf('fix CI typing', '2026-08-23T01:00:00Z'),
     { id: 'bad', created_at: '-', body: '<!-- ai-pr-reviewer:unfreeze -->' },
     { id: 'plain', created_at: '-', body: 'plain text' },
   ]);
   eq('C.24 parseUnfreezeMarkers trích reason + bỏ qua marker hỏng', parsed.length === 1 && parsed[0].reason === 'fix CI typing', true);
-  eq('C.24 isUnfrozenAfter: unfreeze mới hơn lock → true',
-    isUnfrozenAfter([uf('r', '2026-08-23T02:00:00Z')], lockAt), true);
+  eq('C.24 isUnfrozenAfter: unfreeze mới hơn lock + authorized → true',
+    isUnfrozenAfter([uf('r', '2026-08-23T02:00:00Z')], lockAt, { authorizedLogins: OW }), true);
   eq('C.24 isUnfrozenAfter: unfreeze cũ hơn lock → false',
-    isUnfrozenAfter([uf('r', '2026-08-22T00:00:00Z')], lockAt), false);
+    isUnfrozenAfter([uf('r', '2026-08-22T00:00:00Z')], lockAt, { authorizedLogins: OW }), false);
   eq('C.24 isUnfrozenAfter: không có unfreeze → false',
-    isUnfrozenAfter([{ id: 'x', created_at: '2026-08-23T02:00:00Z', body: 'plain' }], lockAt), false);
+    isUnfrozenAfter([{ id: 'x', created_at: '2026-08-23T02:00:00Z', user: { login: 'duongpdddic-droid' }, body: 'plain' }], lockAt, { authorizedLogins: OW }), false);
+  eq('C.24 isUnfrozenAfter: author KHÔNG có quyền → false',
+    isUnfrozenAfter([uf('r', '2026-08-23T02:00:00Z', 'attacker')], lockAt, { authorizedLogins: OW }), false);
+  eq('C.24 isUnfrozenAfter: thiếu authorizedLogins (rỗng) → false (fail-closed)',
+    isUnfrozenAfter([uf('r', '2026-08-23T02:00:00Z')], lockAt), false);
+  eq('C.24 isUnfrozenAfter: marker thiếu author → false (fail-closed)',
+    isUnfrozenAfter([{ id: 'u', created_at: '2026-08-23T02:00:00Z', body: '<!-- ai-pr-reviewer:unfreeze:reason=z -->' }], lockAt, { authorizedLogins: OW }), false);
 }
 
 let fail = 0;
+// C.25 decidePrePushGuard — LOCAL pre-push HEAD-Lock guard (Issue #22)
+{
+  const REPO = 'o/r', PRN = 7, PV = 'v1';
+  const headA = SHA, headB = SHA2;
+  const OW = ['duongpdddic-droid'];
+  const passComment = (sha, at) => ({ id: `p-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ local pre-review PASS\n<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
+  const gptCom = (sha, at) => ({ id: `g-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `x <!-- ai-review-approval:${JSON.stringify({ repository: REPO, prNumber: PRN, reviewer: RA.gpt, headSha: sha, policyVersion: PV, decisionId: 'g', ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: at })} -->` });
+  const uf = (at, login = 'duongpdddic-droid') => ({ id: `u-${at}`, user: { login }, created_at: at, body: `<!-- ai-pr-reviewer:unfreeze:reason=sửa tiếp -->` });
+  const prBase = { number: PRN, repository: REPO, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic'], policyVersion: PV };
+
+  // không có PR open cho branch → allow
+  eq('C.25 không có PR open → allow', decidePrePushGuard({ branch: 'feat/x', headSha: headA, pr: null, authorizedLogins: OW }).decision === 'allow', true);
+  // không xác định được branch → allow (bỏ qua, không liên quan guard)
+  eq('C.25 thiếu branch → allow', decidePrePushGuard({ headSha: headA }).decision === 'allow', true);
+  // chưa frozen (review-requested + cline, chưa pre-review) → allow
+  eq('C.25 chưa frozen → allow', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, 'agent:cline'], comments: [] }, authorizedLogins: OW }).decision === 'allow', true);
+  // uncommitted Memory Bank: HEAD = lock PASS (không commit → HEAD không đổi) → allow
+// unfreeze hợp lệ (reason + mới hơn lock + authorized author) → allow push override
+  eq('C.25 unfreeze hợp lệ → allow push override', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z'), uf('2026-08-23T02:00:00Z')] }, authorizedLogins: OW }).decision === 'allow', true);
+  // unfreeze của user KHÔNG có quyền → vẫn BLOCK
+  eq('C.25 unfreeze từ author không có quyền → BLOCK', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z'), uf('2026-08-23T02:00:00Z', 'attacker')] }, authorizedLogins: OW }).decision === 'block', true);
+  // unfreeze marker cũ hơn lock → BLOCK
+  eq('C.25 unfreeze cũ hơn lock → BLOCK', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z'), uf('2026-08-22T00:00:00Z')] }, authorizedLogins: OW }).decision === 'block', true);
+  // không đọc được trạng thái PR đã biết tồn tại → BLOCK (fail-closed)
+  eq('C.25 không đọc được trạng thái PR → BLOCK (fail-closed)', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { number: PRN, failed: true }, authorizedLogins: OW }).decision === 'block', true);
+  eq('C.25 uncommitted Memory Bank (HEAD ko đổi) → allow', decidePrePushGuard({ branch: 'feat/x', headSha: headA, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z')] }, authorizedLogins: OW }).decision === 'allow', true);
+  // commit code → HEAD đổi (headB) so lock PASS headA → BLOCK
+  eq('C.25 committed code → HEAD drift → BLOCK', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z')] }, authorizedLogins: OW }).decision === 'block', true);
+  // committed docs/Memory Bank —commit làm HEAD đổi, không phân biệt loại file → BLOCK
+  eq('C.25 committed docs/Memory Bank (HEAD đổi) → BLOCK', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.reviewRequested, RA.gpt], comments: [passComment(headA, '2026-08-23T00:00:00Z')] }, authorizedLogins: OW }).decision === 'block', true);
+  // drift sau approval → BLOCK
+  eq('C.25 drift sau approval → BLOCK', decidePrePushGuard({ branch: 'feat/x', headSha: headB, pr: { ...prBase, state: 'open', labels: [RL.approved], comments: [gptCom(headA, '2026-08-23T00:00:00Z')] }, authorizedLogins: OW }).decision === 'block', true);
+}
 console.log('\n=== TEST PURE LOGIC ===');
 for (const c of checks) {
   if (!c.ok) fail++;

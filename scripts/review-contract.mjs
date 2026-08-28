@@ -439,11 +439,15 @@ export function latestApprovalShaAnyHead(records, { repository, prNumber, policy
 }
 
 // Trích danh sách marker unfreeze: `<!-- ai-pr-reviewer:unfreeze:reason=<nội dung> -->`.
-// Trả mảng { reason, createdAt? } theo thứ tự comment; marker hỏng → bỏ qua phần reason rỗng.
+// Trả mảng { reason, createdAt, authorLogin } theo thứ tự comment; marker hỏng → bỏ qua phần
+// reason rỗng. Author BẮT BUỘC (comment.user.login) — không có author → marker bỏ qua (fail-closed).
 export function parseUnfreezeMarkers(comments) {
   const out = [];
   for (const c of Array.isArray(comments) ? comments : []) {
     const body = c && typeof c === 'object' && c.body != null ? String(c.body) : String(c);
+    const authorLogin = c && typeof c === 'object'
+      ? String((c.user && c.user.login) || (c.author && c.author.login) || '')
+      : '';
     // Reason BẮT BUỘC (Issue #22: "explicit unfreeze kèm reason") — marker thiếu reason bị bỏ qua.
     const re = /ai-pr-reviewer:unfreeze:reason=([^\s*][^>]*?)-->/gi;
     let m;
@@ -451,17 +455,23 @@ export function parseUnfreezeMarkers(comments) {
       out.push({
         reason: m[1].trim(),
         createdAt: c && typeof c === 'object' && c.created_at != null ? String(c.created_at) : '',
+        authorLogin,
       });
     }
   }
   return out;
 }
 
-// Có marker unfreeze MỚI HƠN lock mới nhất không? Dùng để cho phép push override sau khi bị
-// freeze (Issue #22): người dùng chủ động comment unfreeze kèm lý do → gate công nhận, vẫn bắt
-// chạy lại CI + pre-review cho HEAD mới trước khi handoff lại GPT.
-export function isUnfrozenAfter(comments, lockCreatedAt = '') {
-  const newest = parseUnfreezeMarkers(comments).pop();
+// Có marker unfreeze MỚI HƠN lock mới nhất và do NGƯỜI CÓ QUYỀN (authorizedLogins) tạo không?
+// Dùng để cho phép push override sau khi bị freeze (Issue #22): người dùng chủ động comment
+// unfreeze kèm lý do → gate công nhận, vẫn bắt chạy lại CI + pre-review cho HEAD mới trước khi
+// handoff lại GPT. Fail-closed: authorizedLogins rỗng/thiếu → KHÔNG ai unfreeze được; author
+// ngoài danh sách → marker không có hiệu lực.
+export function isUnfrozenAfter(comments, lockCreatedAt = '', { authorizedLogins = [] } = {}) {
+  const allowed = Array.isArray(authorizedLogins) ? authorizedLogins.map((a) => String(a)) : [];
+  if (allowed.length === 0) return false;
+  const markers = parseUnfreezeMarkers(comments).filter((m) => m.authorLogin && allowed.includes(m.authorLogin));
+  const newest = markers.pop();
   return Boolean(newest && newest.createdAt && (!lockCreatedAt || String(newest.createdAt) > String(lockCreatedAt)));
 }
 // Mỗi giai đoạn khóa HEAD (CI/pre-review PASS/GPT approval) chỉ có hiệu lực với đúng một full
@@ -501,6 +511,40 @@ export function planHeadLock({ labels, comments, headSha, repository, prNumber, 
   return {
     frozen: true, valid: false, drift: true, lockSha, lockCreatedAt,
     reason: `HEAD đã đổi sau giai đoạn khóa (lock ${String(lockSha).slice(0, 12)} → HEAD ${String(headSha || '').slice(0, 12)}) — trạng thái cũ vô hiệu, phải chạy lại CI + pre-review cho HEAD mới.`,
+  };
+}
+
+// ---------------------------------------------------------------- pre-push guard (Issue #22)
+
+// Quyết định LOCAL pre-push: branch đang push có thuộc PR open đang FROZEN không. Không dựa riêng
+// vào orchestrator phát hiện sau push — từ chối push trước khi head sha drift lên remote.
+//   allow khi: không có PR open cho branch; PR chưa frozen; HEAD khớp lock (uncommitted thay đổi
+//             không đổi HEAD → không drift); hoặc có unfreeze marker hợp lệ (reason + mới hơn lock
+//             + authorized author).
+//   block khi: frozen (approved | review-requested+agent:gpt) mà HEAD lệch lock và chưa unfreeze
+//             hợp lệ. Fail-closed: không lấy được thông tin PR đang frozen nếu đã biết PR tồn tại
+//             → block (pr.failed=true).
+export function decidePrePushGuard({ branch, headSha, pr = null, authorizedLogins = [] } = {}) {
+  if (!branch) return { decision: 'allow', reason: 'không xác định được branch — bỏ qua' };
+  if (!pr) return { decision: 'allow', reason: `branch ${branch} không có PR open — không áp freeze` };
+  if (pr.failed) {
+    return {
+      decision: 'block', reason: `PR #${pr.number} tồn tại nhưng không đọc được trạng thái (labels/comments) — KHÔNG thể xác nhận không frozen (fail-closed)`,
+    };
+  }
+  if (String(pr.state).toLowerCase() !== 'open') return { decision: 'allow', reason: `PR #${pr.number} không open — không áp freeze` };
+  const hlock = planHeadLock({
+    labels: pr.labels, comments: pr.comments, headSha,
+    repository: pr.repository, prNumber: pr.number,
+    policyVersion: pr.policyVersion, gptApprovers: pr.gptApprovers, localApprovers: pr.localApprovers,
+  });
+  if (!hlock.frozen || hlock.valid) return { decision: 'allow', reason: 'PR không frozen hoặc HEAD khớp lock (chưa drift)' };
+  const unfrozen = isUnfrozenAfter(pr.comments, hlock.lockSha ? hlock.lockCreatedAt : '', { authorizedLogins });
+  if (unfrozen) {
+    return { decision: 'allow', reason: 'unfreeze marker hợp lệ (reason + mới hơn lock + authorized author) — push override được phép, bắt buộc chạy lại CI + pre-review sau push' };
+  }
+  return {
+    decision: 'block', reason: `FROZEN: ${hlock.reason} Mở khóa bằng marker <!-- ai-pr-reviewer:unfreeze:reason=<lý do> --> từ user có quyền, hoặc dừng push.`,
   };
 }
 
