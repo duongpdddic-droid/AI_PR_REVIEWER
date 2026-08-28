@@ -253,6 +253,12 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: editor để lại newline kép cuối file; `git diff --check` coi blank line at EOF là lỗi whitespace.
 - **Tránh lặp lại**: trước commit chạy `git diff --check` trên mọi file đã sửa; cắt dòng trắng thừa ở cuối (file kết thúc bằng ký tự cuối của code, không có blank line). Lỗi này full-verify bắt được nhưng chỉ hiện khi chạy thực tế (pipe/Select-String có thể không in).
 
+## L-049 (28/08/2026) — `import.meta.url.pathname` trên Windows sinh path sai `C:\C:\...` trong hook
+- **Triệu chứng**: git hook pre-push thất bại `Cannot find module 'C:\C:\Users\...\pre-push-guard.mjs'`; `git push` bị chặn dù code đúng.
+- **Nguyên nhân gốc**: `path.dirname(new URL(import.meta.url).pathname)` — `pathname` trên Windows đã bắt đầu bằng `/C:/Users/...`; nối thêm `path.join` với cwd thành tiền tố duyệt kép `C:\C:\...`.
+- **Tránh lặp lại**: dùng `fileURLToPath(new URL('<rel>', import.meta.url))` để lấy đường dẫn module chuẩn đa nền tảng (không dùng `.pathname` khi tạo path file system); nếu bắt buộc giữ path dạng URL, thay `\` → `/` sau `fileURLToPath`. Kiểm tra hook: chạy `git push --dry-run` hoặc pipe stdin vào guard và xác nhận module resolve được.
+
+
 ## L-039 (26/08/2026) — Stale-lock takeover race: không bao giờ ghi đè lock của instance đang sống
 - **Triệu chứng**: 2 contender cùng thấy lock cũ STALE, cả 2 `unlinkSync` rồi `writeFileSync` (overwrite) → 1 process ghi đè lock mới của process thắng; hoặc unlink luôn lock TƯƠI của process khác đang alive → 2 instance chạy song song (409 conflict / gửi Telegram trùng). GPT-REV-078 Critical.
 - **Nguyên nhân gốc**: takeover dùng `unlinkSync`+`writeFileSync` (không atomic), không serialize contenders, không re-check staleness sau khi giành quyền; `writeFileSync` overwrite vô điều kiện nên xóa được lock của process khác.
@@ -300,3 +306,8 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Triệu chứng**: gọi editor sửa file nhưng path gõ sai (vd `...\VA_PR_REVIEWER\...`, `...\.clinem\...`) → tool tạo FILE MỚI ở thư mục không tồn tại đó (x2 lần trong phiên), gây thêm bước dọn.
 - **Nguyên nhân gốc**: editor tool tự mkdir+create nếu path không tồn tại; tôi gõ path bằng tay thay vì copy từ kết quả đọc.
 - **Tránh lặp lại**: TRƯỚC mọi lần editor ghi, dùng đúng path copy từ read/ls gần nhất; nếu tạo nhầm → `Remove-Item -Recurse -Force <path nhầm>` ngay trước khi tiếp tục; kiểm tra `git status` không xuất hiện file lạ.
+
+## L-048 (28/08/2026) — Smoke-test MCP: chờ response của `notifications/*` (notification không hồi đáp)
+- **Triệu chứng**: smoke-test spawn server thật (NDJSON kiểu MCP client) gọi `notifications/initialized` qua cùng helper `rpc` chờ phản hồi → treo đến `timeout notifications/initialized`, làm test tưởng lỗi server (server thực tế ổn, `initialize` PASS trước đó).
+- **Nguyên nhân gốc**: MCP JSON-RPC notification (`notifications/initialized`, `notifications/cancelled`) KHÔNG có response — không có id/tính toán pending; chờ qua helper request/response là sai thiết kế.
+- **Tránh lặp lại**: khi smoke-test MCP, chỉ gọi request-response qua helper `rpc` (initialize, tools/list, tools/call); `notifications/*` ghi thẳng `child.stdin.write(JSON.stringify({jsonrpc:'2.0', method, params}) + '\n')` KHÔNG chờ. Nếu nghi `stderr` server = lỗi: đừng tin PowerShell `$LASTEXITCODE` từ lệnh PowerShell (stderr của child bị coi lỗi) — chạy `node script.mjs *> $null; $LASTEXITCODE` để lấy exit code thật của script; server khởi động in stdout thông tin repo khiến PS 5.1 báo NativeCommandError dù thành công.

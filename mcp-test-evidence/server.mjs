@@ -26,13 +26,15 @@
  * Chạy: node mcp-test-evidence/server.mjs
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   loadManifest, safePath, redactReport, redact, formatSummary, formatFailureDetail,
   validateReport, MAX_LOG_EXCERPT_LINES, computeReportId, computeManifestHash,
 } from '../scripts/test-evidence-reporter.mjs';
+import { runGate, validateGate, buildSandboxEnv, DEFAULT_STEP_TIMEOUT_MS } from './executor.mjs';
+import { cacheKey, checkCache, writeCache, prepareRuntime, CACHE_TTL_MS, envFingerprint as computeEnvFingerprint } from './cache.mjs';
 
 export const SERVER_INFO = { name: 'mcp-test-evidence', version: '0.1.0' };
 
@@ -208,6 +210,22 @@ const headShaProp = { type: 'string', pattern: '^[0-9a-f]{40}$', description: 'F
 const failureIndexProp = { type: 'integer', minimum: 0, description: 'Index trong failures[*] (bắt đầu 0)' };
 
 export const TOOLS = [
+  { name: 'test_run',
+    description: 'Chạy gate đã allowlist trong manifest; lưu artifact + cache (PASS chỉ).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: projectIdProp,
+        repo: repoProp,
+        headSha: headShaProp,
+        gate: { type: 'string', pattern: '^[a-z0-9][a-z0-9._-]*$', description: 'gateId trong manifest.gates' },
+        manifestHash: { type: 'string', pattern: '^[0-9a-f]+', description: 'SHA256 hex của manifest JSON' },
+        envFingerprint: { type: 'string', pattern: '^[0-9a-f]+', description: 'SHA256 của envSnapshot' },
+        envSnapshot: { type: 'object', description: 'Chỉ dùng cho fingerprint; metadata tùy chọn cho cache' },
+        forceOverwrite: { type: 'boolean', description: 'Nếu true, ghi đè artifact pass cũ (mặc định false)' },
+      },
+      required: ['headSha', 'gate', 'manifestHash', 'envFingerprint', 'projectId'],
+    } },
   { name: 'test_status',
     description: 'Trạng thái test cho headSha/reportId: compact summary PASS/FAIL, tests, blocking, failureCodes. Read-only.',
     inputSchema: {
@@ -316,9 +334,86 @@ function opFindingMap(args, ctx) {
   return { reportId: report.reportId, headSha: report.headSha, passed: report.passed, findings };
 }
 
-export function dispatch(name, args) {
+// ── test_run: allowlisted executor + cache + artifact store ─────────────────
+function buildCacheDir(root, key) {
+  return path.join(root, 'cache', key.slice(0, 2));
+}
+
+function createLockSync(root, key) {
+  let lockFile, held = false;
+  const getLockFile = () => {
+    if (!lockFile) {
+      const sub = key.slice(0, 2);
+      const d = path.join(root, 'locks', sub);
+      mkdirSync(d, { recursive: true });
+      lockFile = path.join(d, key + '.lock');
+    }
+    return lockFile;
+  };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  return {
+    async acquire(timeoutMs = 5000) {
+      const lf = getLockFile();
+      const deadline = Date.now() + timeoutMs;
+      while (existsSync(lf)) {
+        if (Date.now() > deadline) throw new Error('LOCK_TIMEOUT:' + key);
+        await sleep(100);
+      }
+      writeFileSync(lf, String(process.pid), { mode: 0o644 });
+      held = true;
+    },
+    release() {
+      if (held && lockFile) { held = false; try { unlinkSync(lockFile); } catch {} }
+    },
+  };
+}
+
+async function opTestRun(args, ctx) {
+  assertSecurity(args, ctx);
+  const { projectId, headSha, gate, manifestHash, envFingerprint, forceOverwrite } = args;
+  // Validate gate trong manifest
+  const gateValidation = validateGate(ctx.manifest, gate, ctx.root);
+  if (!gateValidation.valid) {
+    throw new Error(`gate '${gate}' không hợp lệ: ${gateValidation.errors.join('; ')}`);
+  }
+  // Validate headSha
+  if (!HEX40.test(headSha)) throw new Error('headSha: cần full 40-hex');
+  // Validate manifestHash, envFingerprint hex
+  if (!/^[0-9a-f]+$/i.test(manifestHash)) throw new Error('manifestHash: cần hex');
+  if (!/^[0-9a-f]+$/i.test(envFingerprint)) throw new Error('envFingerprint: cần hex');
+  // Tính cache identity
+  const key = cacheKey(projectId, headSha, manifestHash, envFingerprint, gate);
+  const { root: runtimeRoot } = prepareRuntime(projectId, ctx.root);
+  const cdPath = buildCacheDir(runtimeRoot, key);
+  const cached = checkCache(cdPath, key);
+  if (cached.valid && !forceOverwrite) {
+    return { cached: true, projectId, headSha, gate, cacheKey: key, passed: true, source: 'cache' };
+  }
+  const lock = createLockSync(runtimeRoot, key);
+  await lock.acquire();
+  try {
+    const cached2 = checkCache(buildCacheDir(runtimeRoot, key), key);
+    if (cached2.valid && !forceOverwrite) {
+      return { cached: true, projectId, headSha, gate, cacheKey: key, passed: true, source: 'cache' };
+    }
+    const result = await runGate(ctx.manifest, gate, { root: ctx.root });
+    if (result.passed) {
+      writeCache({ projectId, headSha, gateId: gate, manifestHash, envFingerprint }, result, key, runtimeRoot);
+    }
+    return {
+      cached: false, projectId, headSha, gate, cacheKey: key,
+      duration: result.duration, passed: result.passed,
+      failureCodes: result.failureCodes, source: 'executor',
+    };
+  } finally {
+    lock.release();
+  }
+}
+
+export async function dispatch(name, args) {
   const ctx = buildContext();
   switch (name) {
+    case 'test_run': return await opTestRun(args, ctx);
     case 'test_status': return opStatus(args, ctx);
     case 'test_failures': return opFailures(args, ctx);
     case 'test_failure_detail': return opFailureDetail(args, ctx);

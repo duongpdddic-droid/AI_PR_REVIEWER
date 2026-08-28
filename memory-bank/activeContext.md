@@ -1,5 +1,52 @@
 # Active Context
-## Vòng review-fix PR #21 — GPT-REV-094..097 (28/08/2026 01:53)
+## Issue #19 Phase 3 — Allowlisted executor + cache/artifact store (28/08/2026 18:00)
+- **Nguồn**: Issue #19 AI_PR_REVIEWER, labels `agent:cline` + `status:in-progress` (claim thủ công).
+- **Branch**: `feat/issue-19-phase3-allowlisted-executor` từ main `9c104c8` (PR #23 merge).
+- **Phase 3 scope**: `test_run(projectId, gate, headSha)` MCP tool — chỉ chạy gate đã allowlist trong manifest; cache identity `projectId|headSha|manifestHash|envFingerprint|gate` (AC#4); runtime/artifacts ngoài repo (AC#5); security §D; progressive disclosure.
+- **Kế hoạch**:
+  1. [ ] `mcp-test-evidence/executor.mjs` — allowlisted gate executor, sandbox, timeout/output cap, secret redaction
+  2. [ ] `mcp-test-evidence/cache.mjs` — cache identity + TTL + runtime dir ngoài repo
+  3. [ ] `mcp-test-evidence/server.mjs` — thêm tool `test_run`, update TOOLS, validate gate/headSha/security
+  4. [ ] `mcp-test-evidence/test-executor.mjs` — pure + E2E assertions
+  5. [ ] `package.json` — thêm `test:evidence:executor` script
+  6. [ ] `.github/workflows/verify.yml` — thêm executor test step
+  7. [ ] Verify: `pnpm verify` + `pnpm test:evidence:executor` PASS → commit → PR Draft
+- **Bước hiện tại**: 1. Đang implement executor.mjs
+# Active Context
+## PR #23 MERGED — Issue #22 HEAD-Lock Lifecycle & Handoff Gate đóng (28/08/2026 17:51) — COMPLETED
+- **Merge**: `gh pr merge 23 --repo duongpdddic-droid/AI_PR_REVIEWER --squash --delete-branch=false` → merge commit `9c104c88dddb3e9aad0388447e9be6ff74f78a06` (2026-08-28T10:51:58Z, mergedBy duongpdddic-droid). Issue #22 closed (PR body `Closes #22`).
+- **Pre-merge re-verify (fail-closed)**: PR #23 OPEN + HEAD `ade500e` không drift + MERGEABLE + labels `agent:gpt`+`status:approved` (chỉ 1 status:*) + approval marker `5451561862` (policy 2026-08-23.7, decision `gpt-pr23-ade500e-20260828`, openBlockingFindings 0) + CI run `33162926501` SUCCESS @ `ade500e`.
+- **Không xóa branch** (theo `--delete-branch=false`); vẫn ở `feat/issue-22-head-lock-gate` tại `ade500e` cho tới khi dọn thủ công.
+- **Trạng thái repo**: HEAD local = remote branch = `ade500e`; memory-bank modified (chỉ từ session trước, không phải do merge).
+- **Next**: chờ Bố lệnh tiếp (chưa tự claim Issue #19 Phase 3).
+
+## GPT-REV-099 — pre-push-guard resolve policy tại remote PR HEAD (28/08/2026) — COMPLETED
+- **Vấn đề**: `pre-push-guard.mjs:171` resolve `policyApprovers(repo, branch, localSha)` bằng `localSha` chưa push → sai khi lock HEAD đã ở remote.
+- **Fix**: dùng `view.headRefOid` (remote PR HEAD). Kèm đổi delimiter `split('\t')` → `split(/\s+/)` tương thích Git-for-Windows.
+- **Test**: thêm I.G8/I.G9/I.G10 (unfreeze push B với remote HEAD=lock A → allow; không unfreeze → block; remote HEAD drifted sang C → block). Test chạy **10/10 PASS**; `full-verify.mjs` **135/135 PASS**.
+- **Commit**: `ade500ea326a3b028629d6eb075d6e3e4dc10f33` `fix: GPT-REV-099 resolve policy at remote PR HEAD (view.headRefOid)` (chỉ 2 file code/test; KHÔNG commit memory-bank).
+- **Unfreeze marker**: PR #23 comment `5451270108`, body sạch (read-back) `<!-- ai-pr-reviewer:unfreeze:reason=fix GPT-REV-099: ... -->`.
+- **Push**: `2262458..ade500e` → remote HEAD `ade500e`. CI `33162926501` verify = **SUCCESS** @ head `ade500e`.
+- **Handoff**: set tạm `agent:cline`+`review-requested`; patch `.agent/config.json` targetRepos = AI_PR_REVIEWER (backup byte-identical `%TEMP%`, restore + read-back in finally, không commit); `unified-orchestrator.mjs --execute` → **PRE_REVIEW_PASS** openBlocking 0, decisionGate null, outcome handoff-gpt. Marker canonical id `5451465330` khóa `ade500e` + policy `2026-08-23.7`.
+- **Read-back hợp nhất**: local=remote=PR head=CI head=marker head = `ade500ea326a3b028629d6eb075d6e3e4dc10f33`. Labels `agent:gpt`+`status:review-requested`. Branch **frozen** (head-lock). KHÔNG merge/deploy.
+- **Config**: `.agent/config.json` đã restore byte-identical (targetRepos `QLDA_DTXD`), git diff HEAD rỗng. Temp backup + tmp notify đã xóa.
+
+## Task: Issue #22 — HEAD-Lock Lifecycle & Handoff Gate (28/08/2026)
+- **Nguồn**: Issue #22 AI_PR_REVIEWER. **Đã claim** thủ công theo §13.4 (labels rỗng, intake auto chặn do đang ở branch feature nên dùng `gh issue edit`): read-back `agent:cline` + `status:in-progress`. Không commit Memory Bank.
+- **Mục tiêu**: pre-review/approval/CI gắn chặt full HEAD SHA; HEAD đổi → invalidate trạng thái cũ, bắt chạy lại CI + pre-review trước khi handoff GPT. Chặn handoff/giữ approved với HEAD drift. Đã về bổ sung: guard push cục bộ + gate author unfreeze.
+- **Kế hoạch**:
+  1. [x] `review-contract.mjs`: `parsePreReviewPassShas`, `latestApprovalShaAnyHead`, `planHeadLock`, `parseUnfreezeMarkers`, `isUnfrozenAfter` (pure).
+  2. [x] `unified-orchestrator.mjs`: HEAD-lock gate trong `processPr` — drift → invalidate về Cline; unfreeze marker đọc cho push override.
+  3. [x] Test: block C.24 (16 assert) + `test-integration-orchestrator.mjs` I.11.
+  4. [x] `node scripts/full-verify.mjs` → 128/128 PASS (commit `cd41cfa`, PR #23 Draft).
+  5. [x] **Bổ sung vòng 2** (claim Issue #22): `decidePrePushGuard` (pure) + `isUnfrozenAfter` yêu cầu authorized author + `pre-push-guard.mjs` + `setup-pre-push-hook.mjs` + orchestrator truyền `authorizedLogins`.
+  6. [x] Test block C.25 (12 assert) — `test-pure-logic.mjs` 224/224; `full-verify.mjs` **132/132 PASS**.
+  7. [x] Commit `8b22e54` (guard+gate+C.25), `330d4bc` (fix path Windows); push `cd41cfa..330d4bc`. PR #23 HEAD `330d4bc`, Draft, labels rỗng (chưa handoff).
+- **Bước hiện tại**: 7 (xong code + verify + push) → **handoff GPT hoàn tất** (điều kiện Bố đạt).
+- **Handoff GPT (đã làm)**: set PR #23 tạm `agent:cline`+`status:review-requested`, patch config target AI_PR_REVIEWER (backup/restore), chạy `unified-orchestrator.mjs --execute` → **PRE_REVIEW_PASS** (openBlocking 0, handoff-gpt) marker canonical khóa full HEAD `330d4bc...` (id `5447818298`, user duongpdddic-droid). Read-back: PR #23 OPEN **không Draft** HEAD `330d4bc`=local=remote, labels `agent:gpt`+`status:review-requested`; Issue #22 labels `agent:gpt`+`status:review-requested`; CI verify SUCCESS. Branch **frozen** (hook pre-push chặn push drift).
+- **Next**: chờ GPT re-review HEAD `330d4bc` → phê duyệt/CHANGES_REQUESTED. Nếu CHANGES_REQUESTED → follow head-lock: cần unfreeze marker hợp lệ + chạy lại CI/pre-review. Không gửi Telegram (rule §13.6).
+
+
 - GPT verdict CHANGES_REQUESTED (0 Critical, 4 Important):
   - **094** MCP redaction bypass: `opLogExcerpt` đọc `logExcerpt` raw, `collectFindings` trả `detail` raw — test cũ `maxLines:1` bỏ sót (secret ở dòng 2).
   - **095** `findReport`: không ép single-selector; thiếu identity binding (filename↔reportId↔canonical); lookup theo headSha trả entry `readdirSync` thứ tự không xác định.
@@ -20,6 +67,14 @@
 - **Fix**: `resolveReport` (server.mjs) khi selector headSha → hash `{...ctx.manifest, headSha: args.headSha}` (cùng canonical rule reporter); reportId lookup độc lập. Fixture test-server viết lại đúng reporter: manifest committed STALE, mỗi HEAD có manifestHash canonical riêng; thêm E2E (a) test_status({headSha}) thành công dù manifest stale, (b) artifact từ manifest nội dung sai → fail-closed.
 - Verify: `node mcp-test-evidence/test-server.mjs` **38/38 PASS** (thêm 3 test); `node scripts/full-verify.mjs` **128/128 PASS**.
 - Trạng thái: fix XONG + verify PASS. Bước tiếp: commit + push lên branch PR #21 → chạy lại handoff canonical (CI + PRE_REVIEW_PASS @ HEAD mới) → gửi GPT re-review.
+
+## Task hiện tại — "deploy" = kích hoạt Test Evidence MCP (28/08/2026 12:55) — COMPLETED
+- Bố xác định "deploy" = kích hoạt Test Evidence MCP cho Cline sau PR #21 merge (KHÔNG GAS/clasp, không chạy daemon thủ công).
+- PR #21 đã MERGED (squash `34e031ab`, source HEAD `f27fb6b`). Re-verify gate ALL_PASS (merged, HEAD khớp, labels `agent:gpt`+`status:approved`, approval marker + CI success @ HEAD).
+- Đã ở `main @ 34e031a` (pull --ff-only). `.mcp.json` đăng ký `mcp-test-evidence` → `mcp-test-evidence/server.mjs`.
+- Smoke-test spawn server thật (NDJSON kiểu MCP client) với fixture hợp lệ: initialize + tools/list 5 tools read-only + test_status(PASS theo headSha + reportId) + fail-closed headSha vô hiệu → REAL_EXIT=0. Không process trùng, không temp sót.
+- full-verify @ main: 128/128 PASS. Evidence: `memory-bank/progress.md` mục mới nhất.
+- Lưu ý: intake expose Issue #19 (`ready-for-cline`, Phase 3–5 còn lại) — PR #21 không đóng Issue #19; Issue #22 hiện không phải task claim được. Chưa claim/commit gì.
 
 ## Mục tiêu
 Issue #19 Phase 2 — Read-only Test Evidence MCP server. Không deploy, không mở rộng Phase 3 (executor/cache).
