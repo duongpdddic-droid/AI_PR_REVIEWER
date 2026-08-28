@@ -216,10 +216,13 @@ function makeIo(opts = {}) {
 
 // I.11 agent:gpt đã gắn (chờ GPT quyết định cuối) → orchestrator bỏ qua.
 {
-  const { io, pr } = makeIo({ labels: [LABELS.reviewRequested, AGENTS.gpt] });
+  // Reality: handoff → agent:gpt luôn kèm pre-review PASS marker khóa HEAD (xem I.1).
+  // PASS canonical: có provenance (id), author thuộc allowlist, đầy đủ key=<repo>::<pr>::<sha>::<policy>::<phase>.
+  const passBody = `🟢 **PRE_REVIEW_PASS**\n<!-- ai-pr-reviewer:key=o/r::7::${SHA}::2026-08-23.1::pre-review:PRE_REVIEW_PASS -->\n<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${SHA} -->`;
+  const { io, pr } = makeIo({ labels: [LABELS.reviewRequested, AGENTS.gpt], comments: [{ id: 'p1', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-23T00:00:00Z', body: passBody }] });
   const cycle = await processOneCycle(io, { dryRun: false, repos: ['o/r'] });
   tru('I.11 skip chờ GPT', String(cycle.results[0]?.skipped || '').includes('GPT'));
-  eq('I.11 không mutation', pr.comments.length, 0);
+  eq('I.11 không mutation (không comment mới)', pr.comments.length, 1);
 }
 
 // I.12 Đa repo: mỗi repo dùng đúng policy của chính nó (không trộn policy giữa 2 repo).
