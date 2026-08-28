@@ -4,6 +4,7 @@
 
 import { chmodSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const res = spawnSync('git', ['rev-parse', '--git-dir'], { encoding: 'utf8' });
@@ -13,7 +14,7 @@ if (res.error || res.status !== 0) {
 }
 const gitDir = path.resolve(String(res.stdout).trim());
 const hookPath = path.join(gitDir, 'hooks', 'pre-push');
-const guardPath = path.join(path.dirname(new URL(import.meta.url).pathname), 'pre-push-guard.mjs');
+const guardPath = fileURLToPath(new URL('./pre-push-guard.mjs', import.meta.url)).replace(/\\/g, '/');
 const content = `#!/bin/sh
 # PRE-PUSH HEAD-LOCK guard (Issue #22) — cài tự động bởi scripts/setup-pre-push-hook.mjs.
 # Chặn push khi branch của PR open đang FROZEN mà HEAD lệch lock. Xóa file này để tắt.
