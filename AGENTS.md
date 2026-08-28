@@ -65,7 +65,11 @@
 - Phân tầng: Unit/syntax (`full-verify.mjs`) → Integration (CSV→Sheet, mã tham chiếu) → E2E (manual Web App).
 - Bắt buộc test: happy/edge/error/state-transition. Review: Critical/Important/Suggestion; mỗi finding có file+dòng+vấn đề+rủi ro+fix.
 
----
+**08-temp-hygiene.md** — Quản lý tài nguyên tạm (PoC/runtime) bắt buộc.
+- Mọi file/script/process tạm nằm trong temp root riêng ngoài repo (`scripts/temp-hygiene.mjs`); mỗi phiên 1 dir theo `sessionId` + session manifest + ownership marker.
+- Cleanup chạy trong `finally` (kể cả PASS/FAIL/timeout/Ctrl+C), idempotent; chỉ xóa target trong root + sessionId đúng + có marker; cấm recursive-delete theo path rỗng/env chưa resolve/repo/HOME/wildcard.
+- Dừng child process theo PID phiên tạo (không kill theo tên). Sau cleanup read-back bắt buộc; chưa sạch → `POC_CLEANUP_FAILED` + leftover redact, không báo PASS.
+- Recovery riêng theo `sessionId` (`recoverSession`), idempotent, chỉ xóa resource có marker. Test: `pnpm test:temp-hygiene`.
 
 ## Memory Bank (single source of truth)
 Kilo dùng `memory-bank/*.md` theo rule 02 ở trên — đọc/ghi trực tiếp bằng file tools.
