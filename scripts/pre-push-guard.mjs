@@ -88,14 +88,15 @@ function main() {
   let stdin;
   try { stdin = readFileSync(0, 'utf8'); }
   catch (e) { console.error('[pre-push-guard] không đọc được stdin — BLOCK'); process.exit(1); }
-  // Mỗi dòng stdin: `<local ref>\t<local sha>\t<remote ref>\t<remote sha>`. Dòng không đủ 4
-  // trường / bất kỳ trường nào rỗng → không parse được ref → BLOCK, không exit 0.
+    // Mỗi dòng stdin: `<local ref> <local sha> <remote ref> <remote sha>` (các trường cách nhau
+  // bằng whitespace — Git dùng tab trên POSIX nhưng space trên Git-for-Windows). Dòng không đủ
+  // 4 trường / bất kỳ trường nào rỗng → không parse được ref → BLOCK, không exit 0.
   const rows = String(stdin || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const refs = [];
   for (const line of rows) {
-    const parts = line.split('\t');
+    const parts = line.split(/\s+/);
     if (parts.length < 4 || !parts[0] || !parts[1] || !parts[2] || !parts[3]) {
-      console.error(`[pre-push-guard] dòng ref không parse được (cần 4 trường tab-separated) — BLOCK: ${JSON.stringify(line)}`);
+      console.error(`[pre-push-guard] dòng ref không parse được (cần 4 trường whitespace-separated) — BLOCK: ${JSON.stringify(line)}`);
       process.exit(1);
     }
     refs.push({ localRef: parts[0], localSha: parts[1], remoteRef: parts[2], remoteSha: parts[3] });
@@ -166,7 +167,8 @@ function main() {
       try {
         view = JSON.parse(gh(['pr', 'view', String(n), '--repo', repo, '--json', 'state,headRefOid,labels']));
         comments = listPrComments(repo, n);
-        app = policyApprovers(repo, branch, localSha);
+        // GPT-REV-099: resolve policy tại remote PR HEAD (view.headRefOid), không tại localSha chưa push
+        app = policyApprovers(repo, branch, view.headRefOid);
       } catch (e) {
         const r = decidePrePushGuard({ branch, headSha: localSha, pr: { number: n, failed: true } });
         console.error(`[pre-push-guard] ${branch}: ${r.reason}`);

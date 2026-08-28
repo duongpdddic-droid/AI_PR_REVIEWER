@@ -139,6 +139,37 @@ try {
     eq('I.G7 không PR open → exit 0',
       runGuard(fx, `refs/heads/feat/x\t${B}\trefs/heads/feat/x\t${A}\n`) === 0, true);
   }
+// 8. [GPT-REV-099] remote PR HEAD = lock SHA A (policy resolve tại view.headRefOid),
+  //    push B khác lock, unfreeze hợp lệ → allow exit 0
+  {
+    const fx = {
+      origin: 'o/r', authorizedLogins: ['duongpdddic-droid'],
+      prs: { 'feat/x': { ...basePr, headRefOid: A, comments: [PASS(A), UF()] } },
+    };
+    eq('I.G8 [GPT-REV-099] remote HEAD=lock A + push B + unfreeze → exit 0',
+      runGuard(fx, `refs/heads/feat/x\t${B}\trefs/heads/feat/x\t${A}\n`) === 0, true);
+  }
+
+  // 9. [GPT-REV-099] remote PR HEAD = lock SHA A, push B khác lock, KHÔNG unfreeze → BLOCK exit != 0
+  {
+    const fx = {
+      origin: 'o/r', authorizedLogins: ['duongpdddic-droid'],
+      prs: { 'feat/x': { ...basePr, headRefOid: A, comments: [PASS(A)] } },
+    };
+    eq('I.G9 [GPT-REV-099] remote HEAD=lock A + push B + không unfreeze → exit != 0',
+      runGuard(fx, `refs/heads/feat/x\t${B}\trefs/heads/feat/x\t${A}\n`) !== 0, true);
+  }
+
+  // 10. [GPT-REV-099] lock SHA A trong PASS, remote HEAD (headRefOid) đã drifted sang C,
+  //     push B → vẫn BLOCK (không dùng headRefOid để so sánh drift — dùng localSha)
+  {
+    const fx = {
+      origin: 'o/r', authorizedLogins: ['duongpdddic-droid'],
+      prs: { 'feat/x': { ...basePr, headRefOid: 'c'.repeat(40), comments: [PASS(A)] } },
+    };
+    eq('I.G10 [GPT-REV-099] remote HEAD drifted sang C, lock A, push B → exit != 0',
+      runGuard(fx, `refs/heads/feat/x\t${B}\trefs/heads/feat/x\t${'c'.repeat(40)}\n`) !== 0, true);
+  }
 } finally {
   const res = mgr.cleanup();
   if (res && res.verdict && res.verdict !== 'CLEAN') {
