@@ -93,6 +93,7 @@ try {
   // 4. test suites (nếu tồn tại) — Issue #6 C2: một lệnh pnpm verify tổng hợp mọi gate.
   const optionalSuites = [
     'test-pure-logic.mjs',
+    'test-pre-push-guard.mjs',
     'test-integration-orchestrator.mjs',
     'test-integration-approval-gate.mjs',
     'test-integration-review-runtime.mjs',

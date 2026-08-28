@@ -398,6 +398,53 @@ export function parsePreReviewPassShas(comments) {
   return out;
 }
 
+/**
+ * [GPT-REV-CHANGES-01] Trích PASS records KÈM METADATA (author login + comment id + created_at)
+ * từ danh sách comment object GitHub API ({id, user:{login}, created_at, body}). Chỉ nhận comment
+ * có cú pháp marker PASS hợp lệ; marker hỏng → bỏ qua (fail-closed). KHÔNG tự tin body tự khai báo:
+ * tính hợp lệ phải qua isPreReviewPassCanonical (provenance + author + key khớp).
+ */
+export function collectPreReviewPassRecords(comments) {
+  const out = [];
+  for (const c of Array.isArray(comments) ? comments : []) {
+    if (!c || typeof c !== 'object') continue;
+    const sha = (String(c.body || '').match(/ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:([0-9a-f]{40})/i) || [])[1];
+    if (!sha) continue;
+    out.push({
+      sha: sha.toLowerCase(),
+      authorLogin: String((c.user && c.user.login) || ''),
+      commentId: c.id != null ? String(c.id) : '',
+      createdAt: String(c.created_at || ''),
+      body: String(c.body || ''),
+    });
+  }
+  return out;
+}
+
+/**
+ * [GPT-REV-CHANGES-01] PRE_REVIEW_PASS canonical CHỈ được tin khi có ĐỦ:
+ *   1. comment provenance (commentId bắt buộc — comment phải có id thật từ GitHub);
+ *   2. author thuộc preReviewApprovers (policy localApprovalCommentAuthors);
+ *   3. key trong body khớp repository::prNumber::full HEAD sha::policyVersion::pre-review:PRE_REVIEW_PASS.
+ * Fail-closed: thiếu bất kỳ thành phần / sai key / approvers rỗng → false. PASS không canonical
+ * KHÔNG được dùng làm bằng chứng khóa HEAD (không đóng finding, không giữ lock).
+ */
+export function isPreReviewPassCanonical(entry, { preReviewApprovers = [], repository = '', prNumber = '', policyVersion = '' } = {}) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (!entry.commentId) return false;
+  const allowed = preReviewApprovers.map((a) => String(a));
+  if (allowed.length === 0 || !allowed.includes(entry.authorLogin)) return false;
+  const sha = String(entry.sha || '').toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sha)) return false;
+  const bodyText = String(entry.body || '');
+  const markerStart = 'ai-pr-reviewer:key=';
+  const keyStart = bodyText.indexOf(markerStart);
+  const keyEnd = keyStart === -1 ? -1 : bodyText.indexOf(' -->', keyStart + markerStart.length);
+  const key = keyStart === -1 || keyEnd === -1 ? '' : bodyText.slice(keyStart + markerStart.length, keyEnd);
+  const expected = [String(repository), String(prNumber), sha, String(policyVersion), 'pre-review:PRE_REVIEW_PASS'].join('::');
+  return String(key || '').trim() === expected;
+}
+
 // Chọn SHA khóa LOCK MỚI NHẤT từ một danh sách { sha, createdAt }, mặc định entry cuối cùng
 // (comments issue theo thứ tự ASC trên GitHub — bài mới ở cuối). Trả { sha, createdAt } hoặc null.
 function latestShaOf(entries, orderKey) {
@@ -495,11 +542,23 @@ export function planHeadLock({ labels, comments, headSha, repository, prNumber, 
     norm.keepStatus === LABELS.approved
     || (norm.keepStatus === LABELS.reviewRequested && hasGpt);
   if (!frozenStatus) return { frozen: false };
-  const pass = latestShaOf(parsePreReviewPassShas(comments), 'createdAt');
+  // PASS canonical (provenance + authorized author + key khớp) — PASS không canonical KHÔNG làm
+  // bằng chứng khóa HEAD [GPT-REV-CHANGES-01]. Approval cũng đã lọc author/key qua latestApprovalShaAnyHead.
+  const passRecords = collectPreReviewPassRecords(comments).filter((e) => isPreReviewPassCanonical(e, {
+    preReviewApprovers: localApprovers, repository, prNumber, policyVersion,
+  }));
+  const pass = latestShaOf(passRecords, 'createdAt');
   const approval = latestApprovalShaAnyHead(comments, { repository, prNumber, policyVersion, gptApprovers, localApprovers });
-  // approval (đủ mạnh nhất) ưu tiên; ngược lại dùng PASS gần nhất
-  const lockSha = approval ? approval.sha : (pass ? pass.sha : null);
-  const lockCreatedAt = approval ? approval.createdAt : (pass ? pass.createdAt : '');
+  // [GPT-REV-CHANGES-01] Lock = loại bằng chứng (PASS | approval) MỚI NHẤT theo createdAt — KHÔNG
+  // ưu tiên cứng approval > PASS. Nếu có approval cũ (lock A) rồi unfreeze → push B → PASS mới
+  // (B), lock phải là PASS(B) để handoff B hợp lệ; chọn approval cũ sẽ chặn nhầm.
+  const cand = [pass, approval].filter(Boolean);
+  let lock = null;
+  for (const c of cand) {
+    if (!lock || (c.createdAt && (!lock.createdAt || String(c.createdAt) > String(lock.createdAt)))) lock = c;
+  }
+  const lockSha = lock ? lock.sha : null;
+  const lockCreatedAt = lock ? lock.createdAt : '';
   if (!lockSha) {
     return {
       frozen: true, valid: false, drift: true, lockSha: null, lockCreatedAt: '',

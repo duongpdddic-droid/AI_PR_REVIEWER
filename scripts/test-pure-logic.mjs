@@ -25,6 +25,7 @@ import {
   resolveRebuttalOutcome, steadyLocalApproval,
   planHeadLock, parsePreReviewPassShas, latestApprovalShaAnyHead,
   parseUnfreezeMarkers, isUnfrozenAfter, decidePrePushGuard,
+  collectPreReviewPassRecords, isPreReviewPassCanonical,
 } from './review-contract.mjs';
 import { runSemanticPreReview } from './unified-orchestrator.mjs';
 import { withRetry } from './tg-notify-core.mjs';
@@ -501,9 +502,9 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   const PV = 'v1';
   const headA = SHA;            // 'a'*40
   const headB = SHA2;           // 'b'*40 — HEAD đổi sau khi lock
-  const passComment = (sha, at) => ({ id: `p-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ local pre-review PASS\n<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
+  const passComment = (sha, at) => ({ id: `p-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ local pre-review PASS\n<!-- ai-pr-reviewer:key=${REPO}::${PRN}::${sha}::${PV}::pre-review:PRE_REVIEW_PASS --> <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
   const gptCom = (sha, at, decisionId = 'gpt-x') => ({ id: `g-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ GPT approval\n<!-- ai-review-approval:${JSON.stringify({ repository: REPO, prNumber: PRN, reviewer: RA.gpt, headSha: sha, policyVersion: PV, decisionId, ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: at })} -->` });
-  const base = { repository: REPO, prNumber: PRN, policyVersion: PV, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic'] };
+  const base = { repository: REPO, prNumber: PRN, policyVersion: PV, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic-droid'] };
 
   // (e) valid frozen HEAD — review-requested+agent:gpt, HEAD khớp lock PASS
   {
@@ -550,6 +551,45 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   {
     const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [{ id: 'x', user: { login: 'bot' }, created_at: '-', body: 'plain text' }], headSha: headA, ...base });
     eq('C.24 fail-closed: frozen mà thiếu bằng chứng khóa HEAD → invalid + drift', r.valid === false && r.drift === true && r.lockSha === null, true);
+  }
+}
+
+// C.26 [GPT-REV-CHANGES-01] Lock = bằng chứng (PASS | approval) MỚI NHẤT theo createdAt;
+// PASS canonical bắt buộc provenance + authorized author + key khớp.
+{
+  const REPO = 'o/r', PRN = 7, PV = 'v1';
+  const headA = SHA, headB = SHA2;
+  const passC = (sha, at) => ({ id: `p2-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ PASS\n<!-- ai-pr-reviewer:key=${REPO}::${PRN}::${sha}::${PV}::pre-review:PRE_REVIEW_PASS --> <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
+  const gptC = (sha, at) => ({ id: `g2-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `x <!-- ai-review-approval:${JSON.stringify({ repository: REPO, prNumber: PRN, reviewer: RA.gpt, headSha: sha, policyVersion: PV, decisionId: 'g2', ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: at })} -->` });
+  const base2 = { repository: REPO, prNumber: PRN, policyVersion: PV, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic-droid'] };
+
+  // approval cũ khóa A → unfreeze → push B → PASS(B) mới → lock phải là PASS(B), handoff B hợp lệ
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [gptC(headA, '2026-08-23T00:00:00Z'), passC(headB, '2026-08-23T02:00:00Z')], headSha: headB, ...base2 });
+    eq('C.26 lock mới nhất theo createdAt: PASS(B) sau approval(A) → lock=B, HEAD B hợp lệ', r.valid === true && r.drift === false && r.frozen === true && r.lockSha === headB, true);
+  }
+  // ngược lại: PASS(A) cũ, approval(B) mới hơn → lock=approval(B)
+  {
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [passC(headA, '2026-08-23T00:00:00Z'), gptC(headB, '2026-08-23T02:00:00Z')], headSha: headB, ...base2 });
+    eq('C.26 lock mới nhất: approval(B) sau PASS(A) → lock=B, HEAD B hợp lệ', r.valid === true && r.drift === false && r.lockSha === headB, true);
+  }
+  // PASS không có key → không canonical → fail-closed (thiếu bằng chứng khóa HEAD)
+  {
+    const noKey = { id: 'n1', user: { login: 'duongpdddic-droid' }, created_at: '2026-08-23T01:00:00Z', body: `<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headA} -->` };
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [noKey], headSha: headA, ...base2 });
+    eq('C.26 PASS thiếu key → không canonical → fail-closed', r.valid === false && r.frozen === true && r.lockSha === null, true);
+  }
+  // PASS author ngoài localApprovers → không canonical → fail-closed
+  {
+    const badAuthor = { id: 'n2', user: { login: 'attacker' }, created_at: '2026-08-23T01:00:00Z', body: `x ${['<!-- ai-pr-reviewer:key=', REPO, '::', PRN, '::', headA, '::', PV, '::pre-review:PRE_REVIEW_PASS -->'].join('')} <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headA} -->` };
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [badAuthor], headSha: headA, ...base2 });
+    eq('C.26 PASS author ngoài allowlist → không canonical → fail-closed', r.valid === false && r.frozen === true && r.lockSha === null, true);
+  }
+  // PASS thiếu comment id (provenance) → không canonical → fail-closed
+  {
+    const noId = { user: { login: 'duongpddcic-droid' }, created_at: '2026-08-23T01:00:00Z', body: `x <!-- ai-pr-reviewer:key=${REPO}::${PRN}::${headA}::${PV}::pre-review:PRE_REVIEW_PASS --> <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headA} -->` };
+    const r = planHeadLock({ labels: [RL.reviewRequested, RA.gpt], comments: [noId], headSha: headA, ...base2 });
+    eq('C.26 PASS thiếu comment id → không canonical → fail-closed', r.valid === false && r.frozen === true && r.lockSha === null, true);
   }
 }
 
@@ -611,10 +651,10 @@ let fail = 0;
   const REPO = 'o/r', PRN = 7, PV = 'v1';
   const headA = SHA, headB = SHA2;
   const OW = ['duongpdddic-droid'];
-  const passComment = (sha, at) => ({ id: `p-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ local pre-review PASS\n<!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
+  const passComment = (sha, at) => ({ id: `p-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `✅ local pre-review PASS\n<!-- ai-pr-reviewer:key=${REPO}::${PRN}::${sha}::${PV}::pre-review:PRE_REVIEW_PASS --> <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${sha} -->` });
   const gptCom = (sha, at) => ({ id: `g-${sha.slice(0, 4)}`, user: { login: 'duongpdddic-droid' }, created_at: at, body: `x <!-- ai-review-approval:${JSON.stringify({ repository: REPO, prNumber: PRN, reviewer: RA.gpt, headSha: sha, policyVersion: PV, decisionId: 'g', ciEvidence: { state: 'pass' }, openBlockingFindings: 0, reviewedAt: at })} -->` });
   const uf = (at, login = 'duongpdddic-droid') => ({ id: `u-${at}`, user: { login }, created_at: at, body: `<!-- ai-pr-reviewer:unfreeze:reason=sửa tiếp -->` });
-  const prBase = { number: PRN, repository: REPO, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic'], policyVersion: PV };
+  const prBase = { number: PRN, repository: REPO, gptApprovers: ['duongpdddic-droid'], localApprovers: ['duongpdddic-droid'], policyVersion: PV };
 
   // không có PR open cho branch → allow
   eq('C.25 không có PR open → allow', decidePrePushGuard({ branch: 'feat/x', headSha: headA, pr: null, authorizedLogins: OW }).decision === 'allow', true);
