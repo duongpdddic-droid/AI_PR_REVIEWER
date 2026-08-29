@@ -326,3 +326,69 @@ export function registryOutsideWorktree(registryPath = DEFAULT_REGISTRY_PATH, cw
   const inside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   return { outside: !inside, path: abs };
 }
+
+
+// [cline-mem-bridge] removeProject — symmetric counterpart cua registerProject.
+// Authority rules (fail-closed):
+//   1. projectId BAT BUOC non-empty string (khong nhan identity mo ho).
+//   2. registry BAT BUOC chua khoi {schemaVersion, projects[]} dung shape.
+//   3. Khong tim thay projectId -> idempotent no-op ({ok:true, removed:false}).
+//      Phan biet "da roi" vs "loi": caller thay removed=false biet la da tung remove.
+//   4. Nhieu entry cung projectId (corrupt state) -> AMBIGUOUS_IDENTITY, reject.
+//   5. projectType === 'control-plane' -> CONTROL_PLANE_REMOVAL_FORBIDDEN, reject.
+//      Quyet dinh: registry chi chua identity record; viec don control-plane
+//      la nghiep vu ngoai pham vi project-registry, phai qua AI_PR_REVIEWER tooling.
+//   6. Input registry KHONG bi mutate — thao tac tren deep clone.
+//   7. Post-write integrity: re-load registry, assert projectId vang mat.
+//      Sai khac -> PERSISTENCE_INTEGRITY, fail-closed.
+//   8. Fingerprint: snapshot sha256(JSON.stringify(projects.map(p=>p.projectId).sort()))
+//      truoc/sau. Persistence dung file cu lam ground-truth qua loadRegistry.
+// Reason constants export qua REMOVE_REASONS de test khang dinh.
+export const REMOVE_REASONS = Object.freeze({
+  MISSING_PROJECT_ID: 'MISSING_PROJECT_ID',
+  REGISTRY_SHAPE_INVALID: 'REGISTRY_SHAPE_INVALID',
+  AMBIGUOUS_IDENTITY: 'AMBIGUOUS_IDENTITY',
+  CONTROL_PLANE_REMOVAL_FORBIDDEN: 'CONTROL_PLANE_REMOVAL_FORBIDDEN',
+  PERSISTENCE_INTEGRITY: 'PERSISTENCE_INTEGRITY',
+});
+
+function fingerprintProjectsList(projects) {
+  const ids = (projects || []).map((p) => (p && p.projectId) || '').sort();
+  return crypto.createHash('sha256').update(JSON.stringify(ids)).digest('hex');
+}
+
+export function removeProject({ projectId, registry, registryPath = DEFAULT_REGISTRY_PATH, actor = null } = {}) {
+  // Gate 1: projectId shape — fail-closed tren identity mo ho.
+  if (!projectId || typeof projectId !== 'string') {
+    return { ok: false, stage: 'identity', reason: REMOVE_REASONS.MISSING_PROJECT_ID };
+  }
+  // Gate 2: registry shape — khong suy luan, khong sua, fail-closed.
+  if (!registry || typeof registry !== 'object' || !Array.isArray(registry.projects)) {
+    return { ok: false, stage: 'registry', reason: REMOVE_REASONS.REGISTRY_SHAPE_INVALID };
+  }
+  // Idempotency gate: tim khong ra -> no-op, khong phai loi. Tra registry goc (khong mutate).
+  const matches = registry.projects.filter((p) => p && p.projectId === projectId);
+  if (matches.length === 0) {
+    return { ok: true, removed: false, registry, fingerprint: fingerprintProjectsList(registry.projects) };
+  }
+  if (matches.length > 1) {
+    return { ok: false, stage: 'identity', reason: REMOVE_REASONS.AMBIGUOUS_IDENTITY, matches: matches.length };
+  }
+  // Gate 5: control-plane khong duoc remove qua registry (fence GPT-REV-075).
+  if (matches[0].projectType === 'control-plane') {
+    return { ok: false, stage: 'authority', reason: REMOVE_REASONS.CONTROL_PLANE_REMOVAL_FORBIDDEN, projectId };
+  }
+  // Gate 6: deep clone registry truoc khi thao tac. Caller's input khong bi mutate.
+  const clone = JSON.parse(JSON.stringify(registry));
+  const beforeFp = fingerprintProjectsList(clone.projects);
+  const idx = clone.projects.findIndex((p) => p && p.projectId === projectId);
+  clone.projects.splice(idx, 1);
+  const afterFp = fingerprintProjectsList(clone.projects);
+  // Persistence truoc: saveRegistry ghi file cu, sau do re-load de verify ground-truth.
+  saveRegistry({ registry: clone, registryPath });
+  const reloaded = loadRegistry({ registryPath });
+  if (reloaded.projects.some((p) => p && p.projectId === projectId)) {
+    return { ok: false, stage: 'persistence', reason: REMOVE_REASONS.PERSISTENCE_INTEGRITY, projectId };
+  }
+  return { ok: true, removed: true, registry: reloaded, fingerprint: afterFp, beforeFingerprint: beforeFp, actor };
+}
