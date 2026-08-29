@@ -5,8 +5,9 @@ import {
   cacheKey, manifestHash, envFingerprint, cacheDirPath, artifactDirPath,
   checkCache, writeCache, prepareRuntime, createLock, cleanupExpired, verifyCacheIntegrity,
 } from './cache.mjs';
-import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync, realpathSync, openSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 
@@ -102,44 +103,63 @@ console.log('4. validateGate');
 }
 console.log('5. canonicalizeNodeArgs (Finding 2)');
 
-// GPT-REV-105 (Finding 3): concurrent lock thực — 2 process cùng tranh giành 1 key.
+// GPT-REV-105 (Finding 3): concurrent lock thực (cross-process) + owner-only + stale-safe.
 {
   const lockRoot = join(tmpdir(), 'ai-pr-reviewer-lock-test');
   try { rmSync(lockRoot, { recursive: true, force: true }); } catch {}
-  const lockKey = 'concurrentreallock00000000000000000000000000000000000000000000000000000000000000';
-  const lock = createLock(lockRoot, lockKey);
-  const childScript = join(lockRoot, 'lockchild.mjs');
   mkdirSync(lockRoot, { recursive: true });
-  writeFileSync(childScript, `
-import { createLock } from ${JSON.stringify(join(process.cwd(), 'mcp-test-evidence', 'cache.mjs'))};
+  const lockKey = 'concurrentreallock00000000000000000000000000000000000000000000000000000000000000';
+  const cacheMod = JSON.stringify(pathToFileURL(join(process.cwd(), 'mcp-test-evidence', 'cache.mjs')).href);
+  // Child (PID khác) giữ khóa 700ms rồi release → test parent (PID khác) bị chặn.
+  const holdScript = join(lockRoot, 'lockhold.mjs');
+  writeFileSync(holdScript, `
+import { createLock } from ${cacheMod};
 const lock = createLock(${JSON.stringify(lockRoot)}, ${JSON.stringify(lockKey)});
 (async () => {
   await lock.acquire(5000);
-  await new Promise(r => setTimeout(r, 400));
+  await new Promise(r => setTimeout(r, 2500));
   lock.release();
   process.exit(0);
-})().catch(e => { console.error(e.message); process.exit(2); });
+})().catch(e => { console.error(e.message); process.exit(3); });
 `);
-  // owner (process cha) giữ khóa trước.
-  await lock.acquire(1000);
-  let childTimedOut = false;
-  const child = spawn(process.execPath, [childScript], { stdio: 'ignore' });
-  await new Promise((resolve) => {
-    const t = setTimeout(() => { childTimedOut = true; child.kill(); resolve(); }, 1500);
-    child.on('exit', (code) => { clearTimeout(t); resolve(); });
-  });
-  lock.release();
-  assert.strictEqual(childTimedOut, false, 'child chờ parent release rồi acquire thành công (không timeout)');
+  const child = spawn(process.execPath, [holdScript], { stdio: 'ignore' });
+  const lock = createLock(lockRoot, lockKey);
+  // Đợi child thực sự giữ khóa (lockfile xuất hiện + owner = child pid) trước khi parent thử.
+  const deadlineWait = Date.now() + 5000;
+  while (Date.now() < deadlineWait) {
+    if (existsSync(lock.lockFile)) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // Parent (PID khác với child) cố acquire cùng key → phải timeout (child đang giữ).
+  let parentTimedOut = false;
+  try { await lock.acquire(800); } catch (e) { parentTimedOut = /LOCK_TIMEOUT/.test(e.message); }
+  assert.strictEqual(parentTimedOut, true, 'cross-process: parent bị chặn bởi child giữ khóa (LOCK_TIMEOUT)');
+  await new Promise((res) => child.on('exit', res)); // đợi child xong
+
+  // owner-only release: parent tạo lock, child (PID khác) gọi release → KHÔNG xóa lockfile.
+  const ownKey = 'owneronlylock00000000000000000000000000000000000000000000000000000000000000';
+  const ownLock = createLock(lockRoot, ownKey);
+  await ownLock.acquire(1000);
+  const ownChild = join(lockRoot, 'ownchild.mjs');
+  writeFileSync(ownChild, `
+import { createLock } from ${cacheMod};
+const lock = createLock(${JSON.stringify(lockRoot)}, ${JSON.stringify(ownKey)});
+lock.release(); // PID khác → không được xóa lockfile của owner
+process.exit(0);
+`);
+  await new Promise((res) => { const c = spawn(process.execPath, [ownChild], { stdio: 'ignore' }); c.on('exit', res); });
+  assert.strictEqual(ownLock.isLocked(), true, 'owner-only release: child (PID khác) không xóa lockfile của owner');
+  ownLock.release();
+
   // stale-safe: lockfile ghi PID không tồn tại → acquire phá được ngay.
   const staleKey = 'stalelock0000000000000000000000000000000000000000000000000000000000000000';
   const staleLock = createLock(lockRoot, staleKey);
-  const staleFile = staleLock.lockFile;
-  writeFileSync(staleFile, String(999999));
+  writeFileSync(staleLock.lockFile, String(999999));
   await staleLock.acquire(1000);
   assert.strictEqual(staleLock.isLocked(), true, 'stale lock (PID chết) bị break');
   staleLock.release();
 }
-console.log('6. concurrent lock thực + stale-safe (Finding 3)');
+console.log('6. concurrent lock thực (cross-process) + owner-only release + stale-safe (Finding 3)');
 
 console.log('=== Cache tests ===');
 const fakeRoot = join(tmpdir(), 'ai-pr-reviewer-evidence', 'testproj');
@@ -195,7 +215,6 @@ console.log('11. writeCache + checkCache hit');
 
 // GPT-REV-103 (hardened): verifyCacheIntegrity phát tampered/swapped meta.
 // Đọc meta thật từ disk để xác minh integrity (hit trả về subset, không có cacheKey).
-const { readFileSync } = await import('node:fs');
 const realMeta = JSON.parse(readFileSync(join(cd, key + '.meta.json'), 'utf8'));
 assert.strictEqual(verifyCacheIntegrity(realMeta, key), true, 'meta ghi đúng key hợp lệ');
 const tampered = { ...realMeta, cacheKey: '0'.repeat(64), projectId: 'evil' };
