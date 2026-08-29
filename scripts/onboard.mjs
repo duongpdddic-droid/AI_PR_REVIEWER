@@ -8,10 +8,13 @@
 //
 // usage:
 //   node onboard.mjs --help
-//   node onboard.mjs status   --manifest .agent/project.json [--registry <path>]
-//   node onboard.mjs onboard  --manifest .agent/project.json [--registry <path>] [--worktree <path>|--remote <url>]
-//   node onboard.mjs repair   --manifest .agent/project.json [--registry <path>] [--worktree <path>|--remote <url>]
-//   node onboard.mjs offboard --manifest .agent/project.json [--registry <path>]
+//   node onboard.mjs status   --manifest .agent/project.json [--registry <path>] [--worktree <path>] [--bridge-home <dir>]
+//   node onboard.mjs register --manifest .agent/project.json [--registry <path>] [--worktree <path>|--remote <url>]
+//   node onboard.mjs onboard  --manifest .agent/project.json [--registry <path>] [--worktree <path>|--remote <url>] [--bridge-home <dir>]
+//   node onboard.mjs repair   --manifest .agent/project.json [--registry <path>] [--worktree <path>|--remote <url>] [--bridge-home <dir>]
+//   node onboard.mjs offboard --manifest .agent/project.json [--registry <path>] [--worktree <path>] [--bridge-home <dir>]
+//   node onboard.mjs hook install|repair|update --worktree <path> [--bridge-home <dir>]
+// Readiness is DERIVED (never persisted): registry+hooks READY / PARTIAL / NOT_ONBOARDED.
 import { runOnboard, HELP } from './project-onboard.mjs';
 
 function out(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
