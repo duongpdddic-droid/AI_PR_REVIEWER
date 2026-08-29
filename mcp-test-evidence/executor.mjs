@@ -11,7 +11,8 @@
  * Không commit/push/label/merge/deploy.
  */
 import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, basename, sep } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { redact } from '../scripts/test-evidence-reporter.mjs';
 
 
@@ -44,6 +45,77 @@ export function isArgsSafe(args) {
   return true;
 }
 
+// GPT-REV-102 — executor allowlist thật:
+// - Chỉ executable allowlisted (ưu tiên process.execPath / node).
+// - Cấm powershell/cmd/bash/sh/curl và arbitrary binary.
+// - Entrypoint (step.command) phải được resolve + realpath canonical nằm trong project root.
+// - Cấm absolute path, traversal, symlink/junction escape, dangerous flags, shell execution.
+const ALLOWED_EXEC_BASENAMES = new Set([
+  'node', 'node.exe',
+]);
+// GPT-REV-102 (hardened): forbidden executables - defense-in-depth, cấm tuyệt đối
+// shell/interpreter/destructive cli/pkg managers/network tools.
+const FORBIDDEN_EXECUTABLES = new Set([
+  'bash', 'sh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe',
+  'python', 'python3', 'py', 'npx', 'npm', 'pnpm', 'yarn',
+  'rm', 'del', 'curl', 'wget', 'git', 'ssh', 'scp', 'cat', 'grep',
+]);
+// Whitelist flag theo từng executable. Node CHỈ cho phép flag an toàn;
+// '-e'/'--eval'/'-p' (eval) BỊ CẤM → không chạy code tùy ý qua argument.
+const ALLOWED_FLAGS_BY_EXE = {
+  node: new Set(['--check', '--version', '-v', '--help', '--input-type', '--trace-warnings', '--stack-trace-limit']),
+  'node.exe': new Set(['--check', '--version', '-v', '--help', '--input-type', '--trace-warnings', '--stack-trace-limit']),
+};
+const MAX_STEP_ARGS = 32;
+
+export function isExecutableAllowlisted(command) {
+  const base = basename(command).toLowerCase();
+  if (FORBIDDEN_EXECUTABLES.has(base)) return false;
+  return ALLOWED_EXEC_BASENAMES.has(base);
+}
+
+export function isFlagsAllowed(exeBasename, args) {
+  const allowed = ALLOWED_FLAGS_BY_EXE[(exeBasename || '').toLowerCase()];
+  if (!allowed) return false;
+  for (const a of (args || [])) {
+    if (typeof a !== 'string') continue;
+    if (a.startsWith('-') && !allowed.has(a)) return false;
+  }
+  return true;
+}
+
+export function resolveEntrypoint(command, root) {
+  // Absolute path: chỉ cho phép nếu basename nằm trong allowlist (vd process.execPath = node).
+  // Cấm absolute path trỏ tới file ngoài hệ thống (sandbox escape).
+  if (/^[\\/]/.test(command) || /^[a-zA-Z]:[\\/]/.test(command)) {
+    if (!isExecutableAllowlisted(command)) {
+      throw new Error(`entrypoint '${command}' là absolute path không nằm trong allowlist — bị cấm`);
+    }
+    return command;
+  }
+  // Traversal.
+  if (command.includes('..') || command.includes('\\..') || command.includes('/..')) {
+    throw new Error(`entrypoint '${command}' chứa path traversal — bị cấm`);
+  }
+  const candidate = resolve(root, command);
+  let real;
+  try {
+    real = realpathSync(candidate);
+  } catch {
+    throw new Error(`entrypoint '${command}' không tồn tại hoặc không thể resolve`);
+  }
+  const realRoot = realpathSync(root);
+  // Containment: không cho thoát khỏi root (symlink/junction escape).
+  if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+    throw new Error(`entrypoint '${command}' nằm ngoài project root — bị cấm`);
+  }
+  // Allowlist executable.
+  if (!isExecutableAllowlisted(real)) {
+    throw new Error(`executable '${real}' không nằm trong allowlist — bị cấm`);
+  }
+  return real;
+}
+
 export function validateStep(step, manifest, root) {
   const errors = [];
   if (!step || typeof step !== 'object') return { valid: false, errors: ['step không phải object'] };
@@ -55,11 +127,25 @@ export function validateStep(step, manifest, root) {
     errors.push('step.command rỗng');
   } else if (!isEntrypointSafe(step.command, root)) {
     errors.push(`step.command '${step.command}' chứa path traversal`);
+  } else if (/[\\/]/.test(step.command)) {
+    // command chứa dấu phân cách → phải là file trong repo, resolve + realpath canonical.
+    try {
+      resolveEntrypoint(step.command, root);
+    } catch (e) {
+      errors.push(`step.command: ${e.message}`);
+    }
+  } else if (!isExecutableAllowlisted(step.command)) {
+    // bare executable (system PATH) → chỉ cần nằm trong allowlist (node).
+    errors.push(`step.command '${step.command}' không nằm trong executable allowlist`);
   }
   if (step.args !== undefined && !Array.isArray(step.args)) {
     errors.push('step.args phải là array');
-  } else if (!isArgsSafe(step.args || [])) {
+  } else if (!Array.isArray(step.args) || step.args.length > MAX_STEP_ARGS) {
+    errors.push('step.args vượt quá MAX_STEP_ARGS (' + MAX_STEP_ARGS + ')');
+  } else if (!isArgsSafe(step.args)) {
     errors.push('step.args chứa shell-meta hoặc node dangerous flag (-e/--eval/-p/-pe)');
+  } else if (!isFlagsAllowed(basename(step.command || ''), step.args)) {
+    errors.push('step.args chứa flag không nằm trong whitelist cho executable');
   }
   if (step.timeout !== undefined) {
     if (typeof step.timeout !== 'number' || step.timeout <= 0 || step.timeout > MAX_STEP_TIMEOUT_MS) {
@@ -101,7 +187,7 @@ export function buildSandboxEnv(root, extra = {}) {
   return env;
 }
 
-export async function runStep(step, { cwd, env, runner = spawn }) {
+export async function runStep(step, { cwd, env, runner = spawn, root }) {
   const started = Date.now();
   const safeEnv = env || buildSandboxEnv(cwd || process.cwd());
   const timeoutMs = step.timeout ?? DEFAULT_STEP_TIMEOUT_MS;
@@ -111,12 +197,24 @@ export async function runStep(step, { cwd, env, runner = spawn }) {
   let child = null;
   let resolve;
 
+  // GPT-REV-102: resolve + realpath canonical entrypoint, fail-closed trước spawn.
+  // Bare executable (không có dấu phân cách) đã allowlisted → chạy từ system PATH.
+  // Command chứa dấu phân cách → resolve file trong repo + kiểm tra containment.
+  const baseRoot = root || cwd || process.cwd();
+  const entrypoint = /[\\/]/.test(step.command)
+    ? resolveEntrypoint(step.command, baseRoot)
+    : (isExecutableAllowlisted(step.command) ? step.command : (() => {
+        throw new Error(`executable '${step.command}' không nằm trong allowlist — bị cấm`);
+      })());
+
   const finish = (extra) => {
     clearTimeout(timer);
     resolve({
       ...extra,
       stdout: redact(stdout),
       stderr: redact(stderr),
+      stdoutBytes: Buffer.byteLength(stdout, 'utf8'),
+      stderrBytes: Buffer.byteLength(stderr, 'utf8'),
       stdoutTruncated, stderrTruncated,
       duration: Date.now() - started,
     });
@@ -128,7 +226,7 @@ export async function runStep(step, { cwd, env, runner = spawn }) {
     finish({ exitCode: -1, timedOut: true, error: 'timeout' });
   }, timeoutMs);
 
-  child = runner(step.command, step.args || [], {
+  child = runner(entrypoint, step.args || [], {
     cwd, env: safeEnv, stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, shell: false,
   });
@@ -182,7 +280,7 @@ export async function runGate(manifest, gateId, opts = {}) {
   const failureCodes = [];
 
   for (const step of steps) {
-    const result = await runStep(step, { cwd, env, runner: opts.runner });
+    const result = await runStep(step, { cwd, env, runner: opts.runner, root });
     const ok = result.exitCode === 0 && !result.timedOut
       && !result.stdoutTruncated && !result.stderrTruncated;
     if (ok) passedCount++;
@@ -191,7 +289,8 @@ export async function runGate(manifest, gateId, opts = {}) {
       id: step.id, name: step.name, command: step.command, args: step.args || [],
       exitCode: result.exitCode, timedOut: result.timedOut,
       stdoutTruncated: result.stdoutTruncated, stderrTruncated: result.stderrTruncated,
-      duration: result.duration, error: result.error,
+      stdoutBytes: result.stdoutBytes, stderrBytes: result.stderrBytes,
+      duration: result.duration, error: result.error, stdout: result.stdout, stderr: result.stderr,
     });
   }
 

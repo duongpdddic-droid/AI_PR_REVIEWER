@@ -110,8 +110,14 @@ try {
     'test-test-evidence.mjs',
     'test-temp-hygiene.mjs',
   ];
-  for (const suite of optionalSuites) {
-    const f = path.join(ROOT, 'scripts', suite);
+  // GPT-REV-104: đăng ký test suite của MCP Test Evidence (Issue #19 Phase 3) nằm
+  // ngoài scripts/ để full-verify tự chạy như 1 gate tổng hợp.
+  const mcpSuites = [
+    'mcp-test-evidence/test-executor.mjs',
+    'mcp-test-evidence/test-server.mjs',
+  ];
+  for (const suite of [...optionalSuites, ...mcpSuites]) {
+    const f = path.join(ROOT, suite);
     if (!fs.existsSync(f)) { add(`${suite} (bỏ qua — chưa tồn tại)`, true, 'skip'); continue; }
     const r = spawnSync(node, [f], { encoding: 'utf8', env: { ...process.env, FULL_VERIFY_CHILD: '1' } });
     add(suite, r.status === 0, r.status === 0 ? '' : (r.stdout || r.stderr || '').trim().split('\n').filter((l) => /FAIL|Error|assert/i.test(l)).slice(-3).join(' | ') || (r.stderr || '').trim().split('\n').slice(-3).join(' | '));

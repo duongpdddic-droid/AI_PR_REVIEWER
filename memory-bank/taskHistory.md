@@ -3,27 +3,6 @@
 > Archive từ `activeContext.md` ngày 22/08/2026 09:31 (vượt ngưỡng >5 entry COMPLETED).
 > Entry khởi tạo bộ khung 20/08/2026 xem `progress.md`.
 
-
-## 28/08/2026 09:49 — Issue #22 vòng 2: pre-push HEAD-Lock guard + unfreeze author gate
-
-### Mục tiêu
-Không chỉ dựa vào orchestrator phát hiện drift SAU push: chặn push branch PR đang FROZEN (approved | review-requested + agent:gpt) slide HEAD lệch lock ngay tại client; yêu cầu unfreeze có quyền.
-
-### Quyết định
-- Thêm pure `decidePrePushGuard` (review-contract.mjs): allow khi không PR open / chưa frozen / HEAD khớp lock (uncommitted thay đổi không đổi HEAD, không drift) / unfreeze hợp lệ; block fail-closed khi không đọc được state PR đã biết tồn tại.
-- `isUnfrozenAfter` nâng chuẩn: ngoài reason + mới hơn lock, phải do **authorized author** (repo owner qua `authorizedLogins`) tạo; author ngoài danh sách / thiếu author → fail-closed false.
-- Client theo `scripts/pre-push-guard.mjs` (CLI đọc stdin hook) + `scripts/setup-pre-push-hook.mjs` (cài `.git/hooks/pre-push` cục bộ, không commit).
-- Orchestrator truyền `authorizedLogins=[repo owner]` vào `isUnfrozenAfter`.
-
-### Deviation / Ghi nhận
-- GitHub KHÔNG chặn push server-side ở cấp nhãn → guard là phòng thủ LOCAL (defense-in-depth). Server-side protection = Phase follow-up; orchestrator read-before-mutation vẫn là tuyến 2.
-
-### Lỗi sửa trong phiên
-- `setup-pre-push-hook.mjs` dùng `import.meta.url.pathname` → path double-drive `C:\C:\...` trên Windows (hook fail). Fix bằng `fileURLToPath`. Ghi L-049.
-
-### Verification
-`test-pure-logic.mjs` 224/224 (thêm C.25 — 12 assert); `full-verify.mjs` 132/132 PASS. Commit `8b22e54` + `330d4bc`; push `cd41cfa..330d4bc` PR #23. Chưa handoff GPT (PR còn Draft, labels rỗng).
-
 ## 21/08/2026 23:05 — Tự động hoá routing đa repo — COMPLETED
 
 ### Mục tiêu

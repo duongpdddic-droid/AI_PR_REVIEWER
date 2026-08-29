@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert';
-import { validateStep, validateGate, isEntrypointSafe, isArgsSafe, runGate, runStep } from './executor.mjs';
+import { validateStep, validateGate, isEntrypointSafe, isArgsSafe, isExecutableAllowlisted, isFlagsAllowed, runGate, runStep } from './executor.mjs';
 import {
   cacheKey, manifestHash, envFingerprint, cacheDirPath, artifactDirPath,
-  checkCache, writeCache, prepareRuntime, createLock, cleanupExpired,
+  checkCache, writeCache, prepareRuntime, createLock, cleanupExpired, verifyCacheIntegrity,
 } from './cache.mjs';
 import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, sep } from 'node:path';
@@ -41,6 +41,26 @@ assert.strictEqual(validateStep({ ...ok, args: ['-e', 'x'] }, mf, root).valid, f
 assert.strictEqual(validateStep({ ...ok, args: ['x;y'] }, mf, root).valid, false);
 assert.strictEqual(validateStep({ ...ok, timeout: -1 }, mf, root).valid, false);
 assert.strictEqual(validateStep({ ...ok, timeout: 400000 }, mf, root).valid, false);
+// GPT-REV-102 (hardened): forbidden executable + flag whitelist + MAX_STEP_ARGS.
+assert.strictEqual(isExecutableAllowlisted('powershell'), false);
+assert.strictEqual(isExecutableAllowlisted('bash'), false);
+assert.strictEqual(isExecutableAllowlisted('cmd.exe'), false);
+assert.strictEqual(isExecutableAllowlisted('node'), true);
+assert.strictEqual(isExecutableAllowlisted('node.exe'), true);
+assert.strictEqual(isFlagsAllowed('node', ['--check']), true);
+assert.strictEqual(isFlagsAllowed('node', ['-v']), true);
+assert.strictEqual(isFlagsAllowed('node', ['--version']), true);
+assert.strictEqual(isFlagsAllowed('node', ['-e', 'x']), false, 'node -e (eval) bị cấm');
+assert.strictEqual(isFlagsAllowed('node', ['-p', 'x']), false, 'node -p (print) bị cấm');
+assert.strictEqual(isFlagsAllowed('node', ['--eval', 'x']), false, 'node --eval bị cấm');
+assert.strictEqual(isFlagsAllowed('node', ['--inspect']), false, 'node --inspect bị cấm');
+assert.strictEqual(isFlagsAllowed('node', ['--loader', 'x']), false, 'node --loader bị cấm');
+assert.strictEqual(validateStep({ ...ok, args: ['-e', 'process.exit(1)'] }, mf, root).valid, false, 'flag -e bị block qua whitelist');
+assert.strictEqual(validateStep({ ...ok, args: ['--inspect'] }, mf, root).valid, false, 'flag --inspect bị block qua whitelist');
+assert.strictEqual(validateStep({ ...ok, command: 'powershell', args: ['-c', 'x'] }, mf, root).valid, false, 'forbidden executable bị block');
+assert.strictEqual(validateStep({ ...ok, command: 'bash', args: ['-c', 'x'] }, mf, root).valid, false, 'forbidden executable bị block');
+assert.strictEqual(validateStep({ ...ok, args: new Array(33).fill('a') }, mf, root).valid, false, 'vượt MAX_STEP_ARGS bị block');
+assert.strictEqual(validateStep({ ...ok, args: new Array(32).fill('a') }, mf, root).valid, true, 'đúng MAX_STEP_ARGS được phép');
 console.log('3. validateStep');
 
 assert.deepStrictEqual(validateGate(mf, 'unit', root), { valid: true, errors: [] });
@@ -97,6 +117,20 @@ assert.strictEqual(hit.valid, true);
 assert.strictEqual(hit.headSha, head);
 assert.strictEqual(hit.gateId, gid);
 console.log('11. writeCache + checkCache hit');
+
+// GPT-REV-103 (hardened): verifyCacheIntegrity phát tampered/swapped meta.
+// Đọc meta thật từ disk để xác minh integrity (hit trả về subset, không có cacheKey).
+const { readFileSync } = await import('node:fs');
+const realMeta = JSON.parse(readFileSync(join(cd, key + '.meta.json'), 'utf8'));
+assert.strictEqual(verifyCacheIntegrity(realMeta, key), true, 'meta ghi đúng key hợp lệ');
+const tampered = { ...realMeta, cacheKey: '0'.repeat(64), projectId: 'evil' };
+assert.strictEqual(verifyCacheIntegrity(tampered, key), false, 'cacheKey sai bị phát');
+const swapped = { ...realMeta, gateId: 'other' };
+assert.strictEqual(verifyCacheIntegrity(swapped, key), false, 'recomputed key lệch do gateId đổi');
+const directHit = checkCache(cd, key);
+assert.strictEqual(directHit.manifestHash, mhStr, 'hit trả về manifestHash');
+assert.strictEqual(directHit.envFingerprint, efStr, 'hit trả về envFingerprint');
+console.log('11c. verifyCacheIntegrity (meta thật)');
 
 (async () => {
   // FAIL không cache — key riêng

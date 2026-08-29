@@ -164,8 +164,8 @@ async function run() {
     const tools = await rpc("tools/list", {});
     const names = tools.result.tools.map((t) => t.name);
     ok(JSON.stringify(names) === JSON.stringify(
-      ["test_status", "test_failures", "test_failure_detail", "test_log_excerpt", "test_finding_map"]),
-      `tools/list đủ 5 read-only tools (${names.join(", ")})`);
+      ["test_run", "test_status", "test_failures", "test_failure_detail", "test_log_excerpt", "test_finding_map", "test_self_prove"]),
+      `tools/list đủ 7 tools (test_run + 5 read-only + test_self_prove) (${names.join(", ")})`);
 
     const call = async (name, args) => {
       const r = await rpc("tools/call", { name, arguments: args });
@@ -235,7 +235,29 @@ async function run() {
     ok(wrongR.result?.isError === true && /không có report artifact/.test(wrongR.result.content[0].text),
       "GPT-REV-098: artifact từ manifest nội dung sai → test_status(headSha) fail-closed (không khớp canonical)");
 
-    // ── Negative fail-closed ────────────────────────────────────────
+    // ── GPT-REV-100: dispatch được await → textResult nhận value thực, không phải Promise ──
+    // Gọi test_self_prove (pure, không chạy thực) và assert data thực sự populate (không {}).
+    const sp = await call("test_self_prove", {
+      headSha: FAIL_HEAD, gate: "verify",
+      manifestHash: mhFail, envFingerprint: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      projectId: "fixture-project",
+    });
+    ok(sp.result && !sp.result.isError, "REV-100: test_self_prove không lỗi");
+    ok(typeof sp.data === "object" && sp.data.cacheKey && /^[0-9a-f]{64}$/.test(sp.data.cacheKey),
+      "REV-100: dispatch await → data có cacheKey thực (không phải {})");
+    ok(sp.data.selfProven === true, "REV-101: self_prove trả selfProven=true");
+    ok(sp.data.identityConsistent === true, "REV-101: identityConsistent=true (cache identity khớp)");
+    ok(sp.data.status !== "approved", "REV-101: KHÔNG tự gắn status:approved (pre-reviewer only self-proves)");
+
+    // GPT-REV-100: test_run cũng await đúng (chạy gate verify thực trên fixture) → data thực.
+    const tr = await call("test_run", {
+      headSha: FAIL_HEAD, gate: "verify",
+      manifestHash: mhFail, envFingerprint: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      projectId: "fixture-project",
+    });
+    ok(tr.result && !tr.result.isError && typeof tr.data === "object" && tr.data.cacheKey,
+      "REV-100: test_run dispatch await → data có cacheKey thực (không phải {})");
+
     console.log("[3] negative fail-closed");
     for (const c of [
       { name: "test_status", args: { reportId: "../evil" }, expect: "reportId" },

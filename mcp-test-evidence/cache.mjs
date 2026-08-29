@@ -79,6 +79,20 @@ function atomicWrite(filePath, content) {
   renameSync(tmp, filePath);
 }
 
+// GPT-REV-103 (hardened): xác minh identity của cache bằng cách recompute key từ
+// các trường định danh trong meta, đối chiếu với key yêu cầu. Ngăn tampered/
+// swapped meta khớp nhầm key (server-proven identity).
+export function verifyCacheIntegrity(meta, key) {
+  if (!meta || typeof meta !== 'object') return false;
+  // meta phải ghi chính key để đối chiếu trực tiếp.
+  if (meta.cacheKey !== key) return false;
+  // recompute độc lập từ các trường định danh (defense-in-depth).
+  const recomputed = cacheKey(
+    meta.projectId, meta.headSha, meta.manifestHash, meta.envFingerprint, meta.gateId,
+  );
+  return recomputed === key;
+}
+
 export function checkCache(cacheDirP, key) {
   const metaFile = join(cacheDirP, key + '.meta.json');
   if (!existsSync(metaFile)) return { valid: false, reason: 'MISSING' };
@@ -87,7 +101,8 @@ export function checkCache(cacheDirP, key) {
     const age = Date.now() - (meta.cachedAt || 0);
     if (age > CACHE_TTL_MS) return { valid: false, reason: 'TTL_EXPIRED', age };
     if (!meta.passed) return { valid: false, reason: 'NOT_PASS', passed: false };
-    return { valid: true, cachedAt: meta.cachedAt, headSha: meta.headSha, gateId: meta.gateId };
+    if (!verifyCacheIntegrity(meta, key)) return { valid: false, reason: 'IDENTITY_MISMATCH' };
+    return { valid: true, cachedAt: meta.cachedAt, headSha: meta.headSha, gateId: meta.gateId, manifestHash: meta.manifestHash, envFingerprint: meta.envFingerprint };
   } catch { return { valid: false, reason: 'CORRUPTED' }; }
 }
 
