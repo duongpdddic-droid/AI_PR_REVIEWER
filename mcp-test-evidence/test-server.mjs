@@ -55,6 +55,13 @@ function buildFixture() {
   const STALE_HEAD = "3333333333333333333333333333333333333333";
   manifest.headSha = STALE_HEAD;
   writeFileSync(path.join(agent, "test-manifest.json"), JSON.stringify(manifest, null, 2));
+  // GPT-REV-105 (Finding 2): tạo stub scripts trong fixture root để test_run thực thi
+  // (canonicalizeNodeArgs resolve + realpath containment). integration FAIL để test_run FAIL.
+  const scriptsDir = path.join(root, "scripts");
+  mkdirSync(scriptsDir, { recursive: true });
+  writeFileSync(path.join(scriptsDir, "full-verify.mjs"), "console.log('syntax ok');\n");
+  writeFileSync(path.join(scriptsDir, "test-pure-logic.mjs"), "console.log('unit ok');\n");
+  writeFileSync(path.join(scriptsDir, "test-integration-orchestrator.mjs"), "console.error('integration boom'); process.exit(1);\n");
   const mhPass = computeManifestHash({ ...manifest, headSha: PASS_HEAD });
   const mhFail = computeManifestHash({ ...manifest, headSha: FAIL_HEAD });
   const PASS_REPORT = computeReportId(PASS_HEAD, mhPass);
@@ -164,8 +171,8 @@ async function run() {
     const tools = await rpc("tools/list", {});
     const names = tools.result.tools.map((t) => t.name);
     ok(JSON.stringify(names) === JSON.stringify(
-      ["test_run", "test_status", "test_failures", "test_failure_detail", "test_log_excerpt", "test_finding_map", "test_self_prove"]),
-      `tools/list đủ 7 tools (test_run + 5 read-only + test_self_prove) (${names.join(", ")})`);
+      ["test_run", "test_status", "test_failures", "test_failure_detail", "test_log_excerpt", "test_finding_map", "test_verify_identity"]),
+      `tools/list đủ 7 tools (test_run + 5 read-only + test_verify_identity) (${names.join(", ")})`);
 
     const call = async (name, args) => {
       const r = await rpc("tools/call", { name, arguments: args });
@@ -235,21 +242,32 @@ async function run() {
     ok(wrongR.result?.isError === true && /không có report artifact/.test(wrongR.result.content[0].text),
       "GPT-REV-098: artifact từ manifest nội dung sai → test_status(headSha) fail-closed (không khớp canonical)");
 
-    // ── GPT-REV-100: dispatch được await → textResult nhận value thực, không phải Promise ──
-    // Gọi test_self_prove (pure, không chạy thực) và assert data thực sự populate (không {}).
-    const sp = await call("test_self_prove", {
-      headSha: FAIL_HEAD, gate: "verify",
-      manifestHash: mhFail, envFingerprint: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-      projectId: "fixture-project",
+    // ── GPT-REV-105 (Finding 1): test_verify_identity — server tự tính real identity ──
+    // Server lấy real Git HEAD (SKIP_REMOTE → manifest.headSha), canonical manifestHash,
+    // allowlisted envFingerprint. Caller chỉ assert expected; mismatch → fail-closed.
+    const vi = await call("test_verify_identity", {
+      gate: "verify", projectId: "fixture-project",
     });
-    ok(sp.result && !sp.result.isError, "REV-100: test_self_prove không lỗi");
-    ok(typeof sp.data === "object" && sp.data.cacheKey && /^[0-9a-f]{64}$/.test(sp.data.cacheKey),
-      "REV-100: dispatch await → data có cacheKey thực (không phải {})");
-    ok(sp.data.selfProven === true, "REV-101: self_prove trả selfProven=true");
-    ok(sp.data.identityConsistent === true, "REV-101: identityConsistent=true (cache identity khớp)");
-    ok(sp.data.status !== "approved", "REV-101: KHÔNG tự gắn status:approved (pre-reviewer only self-proves)");
+    ok(vi.result && !vi.result.isError, "REV-105: test_verify_identity không lỗi");
+    ok(typeof vi.data === "object" && vi.data.cacheKey && /^[0-9a-f]{64}$/.test(vi.data.cacheKey),
+      "REV-105: identity trả cacheKey thực (không phải {})");
+    ok(vi.data.selfComputed === true, "REV-105: selfComputed=true (server tự tính)");
+    ok(vi.data.status !== "approved", "REV-105: KHÔNG tự gắn status:approved");
+    // SKIP_REMOTE → real Git HEAD null → fallback manifest.headSha (STALE_HEAD, committed).
+    ok(vi.data.headSha === STALE_HEAD, "REV-105: real HEAD = manifest.headSha (SKIP_REMOTE fallback)");
+    // canonical manifestHash tính từ manifest runtime copy (headSha=STALE_HEAD).
+    const mhStale = computeManifestHash({ ...manifest, headSha: STALE_HEAD });
+    ok(vi.data.manifestHash === mhStale, "REV-105: canonical manifestHash khớp manifest runtime (headSha=STALE_HEAD)");
+    // mismatch fail-closed: caller assert sai expected → lỗi IDENTITY_MISMATCH.
+    const bad = await call("test_verify_identity", {
+      gate: "verify", projectId: "fixture-project",
+      expectHeadSha: "0000000000000000000000000000000000000000",
+    });
+    ok(bad.result?.isError === true && /IDENTITY_MISMATCH/.test(bad.result.content[0].text),
+      "REV-105: expectHeadSha sai → fail-closed IDENTITY_MISMATCH");
 
-    // GPT-REV-100: test_run cũng await đúng (chạy gate verify thực trên fixture) → data thực.
+    // ── GPT-REV-100/105 (Finding 4): test_run tạo CompactReport vào runtime store ──
+    // → test_status/failures/detail/log đọc được qua reportId.
     const tr = await call("test_run", {
       headSha: FAIL_HEAD, gate: "verify",
       manifestHash: mhFail, envFingerprint: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
@@ -257,6 +275,20 @@ async function run() {
     });
     ok(tr.result && !tr.result.isError && typeof tr.data === "object" && tr.data.cacheKey,
       "REV-100: test_run dispatch await → data có cacheKey thực (không phải {})");
+    ok(typeof tr.data.reportId === "string" && /^[0-9a-f]{16}$/.test(tr.data.reportId),
+      "REV-105: test_run trả reportId (CompactReport đã ghi runtime store)");
+    const runReportId = tr.data.reportId;
+    // status qua reportId (report do test_run tạo, nằm runtime store).
+    const st = await call("test_status", { reportId: runReportId, projectId: "fixture-project" });
+    ok(st.result && !st.result.isError && st.data.passed === false && st.data.blocking === 2,
+      "REV-105: test_status đọc được report runtime store (blocking=2)");
+    // detail + log qua cùng reportId.
+    const dt = await call("test_failure_detail", { reportId: runReportId, failureIndex: 0 });
+    ok(dt.result && !dt.result.isError && /STEP_UNIT_FAIL/.test(dt.data.failure || ""),
+      "REV-105: test_failure_detail đọc được failure từ runtime report");
+    const lg = await call("test_log_excerpt", { reportId: runReportId, failureIndex: 0, maxLines: 3 });
+    ok(lg.result && !lg.result.isError && typeof lg.data.logExcerpt === "string",
+      "REV-105: test_log_excerpt đọc được log từ runtime report");
 
     console.log("[3] negative fail-closed");
     for (const c of [

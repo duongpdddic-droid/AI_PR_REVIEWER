@@ -5,9 +5,10 @@
  * Runtime/artifacts ngoai Git repo. TTL 24h. PASS-only cache. Concurrent lock. Atomic write.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, openSync, closeSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { computeReportId, saveReport } from '../scripts/test-evidence-reporter.mjs';
 
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -39,33 +40,94 @@ export function artifactDirPath(key, root) {
   return join(root, 'artifacts', key.slice(0, 2));
 }
 
+// GPT-REV-105 (hardened): một implementation lock duy nhất — atomic `wx` open
+// (không TOCTOU), chỉ owner (PID ghi trong lockfile) mới được release, stale-safe
+// (PID không còn chạy → break lock). Multi-process an toàn.
 export function createLock(root, key) {
-  let lockFile, held = false;
-  const getLockFile = () => {
-    if (!lockFile) {
-      const sub = key.slice(0, 2);
-      const d = join(root, 'locks', sub);
-      mkdirSync(d, { recursive: true });
-      lockFile = join(d, key + '.lock');
+  const sub = key.slice(0, 2);
+  const d = join(root, 'locks', sub);
+  mkdirSync(d, { recursive: true });
+  const lockFile = join(d, key + '.lock');
+  let held = false;
+
+  function pidAlive(pid) {
+    if (!pid || pid <= 0) return false;
+    // process.kill(pid, 0): không throw → alive; ESRCH → chết; EPERM → alive (tồn tại).
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return e.code === 'EPERM';
     }
-    return lockFile;
-  };
+  }
+
   return {
     async acquire(timeoutMs = 5000) {
-      const lf = getLockFile();
       const deadline = Date.now() + timeoutMs;
-      while (existsSync(lf)) {
-        if (Date.now() > deadline) throw new Error('LOCK_TIMEOUT:' + key);
-        await new Promise(r => setTimeout(r, 100));
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        let fd;
+        try {
+          fd = openSync(lockFile, 'wx', 0o644); // atomic: fail nếu đã tồn tại
+          writeSync(fd, String(process.pid));
+          closeSync(fd);
+          held = true;
+          return;
+        } catch (e) {
+          if (e.code !== 'EEXIST') throw e;
+          // Stale-safe: nếu owner cũ không còn chạy → xóa rồi retry.
+          try {
+            const owner = Number(readFileSync(lockFile, 'utf8').trim());
+            if (!pidAlive(owner)) { try { unlinkSync(lockFile); } catch {} continue; }
+          } catch { /* lockfile hỏng → coi như stale */ try { unlinkSync(lockFile); } catch {} continue; }
+          if (Date.now() > deadline) throw new Error('LOCK_TIMEOUT:' + key);
+          await new Promise(r => setTimeout(r, 50));
+        }
       }
-      writeFileSync(lf, String(process.pid), { mode: 0o644 });
-      held = true;
     },
     release() {
-      if (held && lockFile) { held = false; try { unlinkSync(lockFile); } catch {} }
+      if (!held) return;
+      held = false;
+      // Owner-only: chỉ xóa nếu lockfile ghi PID của chính mình.
+      try {
+        const owner = Number(readFileSync(lockFile, 'utf8').trim());
+        if (owner === process.pid) unlinkSync(lockFile);
+      } catch { /* lockfile đã mất → coi như đã release */ }
     },
-    isLocked() { return lockFile ? existsSync(lockFile) : false; },
+    isLocked() { return existsSync(lockFile); },
+    get lockFile() { return lockFile; },
   };
+}
+
+// GPT-REV-105: build canonical CompactReport (schema v1) từ kết quả runGate và
+// persist vào runtime artifact store. reportId = computeReportId(headSha, manifestHash).
+// Chặn absolute path / traversal khi lưu (safePath trong saveReport).
+export function writeRuntimeReport({ projectId, headSha, manifestHash, gateId, envFingerprint }, result, root) {
+  const reportId = computeReportId(headSha, manifestHash);
+  const failures = (result.stepResults || [])
+    .filter(sr => sr.exitCode !== 0 || sr.timedOut || sr.stdoutTruncated || sr.stderrTruncated)
+    .map(sr => ({
+      code: `STEP_${String(sr.id).toUpperCase().replace(/[^A-Z0-9]/g, '_')}_FAIL`,
+      step: sr.id,
+      detail: `command=${sr.command} args=${JSON.stringify(sr.args)} exitCode=${sr.exitCode} timedOut=${!!sr.timedOut}`,
+      logExcerpt: (sr.stderr || sr.stdout || '').slice(0, 4000),
+    }));
+  const report = {
+    schemaVersion: '1.0',
+    headSha,
+    passed: result.passed,
+    tests: { passed: result.passedCount, failed: result.failedCount, total: result.total },
+    duration: result.duration,
+    reportId,
+    manifestHash,
+    blocking: result.passed ? 0 : Math.max(1, failures.length),
+    failureCodes: result.failureCodes || [],
+    failures,
+    environmentFingerprint: envFingerprint,
+  };
+  const artifactDir = artifactDirPath(cacheKey(projectId, headSha, manifestHash, envFingerprint, gateId), root);
+  saveReport(report, artifactDir);
+  return { reportId, artifactDir };
 }
 
 function ensureDir(filePath) {

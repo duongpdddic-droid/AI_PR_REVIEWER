@@ -34,7 +34,8 @@ import {
   validateReport, MAX_LOG_EXCERPT_LINES, computeReportId, computeManifestHash,
 } from '../scripts/test-evidence-reporter.mjs';
 import { runGate, validateGate, buildSandboxEnv, DEFAULT_STEP_TIMEOUT_MS } from './executor.mjs';
-import { cacheKey, checkCache, writeCache, prepareRuntime, CACHE_TTL_MS, envFingerprint as computeEnvFingerprint, verifyCacheIntegrity } from './cache.mjs';
+import { cacheKey, checkCache, writeCache, prepareRuntime, artifactDirPath, CACHE_TTL_MS, envFingerprint as computeEnvFingerprint, createLock, writeRuntimeReport } from './cache.mjs';
+import { computeEnvironmentFingerprint } from '../scripts/test-evidence-reporter.mjs';
 
 export const SERVER_INFO = { name: 'mcp-test-evidence', version: '0.1.0' };
 
@@ -50,6 +51,18 @@ function rootOf(env = process.env) {
   return path.resolve(env.MCP_TEST_EVIDENCE_ROOT || process.cwd());
 }
 
+// GPT-REV-105 (Finding 1): server tự lấy real Git HEAD, không tin caller.
+// Fallback manifest.headSha khi SKIP_REMOTE (test/deterministic).
+function realGitHead(root, skipRemote) {
+  if (skipRemote) return null; // null → caller ép dùng manifest.headSha
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      encoding: 'utf8', cwd: root, windowsHide: true, timeout: 10_000,
+    }).trim();
+    return HEX40.test(out) ? out : null;
+  } catch { return null; }
+}
+
 function buildContext(env = process.env) {
   const root = rootOf(env);
   const manifest = loadManifest(env.MCP_TEST_EVIDENCE_MANIFEST || '.agent/test-manifest.json', root);
@@ -57,7 +70,16 @@ function buildContext(env = process.env) {
   const artifactDir = path.resolve(env.MCP_TEST_EVIDENCE_ARTIFACT_DIR || path.join(root, '.agent', 'test-evidence'));
   const repo = env.MCP_TEST_EVIDENCE_REPO || manifest.repository;
   const skipRemote = env.MCP_TEST_EVIDENCE_SKIP_REMOTE === '1';
-  return { root, manifest, project, artifactDir, repo, skipRemote };
+  // GPT-REV-105: real Git HEAD — null khi skipRemote hoặc git fail.
+  const realHead = realGitHead(root, skipRemote);
+  // canonical manifestHash (runtime copy với headSha=HEAD nếu có realHead).
+  const manifestForHash = realHead && manifest.headSha !== realHead
+    ? { ...manifest, headSha: realHead }
+    : manifest;
+  const canonicalManifestHash = computeManifestHash(manifestForHash);
+  // allowlisted envFingerprint (chỉ version/platform/arch).
+  const canonicalEnvFingerprint = computeEnvironmentFingerprint();
+  return { root, manifest, project, artifactDir, repo, skipRemote, realHead, canonicalManifestHash, canonicalEnvFingerprint };
 }
 
 function gitRemoteMatches(manifestRepo, root) {
@@ -105,7 +127,8 @@ function listReports(artifactDir) {
   return reports;
 }
 
-export function findReport(artifactDir, { reportId, headSha, manifestHash }) {
+export function findReport(artifactDirs, { reportId, headSha, manifestHash }) {
+  const dirs = Array.isArray(artifactDirs) ? artifactDirs : [artifactDirs];
   const hasId = reportId !== undefined && reportId !== null;
   const hasSha = headSha !== undefined && headSha !== null;
   if (hasId && hasSha) {
@@ -115,29 +138,35 @@ export function findReport(artifactDir, { reportId, headSha, manifestHash }) {
     if (typeof reportId !== 'string' || !HEX16.test(reportId)) {
       throw new Error('reportId: cần 16-hex (chống path traversal)');
     }
-    const safe = safePath(reportId, artifactDir);
-    if (!safe.ok) throw new Error(safe.reason);
-    const report = readJson(safe.filePath);
-    const v = validateReport(report);
-    if (!v.valid) throw new Error(`report artifact sai schema: ${v.errors.join('; ')}`);
-    // bind identity tuyệt đối: filename/requested id === report.reportId === canonical(head+manifestHash)
-    if (report.reportId !== reportId) {
-      throw new Error(`report artifact identity lệch: file=${reportId} reportId=${report.reportId}`);
+    // GPT-REV-105 (Finding 4): tìm report qua nhiều dir (committed + runtime store).
+    for (const artifactDir of dirs) {
+      const safe = safePath(reportId, artifactDir);
+      if (!safe.ok) continue;
+      let report;
+      try { report = readJson(safe.filePath); } catch { continue; }
+      const v = validateReport(report);
+      if (!v.valid) continue;
+      // bind identity tuyệt đối: filename/requested id === report.reportId === canonical(head+manifestHash)
+      if (report.reportId !== reportId) continue;
+      const canonical = computeReportId(report.headSha, report.manifestHash);
+      if (report.reportId !== canonical) continue;
+      return report;
     }
-    const canonical = computeReportId(report.headSha, report.manifestHash);
-    if (report.reportId !== canonical) {
-      throw new Error(`report artifact reportId ${report.reportId} không khớp canonical (head+manifestHash)`);
-    }
-    return report;
+    throw new Error(`reportId ${reportId}: không có artifact hợp lệ (schema + canonical binding) trong ${dirs.length} dir`);
   }
   if (hasSha) {
     if (typeof headSha !== 'string' || !HEX40.test(headSha)) {
       throw new Error('headSha: cần full 40-hex');
     }
-    const candidates = listReports(artifactDir).filter(
-      (r) => r.headSha === headSha && validateReport(r).valid
-        && r.reportId === computeReportId(r.headSha, r.manifestHash),
-    );
+    const candidates = [];
+    for (const artifactDir of dirs) {
+      for (const r of listReports(artifactDir)) {
+        if (r.headSha === headSha && validateReport(r).valid
+          && r.reportId === computeReportId(r.headSha, r.manifestHash)) {
+          candidates.push(r);
+        }
+      }
+    }
     if (candidates.length === 0) {
       throw new Error(`head=${headSha}: không có report artifact hợp lệ (schema + canonical binding)`);
     }
@@ -160,17 +189,23 @@ export function findReport(artifactDir, { reportId, headSha, manifestHash }) {
 // đồng quy tắc đó ở đây để test_status({headSha}) đọc đúng artifact canonical. reportId lookup
 // độc lập (đã bind canonical sớm trong findReport, không phụ thuộc manifest hiện tại).
 function resolveReport(args, ctx) {
+  // GPT-REV-105 (Finding 4): tìm report trong cả committed artifact dir và runtime
+  // artifact store (nơi test_run ghi CompactReport). test_status/failures/detail/log
+  // đều đọc được report do test_run tạo ra.
+  const { root: runtimeRootDir } = prepareRuntime(args.projectId || ctx.project.projectId, ctx.root);
+  const runtimeArtifactDir = artifactDirPath(cacheKey(args.projectId || ctx.project.projectId, 'x', 'x', 'x', 'x'), runtimeRootDir);
+  const dirs = Array.from(new Set([ctx.artifactDir, runtimeArtifactDir]));
   if (args.headSha !== undefined && args.headSha !== null) {
     const manifestForHash = ctx.manifest.headSha === args.headSha
       ? ctx.manifest
       : { ...ctx.manifest, headSha: args.headSha };
-    return findReport(ctx.artifactDir, {
+    return findReport(dirs, {
       reportId: args.reportId,
       headSha: args.headSha,
       manifestHash: computeManifestHash(manifestForHash),
     });
   }
-  return findReport(ctx.artifactDir, { reportId: args.reportId, headSha: args.headSha });
+  return findReport(dirs, { reportId: args.reportId, headSha: args.headSha });
 }
 
 function normalizeIndex(v, size) {
@@ -268,17 +303,18 @@ export const TOOLS = [
         findingCode: { type: 'string', description: 'Failure code (vd STEP_X_FAIL) để lọc' } },
       oneOf: [{ required: ['reportId'] }, { required: ['headSha'] }],
     } },
-  { name: 'test_self_prove',
-    description: 'Server tự chứng minh cache identity (REV-101): tính cacheKey + xác nhận identity consistency. KHÔNG gắn status:approved (pre-reviewer).',
+  { name: 'test_verify_identity',
+    description: 'Server tự tính real identity (Finding 1): real Git HEAD + canonical manifestHash + allowlisted envFingerprint. Caller CHỈ assert expected value (expectHeadSha/expectManifestHash/expectEnvFingerprint); mismatch → fail-closed. KHÔNG gắn status:approved.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectId: projectIdProp, repo: repoProp, headSha: headShaProp,
+        projectId: projectIdProp, repo: repoProp,
         gate: { type: 'string', pattern: '^[a-z0-9][a-z0-9._-]*$', description: 'gateId trong manifest.gates' },
-        manifestHash: { type: 'string', pattern: '^[0-9a-f]+', description: 'SHA256 hex của manifest JSON' },
-        envFingerprint: { type: 'string', pattern: '^[0-9a-f]+', description: 'SHA256 của envSnapshot' },
+        expectHeadSha: { type: 'string', pattern: '^[0-9a-f]{40}$', description: 'Optional: expected real Git HEAD để assert (fail-closed nếu lệch)' },
+        expectManifestHash: { type: 'string', pattern: '^[0-9a-f]+', description: 'Optional: expected canonical manifestHash' },
+        expectEnvFingerprint: { type: 'string', pattern: '^[0-9a-f]+', description: 'Optional: expected allowlisted envFingerprint' },
       },
-      required: ['headSha', 'gate', 'manifestHash', 'envFingerprint', 'projectId'],
+      required: ['gate', 'projectId'],
     } },
 ];
 
@@ -399,21 +435,27 @@ async function opTestRun(args, ctx) {
   const cdPath = buildCacheDir(runtimeRoot, key);
   const cached = checkCache(cdPath, key);
   if (cached.valid && !forceOverwrite) {
-    return { cached: true, projectId, headSha, gate, cacheKey: key, passed: true, source: 'cache' };
+    const rep = writeRuntimeReport({ projectId, headSha, manifestHash, gateId: gate, envFingerprint }, cached.result, runtimeRoot);
+    return { cached: true, projectId, headSha, gate, cacheKey: key, reportId: rep.reportId, passed: true, source: 'cache' };
   }
-  const lock = createLockSync(runtimeRoot, key);
+  const lock = createLock(runtimeRoot, key);
   await lock.acquire();
   try {
     const cached2 = checkCache(buildCacheDir(runtimeRoot, key), key);
     if (cached2.valid && !forceOverwrite) {
-      return { cached: true, projectId, headSha, gate, cacheKey: key, passed: true, source: 'cache' };
+      const rep = writeRuntimeReport({ projectId, headSha, manifestHash, gateId: gate, envFingerprint }, cached2.result, runtimeRoot);
+      return { cached: true, projectId, headSha, gate, cacheKey: key, reportId: rep.reportId, passed: true, source: 'cache' };
     }
     const result = await runGate(ctx.manifest, gate, { root: ctx.root });
+    // GPT-REV-105 (Finding 4): test_run tạo canonical CompactReport vào runtime
+    // artifact store; read tools (test_status/failures/detail/log) đọc được qua reportId.
+    const rep = writeRuntimeReport({ projectId, headSha, manifestHash, gateId: gate, envFingerprint }, result, runtimeRoot);
     if (result.passed) {
       writeCache({ projectId, headSha, gateId: gate, manifestHash, envFingerprint }, result, key, runtimeRoot);
     }
     return {
-      cached: false, projectId, headSha, gate, cacheKey: key,
+      cached: false, projectId, headSha, gate, cacheKey: key, reportId: rep.reportId,
+      artifactDir: rep.artifactDir,
       duration: result.duration, passed: result.passed,
       failureCodes: result.failureCodes, source: 'executor',
     };
@@ -422,33 +464,54 @@ async function opTestRun(args, ctx) {
   }
 }
 
-// ── test_self_prove: server tự chứng minh cache identity (REV-101) ───────────
-// Theo AGENTS.md (REV-ISSUE-2): AI_PR_REVIEWER / pre-reviewer KHÔNG được gắn
-// status:approved. Self-prove CHỈ xác nhận server tính đúng cacheKey + verify
-// integrity identity; không tự động label GitHub.
-function opSelfProve(args, ctx) {
+// ── test_verify_identity: server tự tính real identity (Finding 1) ───────────
+// Server lấy real Git HEAD, canonical manifestHash, allowlisted envFingerprint.
+// Caller CHỈ được assert expected value; mismatch → fail-closed. Bỏ self-prove
+// tuần hoàn (REV-101): không còn tự-reference, không gắn status:approved.
+function opVerifyIdentity(args, ctx) {
   assertSecurity(args, ctx);
-  const { projectId, headSha, gate, manifestHash, envFingerprint } = args;
-  if (!HEX40.test(headSha)) throw new Error('headSha: cần full 40-hex');
-  if (!/^[0-9a-f]+$/i.test(manifestHash)) throw new Error('manifestHash: cần hex');
-  if (!/^[0-9a-f]+$/i.test(envFingerprint)) throw new Error('envFingerprint: cần hex');
+  const { projectId, gate } = args;
   if (!ctx.manifest.gates || !Array.isArray(ctx.manifest.gates[gate])) {
     throw new Error(`gate '${gate}' không tồn tại trong manifest`);
   }
-  const key = cacheKey(projectId, headSha, manifestHash, envFingerprint, gate);
-  // GPT-REV-101 (self-prove): server tự xác minh identity của cacheKey bằng chính
-  // hàm verifyCacheIntegrity (dùng bởi checkCache) — chứng minh server tính & xác minh
-  // identity NHẤT QUÁN (cùng input → cùng key, key ghi đúng định danh). Không recompute
-  // từ nội dung manifest khác input (tránh mismatch do headSha/extra fields).
-  const syntheticMeta = { projectId, headSha, gateId: gate, manifestHash, envFingerprint, cacheKey: key, passed: true };
-  const identityConsistent = (verifyCacheIntegrity(syntheticMeta, key) === true);
+  // realGitHead: dùng HEAD git thật nếu có, ngược lại manifest.headSha (SKIP_REMOTE/test).
+  const realHead = ctx.realHead || ctx.manifest.headSha;
+  if (!HEX40.test(realHead)) throw new Error('real HEAD: cần full 40-hex');
+  // canonical manifestHash tính bởi server (runtime copy với headSha=realHead).
+  const manifestForHash = ctx.manifest.headSha !== realHead
+    ? { ...ctx.manifest, headSha: realHead }
+    : ctx.manifest;
+  const canonicalManifestHash = computeManifestHash(manifestForHash);
+  // allowlisted envFingerprint (chỉ version/platform/arch).
+  const canonicalEnvFingerprint = computeEnvironmentFingerprint();
+  const key = cacheKey(projectId, realHead, canonicalManifestHash, canonicalEnvFingerprint, gate);
+
+  // Caller được assert expected; nếu truyền thì phải khớp (fail-closed).
+  const mismatch = {};
+  if (args.expectHeadSha !== undefined && args.expectHeadSha !== null && args.expectHeadSha !== realHead) {
+    mismatch.headSha = { expected: args.expectHeadSha, actual: realHead };
+  }
+  if (args.expectManifestHash !== undefined && args.expectManifestHash !== null && args.expectManifestHash !== canonicalManifestHash) {
+    mismatch.manifestHash = { expected: args.expectManifestHash, actual: canonicalManifestHash };
+  }
+  if (args.expectEnvFingerprint !== undefined && args.expectEnvFingerprint !== null && args.expectEnvFingerprint !== canonicalEnvFingerprint) {
+    mismatch.envFingerprint = { expected: args.expectEnvFingerprint, actual: canonicalEnvFingerprint };
+  }
+  if (Object.keys(mismatch).length > 0) {
+    const err = new Error('IDENTITY_MISMATCH (fail-closed): ' + JSON.stringify(mismatch));
+    err.code = 'IDENTITY_MISMATCH';
+    err.mismatch = mismatch;
+    throw err;
+  }
   return {
-    selfProven: true,
+    selfComputed: true,
     server: SERVER_INFO,
-    projectId, headSha, gate,
+    projectId, gate,
+    headSha: realHead,
+    manifestHash: canonicalManifestHash,
+    envFingerprint: canonicalEnvFingerprint,
     cacheKey: key,
-    identityConsistent,
-    note: 'Self-prove chỉ xác nhận cache identity; KHÔNG gắn status:approved (theo protocol pre-reviewer).',
+    note: 'Server tự tính real identity; caller chỉ assert expected. KHÔNG gắn status:approved (pre-reviewer).',
   };
 }
 
@@ -461,7 +524,7 @@ export async function dispatch(name, args) {
     case 'test_failure_detail': return opFailureDetail(args, ctx);
     case 'test_log_excerpt': return opLogExcerpt(args, ctx);
     case 'test_finding_map': return opFindingMap(args, ctx);
-    case 'test_self_prove': return opSelfProve(args, ctx);
+    case 'test_verify_identity': return opVerifyIdentity(args, ctx);
     default: throw new Error(`Tool không tồn tại: ${name}`);
   }
 }
@@ -538,4 +601,3 @@ if (isMain) {
     process.exit(1);
   });
 }
-

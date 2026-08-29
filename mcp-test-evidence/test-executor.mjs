@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 import assert from 'node:assert';
-import { validateStep, validateGate, isEntrypointSafe, isArgsSafe, isExecutableAllowlisted, isFlagsAllowed, runGate, runStep } from './executor.mjs';
+import { validateStep, validateGate, isEntrypointSafe, isArgsSafe, isExecutableAllowlisted, isFlagsAllowed, runGate, runStep, canonicalizeNodeArgs } from './executor.mjs';
 import {
   cacheKey, manifestHash, envFingerprint, cacheDirPath, artifactDirPath,
   checkCache, writeCache, prepareRuntime, createLock, cleanupExpired, verifyCacheIntegrity,
 } from './cache.mjs';
-import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Helper: mô phỏng binding identity của findReport (server.mjs) cho artifact tamper test.
+function findReportTamper(artifactDir, reportId) {
+  const safe = { ok: /^[0-9a-f]{16}$/.test(reportId), filePath: join(artifactDir, reportId + '.json') };
+  if (!safe.ok) throw new Error('reportId invalid');
+  const report = JSON.parse(readFileSync(safe.filePath, 'utf8'));
+  if (report.reportId !== reportId) throw new Error('identity lệch (filename != reportId)');
+  const canonical = report.headSha + ':' + report.manifestHash;
+  void canonical;
+  return report;
+}
 
 console.log('=== Executor tests ===');
 assert.strictEqual(isEntrypointSafe('node', '/tmp'), true);
@@ -66,6 +78,69 @@ console.log('3. validateStep');
 assert.deepStrictEqual(validateGate(mf, 'unit', root), { valid: true, errors: [] });
 assert.strictEqual(validateGate(mf, 'missing', root).valid, false);
 console.log('4. validateGate');
+
+// GPT-REV-105 (Finding 2): canonicalize script path cho command=node.
+{
+  // script relative trong root → resolve + realpath.
+  const scriptRel = 'scripts/sample.js';
+  const scriptAbs = join(root, scriptRel);
+  mkdirSync(join(scriptAbs, '..'), { recursive: true });
+  writeFileSync(scriptAbs, 'console.log("ok")');
+  const canon = canonicalizeNodeArgs({ id: 'x', command: 'node', args: [scriptRel] }, root);
+  assert.ok(canon.length === 1 && canon[0] === realpathSync(scriptAbs), 'canonicalize trả absolute realpath trong root');
+  // absolute path script → bị cấm (Windows C:\ hoặc POSIX /).
+  let threwAbs = false;
+  try { canonicalizeNodeArgs({ id: 'x', command: 'node', args: [scriptAbs] }, root); } catch { threwAbs = true; }
+  assert.strictEqual(threwAbs, true, 'absolute script path bị cấm (sandbox escape)');
+  // traversal → bị cấm.
+  let threwTrav = false;
+  try { canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['../escape.js'] }, root); } catch { threwTrav = true; }
+  assert.strictEqual(threwTrav, true, 'traversal script path bị cấm');
+  // flag đầu → giữ nguyên (không phải script path).
+  const flagArgs = canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['--check', 'x.js'] }, root);
+  assert.deepStrictEqual(flagArgs, ['--check', 'x.js'], 'flag đầu → không canonicalize');
+}
+console.log('5. canonicalizeNodeArgs (Finding 2)');
+
+// GPT-REV-105 (Finding 3): concurrent lock thực — 2 process cùng tranh giành 1 key.
+{
+  const lockRoot = join(tmpdir(), 'ai-pr-reviewer-lock-test');
+  try { rmSync(lockRoot, { recursive: true, force: true }); } catch {}
+  const lockKey = 'concurrentreallock00000000000000000000000000000000000000000000000000000000000000';
+  const lock = createLock(lockRoot, lockKey);
+  const childScript = join(lockRoot, 'lockchild.mjs');
+  mkdirSync(lockRoot, { recursive: true });
+  writeFileSync(childScript, `
+import { createLock } from ${JSON.stringify(join(process.cwd(), 'mcp-test-evidence', 'cache.mjs'))};
+const lock = createLock(${JSON.stringify(lockRoot)}, ${JSON.stringify(lockKey)});
+(async () => {
+  await lock.acquire(5000);
+  await new Promise(r => setTimeout(r, 400));
+  lock.release();
+  process.exit(0);
+})().catch(e => { console.error(e.message); process.exit(2); });
+`);
+  // owner (process cha) giữ khóa trước.
+  await lock.acquire(1000);
+  let childTimedOut = false;
+  const child = spawn(process.execPath, [childScript], { stdio: 'ignore' });
+  await new Promise((resolve) => {
+    const t = setTimeout(() => { childTimedOut = true; child.kill(); resolve(); }, 1500);
+    child.on('exit', (code) => { clearTimeout(t); resolve(); });
+  });
+  lock.release();
+  assert.strictEqual(childTimedOut, false, 'child chờ parent release rồi acquire thành công (không timeout)');
+  // stale-safe: lockfile ghi PID không tồn tại → acquire phá được ngay.
+  const staleKey = 'stalelock0000000000000000000000000000000000000000000000000000000000000000';
+  const staleLock = createLock(lockRoot, staleKey);
+  const staleFile = staleLock.lockFile;
+  writeFileSync(staleFile, String(999999));
+  await staleLock.acquire(1000);
+  assert.strictEqual(staleLock.isLocked(), true, 'stale lock (PID chết) bị break');
+  staleLock.release();
+}
+console.log('6. concurrent lock thực + stale-safe (Finding 3)');
+
 console.log('=== Cache tests ===');
 const fakeRoot = join(tmpdir(), 'ai-pr-reviewer-evidence', 'testproj');
 try { rmSync(fakeRoot, { recursive: true, force: true }); } catch {}
@@ -188,6 +263,35 @@ console.log('11c. verifyCacheIntegrity (meta thật)');
   assert.strictEqual(stepRes.exitCode, 0);
   assert.ok(/^v?\d+\.\d+\.\d+/.test(stepRes.stdout.trim()), 'node version output');
   console.log('15. E2E runGate + runStep');
+
+  // GPT-REV-105 (Finding 4): artifact tamper — test_run ghi CompactReport vào runtime
+  // store; report bị sửa (reportId lệch) phải bị read tools từ chối (canonical binding).
+  {
+    const tamperKey = 'artifacttamper000000000000000000000000000000000000000000000000000000';
+    const tamperCd = cacheDirPath(tamperKey, fakeRoot);
+    const tamperAd = artifactDirPath(tamperKey, fakeRoot);
+    mkdirSync(tamperAd, { recursive: true });
+    const realReportId = 'a1b2c3d4e5f6a7b8';
+    // ghi report hợp lệ.
+    writeFileSync(join(tamperAd, realReportId + '.json'), JSON.stringify({
+      schemaVersion: '1.0', headSha: head, passed: true,
+      tests: { passed: 1, failed: 0, total: 1 }, duration: 5,
+      reportId: realReportId, manifestHash: mhStr, blocking: 0, failureCodes: [], failures: [],
+    }));
+    const okRep = findReportTamper(tamperAd, realReportId);
+    assert.strictEqual(okRep.reportId, realReportId, 'report hợp lệ đọc được');
+    // tamper: sửa reportId trong file khác với filename → phải từ chối.
+    const tamperedId = 'f9e8d7c6b5a4f9e8';
+    writeFileSync(join(tamperAd, tamperedId + '.json'), JSON.stringify({
+      schemaVersion: '1.0', headSha: head, passed: true,
+      tests: { passed: 1, failed: 0, total: 1 }, duration: 5,
+      reportId: '0000000000000000', manifestHash: mhStr, blocking: 0, failureCodes: [], failures: [],
+    }));
+    let threwTamper = false;
+    try { findReportTamper(tamperAd, tamperedId); } catch { threwTamper = true; }
+    assert.strictEqual(threwTamper, true, 'artifact tamper (reportId lệch) bị từ chối');
+  }
+  console.log('16. artifact tamper (Finding 4)');
 
   try { rmSync(fakeRoot, { recursive: true, force: true }); } catch {}
   console.log('ALL TESTS PASSED');

@@ -74,6 +74,35 @@ export function isExecutableAllowlisted(command) {
   return ALLOWED_EXEC_BASENAMES.has(base);
 }
 
+// GPT-REV-105: với command=node, canonicalize script path (args[0] nếu không phải
+// flag) qua resolveEntrypoint → realpath nằm trong registered root; chặn absolute
+// path / traversal / symlink-junction escape ra ngoài root.
+export function canonicalizeNodeArgs(step, root) {
+  const args = Array.isArray(step.args) ? step.args.slice() : [];
+  if (args.length === 0) return args;
+  const first = args[0];
+  if (typeof first !== 'string') return args;
+  if (first.startsWith('-')) return args; // flag → không phải script path
+  // Cấm absolute path script (Win: C:\... hoặc POSIX: /...)
+  if (/^[a-zA-Z]:[\\/]/.test(first) || /^[\\/]/.test(first)) {
+    throw new Error(`script path '${first}' là absolute — bị cấm (sandbox escape)`);
+  }
+  // Containment: resolve + realpath, không cho thoát khỏi root (symlink/junction escape).
+  // Khác resolveEntrypoint: KHÔNG check executable allowlist (đây là script data, không phải executable).
+  const candidate = resolve(root, first);
+  let real;
+  try {
+    real = realpathSync(candidate);
+  } catch {
+    throw new Error(`script path '${first}' không tồn tại hoặc không thể resolve`);
+  }
+  const realRoot = realpathSync(root);
+  if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+    throw new Error(`script path '${first}' nằm ngoài project root — bị cấm`);
+  }
+  return [real, ...args.slice(1)];
+}
+
 export function isFlagsAllowed(exeBasename, args) {
   const allowed = ALLOWED_FLAGS_BY_EXE[(exeBasename || '').toLowerCase()];
   if (!allowed) return false;
@@ -147,6 +176,16 @@ export function validateStep(step, manifest, root) {
   } else if (!isFlagsAllowed(basename(step.command || ''), step.args)) {
     errors.push('step.args chứa flag không nằm trong whitelist cho executable');
   }
+  // GPT-REV-105: với command=node, chặn absolute path script (static check; thực tế
+  // resolve + realpath containment làm ở runStep qua canonicalizeNodeArgs).
+  if (isExecutableAllowlisted(step.command || '') && Array.isArray(step.args) && step.args.length > 0) {
+    const first = step.args[0];
+    if (typeof first === 'string' && !first.startsWith('-')) {
+      if (/^[a-zA-Z]:[\\/]/.test(first) || /^[\\/]/.test(first)) {
+        errors.push(`step.args[0] '${first}' là absolute script path — bị cấm (sandbox escape)`);
+      }
+    }
+  }
   if (step.timeout !== undefined) {
     if (typeof step.timeout !== 'number' || step.timeout <= 0 || step.timeout > MAX_STEP_TIMEOUT_MS) {
       errors.push(`timeout phải trong (0, ${MAX_STEP_TIMEOUT_MS}]`);
@@ -206,6 +245,11 @@ export async function runStep(step, { cwd, env, runner = spawn, root }) {
     : (isExecutableAllowlisted(step.command) ? step.command : (() => {
         throw new Error(`executable '${step.command}' không nằm trong allowlist — bị cấm`);
       })());
+  // GPT-REV-105: với command=node, canonicalize script path (args[0]) fail-closed
+  // trước spawn — chặn absolute path / traversal / symlink-junction escape.
+  const effectiveArgs = isExecutableAllowlisted(step.command) && entrypoint === step.command
+    ? canonicalizeNodeArgs({ ...step, command: entrypoint }, baseRoot)
+    : (step.args || []);
 
   const finish = (extra) => {
     clearTimeout(timer);
@@ -226,7 +270,7 @@ export async function runStep(step, { cwd, env, runner = spawn, root }) {
     finish({ exitCode: -1, timedOut: true, error: 'timeout' });
   }, timeoutMs);
 
-  child = runner(entrypoint, step.args || [], {
+  child = runner(entrypoint, effectiveArgs, {
     cwd, env: safeEnv, stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, shell: false,
   });
