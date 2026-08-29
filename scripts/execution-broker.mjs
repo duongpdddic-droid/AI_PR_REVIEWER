@@ -4,44 +4,63 @@
 // Mục tiêu: thay vì model tự gọi shell, model gọi 1 tool thuộc broker; broker tự:
 //   1) check circuit breaker (shouldPause) — nếu pause -> BLOCKED
 //   2) exec subprocess
-//   3) recordSuccess / recordFailure
-//   4) emit DoD state nếu phù hợp
+//   3) recordSuccess / recordFailure (persisted qua file ~/.ai-pr-reviewer/ breaker + DoD state)
+//   4) emit DoD state nếu phù hợp (chỉ khi evidence canonical được tool xác minh)
 //   5) trả machine-readable {ok, data, dod_event, breaker}
+//   6) tất cả git/gh command khóa cwd/repo/branch/HEAD (Finding 4)
 //
 // 6 tools theo Issue #25 body:
 //   - repo_status       : git status --short + branch + HEAD
 //   - repo_diff         : git diff <base>..HEAD --stat
-//   - test_run          : node scripts/test-pure-logic.mjs (tổng pure-logic tests)
+//   - test_run          : mandatory test gate (pnpm test: 4 suites)
 //   - verify_status     : node scripts/full-verify.mjs (full verify + node --check + BOM)
 //   - pre_review_status : pre-review deterministic (PASS/FINDINGS) qua scan diff
-//   - handoff_status    : git log + remote URL + PR open cho branch
+//   - handoff_status    : git log + remote URL + canonical marker check (Finding 3)
 //
 // Auto-commit gate (Issue #25 AC: "Gate tu dong commit/push chi khi ..."):
 //   checkAutoCommitGate({branch, headSha, worktreeClean, testsPass, verifyPass,
 //     preReviewPass, dodState, handoffMarker, ciRequiredChecksPass}) -> {ok, missing[]}
+//   CLI thực hiện IO thật:
+//     - CI: gh pr checks + evaluateChecks(policy), KHÔNG suy diễn từ rs.ok (Finding 2)
+//     - handoffMarker: canonical marker comment với mutationKey (Finding 2)
+//     - dodState: đọc từ persisted file dod-<namespace>.json
+//     - worktreeClean: tách dirty-in-scope vs dirty-out-of-scope (Finding 2)
 //
-// CLI:
-//   node scripts/execution-broker.mjs <tool>           # chạy 1 tool
-//   node scripts/execution-broker.mjs <tool> --json    # output JSON
-//   node scripts/execution-broker.mjs dod --state <X> --event <Y>   # apply DoD
-//   node scripts/execution-broker.mjs auto-commit-gate # gate
-//
-// YAGNI:
-//   - Không tích hợp runtime với autonomous-run.mjs (defer follow-up).
-//   - Circuit breaker state KHONG persist giữa 2 lần CLI; mỗi lần chạy là 1 process mới -> state reset.
-//     (Nếu cần persist -> file ~/.ai-pr-reviewer/breaker.json, defer.)
+// Circuit breaker persist (Finding 1):
+//   State lưu trong ~/.ai-pr-reviewer/breaker-<namespace>.json, atomic rename + file lock.
+//   HALF_OPEN probe claim atomically giữa các process CLI.
+//   Probe fail → reset openedAt; probe success → CLOSED.
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import path, { basename } from 'node:path';
 import process from 'node:process';
+import os from 'node:os';
 
 import {
   DOD_STATES, DOD_EVENTS, apply as dodApply, createDod, summarize as dodSummarize, oneLine as dodOneLine,
 } from './dod.mjs';
 import {
   createBreakerRegistry, recordFailure, recordSuccess, shouldPause, summarize as breakerSummarize,
+  claimHalfOpenProbe as claimHalfOpenProbePure, peek as breakerPeek,
 } from './circuit-breaker.mjs';
+import {
+  loadBreaker, saveBreaker, withFileLock, atomicWriteJson, readJsonSafe,
+  buildBreakerNamespace, claimHalfOpenProbe as claimHalfOpenProbePersist,
+  createPersistFunctions, resolveRuntimeRoot,
+} from './breaker-persist.mjs';
+import { evaluateChecks, validatePolicy } from './review-contract.mjs';
+
+// ---------- Constants ----------
+
+// Mandatory test gate (Finding 3): phải chạy toàn bộ suites bắt buộc, không chỉ pure-logic.
+export const MANDATORY_TEST_SUITES = [
+  'scripts/test-pure-logic.mjs',
+  'scripts/test-dod.mjs',
+  'scripts/test-circuit-breaker.mjs',
+  'scripts/test-execution-broker.mjs',
+  'scripts/test-breaker-persist.mjs',
+];
 
 // Danh sách tool mà broker hiểu.
 export const TOOLS = Object.freeze([
@@ -115,15 +134,166 @@ function exec(cmd, args, opts = {}) {
   };
 }
 
+// ---------- Git context lock (Finding 4) ----------
+// createGitContext({cwd, expectedRepo, expectedBranch, expectedHeadSha}) -> {ok, cwd, repo, branch, headSha, error}
+// Khóa mọi git/gh command về đúng cwd + repo + branch + full HEAD. Fail-closed.
+export function createGitContext({ cwd = process.cwd(), expectedRepo = null, expectedBranch = null, expectedHeadSha = null } = {}) {
+  const top = exec('git', ['-C', cwd, 'rev-parse', '--show-toplevel']);
+  if (!top.ok) return { ok: false, cwd, repo: null, branch: null, headSha: null, error: 'not a git repo at cwd' };
+  const origin = exec('git', ['-C', cwd, 'config', '--get', 'remote.origin.url']);
+  if (!origin.ok || !origin.stdout.trim()) {
+    return { ok: false, cwd, repo: null, branch: null, headSha: null, error: 'no origin remote configured' };
+  }
+  const repo = originToRepo(origin.stdout.trim());
+  if (!repo) return { ok: false, cwd, repo: null, branch: null, headSha: null, error: 'cannot parse origin repo' };
+  const branch = exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+  const headSha = exec('git', ['-C', cwd, 'rev-parse', 'HEAD']).stdout.trim();
+  if (!/^[0-9a-f]{40}$/i.test(headSha)) {
+    return { ok: false, cwd, repo, branch, headSha, error: `invalid HEAD sha: ${headSha}` };
+  }
+  if (expectedRepo && repo.toLowerCase() !== String(expectedRepo).toLowerCase()) {
+    return { ok: false, cwd, repo, branch, headSha, error: `repo mismatch: expected ${expectedRepo}, got ${repo}` };
+  }
+  if (expectedBranch && branch !== expectedBranch) {
+    return { ok: false, cwd, repo, branch, headSha, error: `branch mismatch: expected ${expectedBranch}, got ${branch}` };
+  }
+  if (expectedHeadSha && headSha.toLowerCase() !== String(expectedHeadSha).toLowerCase()) {
+    return { ok: false, cwd, repo, branch, headSha, error: `HEAD mismatch: expected ${expectedHeadSha.slice(0, 8)}, got ${headSha.slice(0, 8)}` };
+  }
+  return { ok: true, cwd, repo, branch, headSha, repoRoot: top.stdout.trim() };
+}
+
+// origin URL -> owner/repo (https/git@ssh/gh forms).
+export function originToRepo(url) {
+  if (!url || typeof url !== 'string') return null;
+  const m = url.match(/github\.com[:/]([^/]+)\/([^/\s]+?)(?:\.git)?$/i);
+  if (!m) return null;
+  const owner = m[1].replace(/\.git$/, '');
+  const name = m[2].replace(/\.git$/, '');
+  if (!owner || !name) return null;
+  return `${owner}/${name}`;
+}
+
+// verifyGitLock(expected, {cwd}) -> {ok, ctx, error} — rút gọn cho mọi tool wrapper.
+export function verifyGitLock(expected = {}, cwd = process.cwd()) {
+  return createGitContext({ cwd, ...expected });
+}
+
+// ---------- gh helper (khóa repo từ git context) ----------
+// ghExec(ctx, args) -> {ok, stdout, stderr} — luôn nhận --repo <ctx.repo>.
+function ghExec(ctx, args) {
+  return exec('gh', [...args, '--repo', ctx.repo]);
+}
+
+// ---------- CI check (Finding 2) ----------
+// readCiStatus(ctx, policy) -> {ok, state, detail}
+// Đọc CI THẬT cho đúng repo + full HEAD qua gh pr checks, đánh giá bằng evaluateChecks(policy).
+// KHÔNG bao giờ suy diễn CI từ rs.ok (git command thành công ≠ CI pass).
+export function readCiStatus(ctx, policy) {
+  if (!ctx || !ctx.ok || !ctx.repo) return { ok: false, state: 'unknown', detail: 'invalid git context' };
+  const prNum = getOpenPrNumber(ctx);
+  if (!prNum) return { ok: false, state: 'unknown', detail: 'no open PR for branch' };
+  const checks = ghExec(ctx, ['pr', 'checks', String(prNum), '--json', 'name,state']);
+  if (!checks.ok) return { ok: false, state: 'unknown', detail: 'gh pr checks failed' };
+  let checksDetail;
+  try { checksDetail = JSON.parse(checks.stdout); } catch { return { ok: false, state: 'unknown', detail: 'gh pr checks: invalid JSON' }; }
+  const policyOk = validatePolicy(policy);
+  if (!policyOk.ok) return { ok: false, state: 'unknown', detail: `policy invalid: ${policyOk.error}` };
+  const state = evaluateChecks(policy, checksDetail);
+  return { ok: true, state, detail: `gh pr checks #${prNum} → ${state}` };
+}
+
+// getOpenPrNumber(ctx) -> number|null (dùng gh pr list theo head branch)
+export function getOpenPrNumber(ctx) {
+  if (!ctx || !ctx.ok) return null;
+  const res = ghExec(ctx, ['pr', 'list', '--head', ctx.branch, '--state', 'open', '--json', 'number', '--jq', '.[0].number']);
+  if (!res.ok || !res.stdout.trim()) return null;
+  const n = Number(res.stdout.trim());
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// ---------- canonical handoff marker (Finding 2 & 3) ----------
+// action canonical cho handoff theo mutationKey convention (review-contract).
+export const HANDOFF_ACTION = 'handoff:ready';
+
+export function mutationKey({ repository, prNumber, headSha, policyVersion, action }) {
+  return [repository, prNumber, headSha, policyVersion, action].join('::');
+}
+
+// hasCanonicalHandoffMarker(ctx, policyVersion) -> {ok, present}
+// Đọc comments PR cho đúng HEAD; tìm marker mutationKey với action HANDOFF_ACTION.
+// KHÔNG dùng PR OPEN làm marker.
+export function hasCanonicalHandoffMarker(ctx, policyVersion) {
+  if (!ctx || !ctx.ok || !ctx.repo) return { ok: false, present: false };
+  const prNum = getOpenPrNumber(ctx);
+  if (!prNum) return { ok: false, present: false };
+  const key = mutationKey({ repository: ctx.repo, prNumber: prNum, headSha: ctx.headSha, policyVersion, action: HANDOFF_ACTION });
+  const needle = `<!-- ai-pr-reviewer:key=${key} -->`;
+  const comments = ghExec(ctx, ['api', `repos/${ctx.repo}/issues/${prNum}/comments`, '--paginate', '--jq', '.[].body']);
+  if (!comments.ok) return { ok: false, present: false };
+  return { ok: true, present: comments.stdout.includes(needle) };
+}
+
+// ---------- DoD persist (Finding 2: DoD state persisted) ----------
+export function dodFilePath(namespace) {
+  return path.join(resolveRuntimeRoot(), `dod-${namespace}.json`);
+}
+
+export function loadPersistedDod(namespace) {
+  const data = readJsonSafe(dodFilePath(namespace));
+  return data && data.ok ? data : null;
+}
+
+export function savePersistedDod(namespace, session) {
+  atomicWriteJson(dodFilePath(namespace), session);
+}
+
+// ---------- breaker persist (Finding 1) ----------
+export function resolveBreakerNamespace(ctx) {
+  return buildBreakerNamespace((ctx && ctx.repo) || 'default', (ctx && ctx.branch) || 'default');
+}
+
+// createPersistedBreaker(ctx) -> {ns, load, save, recordFailure, recordSuccess, claimProbe}
+export function createPersistedBreaker(ctx) {
+  const ns = resolveBreakerNamespace(ctx);
+  const persist = createPersistFunctions(recordFailure, recordSuccess);
+  return {
+    ns,
+    load: () => loadBreaker(ns),
+    save: (reg) => saveBreaker(ns, reg),
+    recordFailure: (tool, reason, now) => persist.recordFailurePersist(ns, tool, reason, now),
+    recordSuccess: (tool) => persist.recordSuccessPersist(ns, tool),
+    claimProbe: (tool, now) => claimHalfOpenProbePersist(ns, tool, 60_000, now),
+  };
+}
+
+// loadPolicyAt(cwd) -> {policy, error} — đọc .github/ai-review-policy.json local
+export function loadPolicyAt(cwd = process.cwd()) {
+  const p = path.join(cwd, '.github', 'ai-review-policy.json');
+  if (!existsSync(p)) return { policy: null, error: 'policy file not found' };
+  try {
+    const policy = JSON.parse(readFileSync(p, 'utf8'));
+    const v = validatePolicy(policy);
+    if (!v.ok) return { policy: null, error: `policy invalid: ${v.error}` };
+    return { policy, error: null };
+  } catch (e) {
+    return { policy: null, error: `policy parse error: ${e.message}` };
+  }
+}
+
+
 // ---------- 6 tool wrappers (mỗi tool trả machine-readable JSON) ----------
 
-// Tool 1: repo_status — git status + branch + HEAD
-export function toolRepoStatus({ cwd = process.cwd() } = {}) {
+// Tool 1: repo_status — git status + branch + HEAD (khóa git context)
+export function toolRepoStatus({ cwd = process.cwd(), gitLock = null } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    return { ok: false, tool: 'repo_status', data: null, error: `git lock failed: ${lock.error}` };
+  }
   const branch = exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']);
   const sha = exec('git', ['-C', cwd, 'rev-parse', 'HEAD']);
   const status = exec('git', ['-C', cwd, 'status', '--short']);
-  const origin = exec('git', ['-C', cwd, 'config', '--get', 'remote.origin.url']);
-  const ok = branch.ok && sha.ok && status.ok && origin.ok;
+  const ok = branch.ok && sha.ok && status.ok;
   return {
     ok,
     tool: 'repo_status',
@@ -132,14 +302,18 @@ export function toolRepoStatus({ cwd = process.cwd() } = {}) {
       headSha: sha.stdout.trim(),
       worktreeDirty: status.stdout.trim().length > 0,
       worktreeLines: status.stdout.split('\n').filter(Boolean),
-      origin: origin.stdout.trim(),
+      origin: lock.repo,
     },
     error: ok ? null : 'git command failed',
   };
 }
 
-// Tool 2: repo_diff — git diff <base>..HEAD --stat + numstat
-export function toolRepoDiff({ base = 'main', cwd = process.cwd() } = {}) {
+// Tool 2: repo_diff — git diff <base>..HEAD --stat + numstat (khóa git context)
+export function toolRepoDiff({ base = 'main', cwd = process.cwd(), gitLock = null } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    return { ok: false, tool: 'repo_diff', data: null, error: `git lock failed: ${lock.error}` };
+  }
   const stat = exec('git', ['-C', cwd, 'diff', `${base}...HEAD`, '--stat']);
   const numstat = exec('git', ['-C', cwd, 'diff', `${base}...HEAD`, '--numstat']);
   const ok = stat.ok;
@@ -163,34 +337,56 @@ export function toolRepoDiff({ base = 'main', cwd = process.cwd() } = {}) {
   };
 }
 
-// Tool 3: test_run — node scripts/test-pure-logic.mjs
-export function toolTestRun({ cwd = process.cwd() } = {}) {
-  const r = exec(process.execPath, ['scripts/test-pure-logic.mjs'], { cwd });
-  const m = r.stdout.match(/Tổng:\s*(\d+)\/(\d+)\s*PASS/);
-  const passed = m ? Number(m[1]) : null;
-  const total = m ? Number(m[2]) : null;
+// Tool 3: test_run — mandatory test gate (Finding 3): toàn bộ MANDATORY_TEST_SUITES.
+export function toolTestRun({ cwd = process.cwd(), gitLock = null } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    return { ok: false, tool: 'test_run', data: null, error: `git lock failed: ${lock.error}` };
+  }
+  const results = [];
+  let allPass = true;
+  let passed = 0, total = 0;
+  for (const suite of MANDATORY_TEST_SUITES) {
+    const r = exec(process.execPath, [suite], { cwd });
+    const m = r.stdout.match(/(?:Tổng|Total):\s*(\d+)\/(\d+)\s*PASS/);
+    if (m) { passed += Number(m[1]); total += Number(m[2]); }
+    results.push({ suite, ok: r.ok });
+    if (!r.ok) allPass = false;
+  }
   return {
-    ok: r.ok,
+    ok: allPass,
     tool: 'test_run',
-    data: { passed, total, allPass: r.ok, stdoutTail: r.stdout.split('\n').slice(-10).join('\n') },
-    error: r.ok ? null : `tests failed: ${passed}/${total}`,
+    data: {
+      passed, total, allPass,
+      suites: results,
+      stdoutTail: results.map((s) => `${s.suite}: ${s.ok ? 'PASS' : 'FAIL'}`).join('\n'),
+    },
+    error: allPass ? null : `mandatory test gate FAIL (${passed}/${total})`,
   };
 }
 
-// Tool 4: verify_status — node scripts/full-verify.mjs
-export function toolVerifyStatus({ cwd = process.cwd() } = {}) {
+// Tool 4: verify_status — node scripts/full-verify.mjs (khóa git context)
+export function toolVerifyStatus({ cwd = process.cwd(), gitLock = null } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    return { ok: false, tool: 'verify_status', data: null, error: `git lock failed: ${lock.error}` };
+  }
   const r = exec(process.execPath, ['scripts/full-verify.mjs'], { cwd });
   return {
     ok: r.ok,
     tool: 'verify_status',
-    data: { allOk: r.ok, stdoutTail: r.stdout.split('\n').slice(-15).join('\n'), stderrTail: r.stderr.split('\n').slice(-5).join('\n') },
+    data: { allOk: r.ok, allPass: r.ok, stdoutTail: r.stdout.split('\n').slice(-15).join('\n'), stderrTail: r.stderr.split('\n').slice(-5).join('\n') },
     error: r.ok ? null : 'verify status FAIL (see stdout/stderr)',
   };
 }
 
-// Tool 5: pre_review_status — deterministic partial pre-review (size + secret scan).
+// Tool 5: pre_review_status — deterministic partial pre-review (size + secret scan). Khóa git context.
 // YAGNI: không gọi full local reviewer (chưa tích hợp); chỉ 2 heuristic cơ bản.
-export function toolPreReviewStatus({ base = 'main', maxLines = 1500, cwd = process.cwd() } = {}) {
+export function toolPreReviewStatus({ base = 'main', maxLines = 1500, cwd = process.cwd(), gitLock = null } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    return { ok: false, tool: 'pre_review_status', data: null, error: `git lock failed: ${lock.error}` };
+  }
   const numstat = exec('git', ['-C', cwd, 'diff', `${base}...HEAD`, '--numstat']);
   let totalLines = 0;
   if (numstat.ok) {
@@ -222,36 +418,48 @@ export function toolPreReviewStatus({ base = 'main', maxLines = 1500, cwd = proc
   };
 }
 
-// Tool 6: handoff_status — git log + remote + branch + PR open (nếu có gh)
-export function toolHandoffStatus({ cwd = process.cwd() } = {}) {
+// Tool 6: handoff_status — git log + remote + branch + canonical marker check (Finding 3).
+// KHÔNG dùng PR OPEN làm marker; chỉ emit HANDOFF_MARKER khi canonical marker + HEAD hợp lệ.
+export function toolHandoffStatus({ cwd = process.cwd(), gitLock = null, policyVersion = '' } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    return { ok: false, tool: 'handoff_status', data: null, error: `git lock failed: ${lock.error}` };
+  }
   const log = exec('git', ['-C', cwd, 'log', '--oneline', '-5']);
-  const remote = exec('git', ['-C', cwd, 'config', '--get', 'remote.origin.url']);
-  const branch = exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']);
-  let pr = null;
-  try {
-    const prRes = exec('gh', ['pr', 'view', '--json', 'number,state,url', '-q', '.']);
-    if (prRes.ok) pr = JSON.parse(prRes.stdout || 'null');
-  } catch { /* gh không khả dụng -> pr=null, không lỗi */ }
-  const ok = log.ok && remote.ok && branch.ok;
+  const ok = log.ok;
+  // Check canonical marker nếu có gh + policyVersion
+  let handoffMarkerValid = false;
+  let markerDetail = null;
+  if (ok && policyVersion && lock.ok) {
+    const marker = hasCanonicalHandoffMarker(lock, policyVersion);
+    handoffMarkerValid = marker.present;
+    markerDetail = marker.present ? 'canonical marker found' : 'no canonical marker';
+  }
   return {
     ok,
     tool: 'handoff_status',
     data: {
       recentCommits: log.stdout.split('\n').filter(Boolean),
-      remote: remote.stdout.trim(),
-      branch: branch.stdout.trim(),
-      pr,
+      branch: lock.branch,
+      headSha: lock.headSha,
+      remote: lock.repo,
+      handoffMarkerValid,
+      markerDetail: markerDetail || 'no gh/policyVersion — marker check skipped',
     },
     error: ok ? null : 'git command failed',
   };
 }
 
 // ---------- Broker: gắn breaker + DoD emission ----------
-// runTool(tool, args, {registry, dod}) -> {ok, result, breaker, dod, dod_event}
+// runTool(tool, args, {registry, dod, persistBreaker, gitLock}) -> {ok, result, breaker, dod, dod_event}
 //   1) shouldPause -> nếu pause thì trả ngay, không exec.
-//   2) exec tool.
-//   3) recordSuccess / recordFailure.
-//   4) Emit DoD event mapping theo tool (nếu có).
+//   2) OPEN + cooldown elapsed -> claim HALF_OPEN probe ATOMIC (Finding 1) trước khi exec.
+//   3) exec tool (khóa git context Finding 4).
+//   4) recordSuccess / recordFailure (persisted nếu có persistBreaker).
+//   5) Emit DoD event CHỈ khi evidence canonical được tool xác minh (Finding 3):
+//        repo_diff       : có diff thật (totalFiles > 0)
+//        test_run        : mandatory gate pass (allPass) — mặc định result.ok
+//        handoff_status  : canonical marker + HEAD hợp lệ (handoffMarkerValid)
 const TOOL_DOD_EVENT = Object.freeze({
   repo_status: null,
   repo_diff: DOD_EVENTS.EVIDENCE_IMPLEMENTATION,
@@ -262,8 +470,30 @@ const TOOL_DOD_EVENT = Object.freeze({
   auto_commit_gate: null,
 });
 
-export function runTool(tool, args = {}, { registry, dod } = {}) {
-  const reg = registry || createBreakerRegistry();
+// shouldEmitDodEvent(tool, result) -> boolean (Finding 3: evidence canonical mới emit)
+export function shouldEmitDodEvent(tool, result) {
+  if (!result || !result.ok) return false;
+  if (tool === 'repo_diff') {
+    // Diff tồn tại ≠ implemented: chỉ emit khi có thay đổi thật
+    return Number((result.data && result.data.totalFiles) || 0) > 0;
+  }
+  if (tool === 'test_run' || tool === 'verify_status') {
+    // Gate bắt buộc phải pass (allPass === true, fail-closed for undefined/null)
+    return result.data && result.data.allPass === true;
+  }
+  if (tool === 'handoff_status') {
+    // Chỉ emit khi canonical marker + HEAD hợp lệ
+    return !!(result.data && result.data.handoffMarkerValid === true);
+  }
+  return true;
+}
+
+export function runTool(tool, args = {}, { registry, dod, persistBreaker, gitLock } = {}) {
+  // Breaker: dùng persisted nếu có, ngược lại in-memory
+  let reg = registry || createBreakerRegistry();
+  if (persistBreaker) {
+    reg = persistBreaker.load();
+  }
   const session = dod || createDod();
   const pauseCheck = shouldPause(reg, tool);
   if (pauseCheck.pause) {
@@ -275,6 +505,35 @@ export function runTool(tool, args = {}, { registry, dod } = {}) {
       dod: dodAfter,
       dod_event: DOD_EVENTS.TERMINAL_BLOCKED,
     };
+  }
+  // OPEN + cooldown elapsed -> claim HALF_OPEN probe atomically (Finding 1)
+  if (pauseCheck.state === 'OPEN') {
+    let claimOut;
+    if (persistBreaker) {
+      claimOut = persistBreaker.claimProbe(tool);
+      if (!claimOut.claimed) {
+        return {
+          ok: false,
+          result: null,
+          breaker: { state: 'OPEN', reason: `probe claim failed: ${claimOut.reason}`, paused: true },
+          dod: session,
+          dod_event: null,
+        };
+      }
+      reg = claimOut.registry;
+    } else {
+      claimOut = claimHalfOpenProbePure(reg, tool);
+      if (!claimOut.claimed) {
+        return {
+          ok: false,
+          result: null,
+          breaker: { state: 'OPEN', reason: `probe claim failed: ${claimOut.reason}`, paused: true },
+          dod: session,
+          dod_event: null,
+        };
+      }
+      reg = claimOut.registry;
+    }
   }
   const handlers = {
     repo_status: toolRepoStatus,
@@ -288,14 +547,24 @@ export function runTool(tool, args = {}, { registry, dod } = {}) {
   if (!handler) {
     return { ok: false, result: null, breaker: null, dod: session, dod_event: null, error: `unknown tool: ${tool}` };
   }
-  const result = handler(args || {});
-  const newReg = result.ok ? recordSuccess(reg, tool) : recordFailure(reg, tool, result.error || 'tool error');
+  // Truyền gitLock (Finding 4) vào args nếu có
+  const toolArgs = gitLock ? { ...(args || {}), gitLock } : (args || {});
+  const result = handler(toolArgs);
+  // recordSuccess/recordFailure (persisted hoặc in-memory)
+  let newReg = reg;
+  let recovered = false;
+  if (persistBreaker) {
+    const rec = result.ok ? persistBreaker.recordSuccess(tool) : persistBreaker.recordFailure(tool, result.error || 'tool error');
+    if (rec && rec.registry) { newReg = rec.registry; recovered = rec.recovered || false; }
+  } else {
+    const rec = result.ok ? recordSuccess(reg, tool) : recordFailure(reg, tool, result.error || 'tool error');
+    if (rec && rec.registry) { newReg = rec.registry; recovered = rec.recovered || false; }
+  }
+  // DoD emission conditional (Finding 3)
   let dodAfter = session;
   let dodEvent = null;
   const ev = TOOL_DOD_EVENT[tool];
-  if (ev && result.ok) {
-    // Broker là façade: chỉ apply nếu session hiện tại cho phép.
-    // Nếu transition invalid (vd WIP + verification) -> giữ nguyên session, dod_event=null.
+  if (ev && shouldEmitDodEvent(tool, result)) {
     const trial = dodApply(session, ev);
     if (trial.ok) {
       dodAfter = trial;
@@ -305,7 +574,7 @@ export function runTool(tool, args = {}, { registry, dod } = {}) {
   return {
     ok: result.ok,
     result,
-    breaker: { state: peekBreakerState(newReg.registry, tool), recovered: newReg.recovered || false },
+    breaker: { state: peekBreakerState(newReg, tool), recovered },
     dod: dodAfter,
     dod_event: dodEvent,
   };
@@ -318,10 +587,21 @@ function peekBreakerState(reg, tool) {
 
 // ---------- CLI ----------
 function usage() {
-  return `Usage: node scripts/execution-broker.mjs <tool> [--json] [--base main]
+  return `Usage: node scripts/execution-broker.mjs <tool> [--json] [--base main] [--cwd <dir>]
        node scripts/execution-broker.mjs dod --state <X> --event <Y>
        node scripts/execution-broker.mjs auto-commit-gate [--json]
 Tools: ${TOOLS.join(', ')}`;
+}
+
+// helper: parse argv → {jsonOut, base, cwd, toolArgs}
+function parseArgs(argv) {
+  const jsonOut = argv.includes('--json');
+  const baseIdx = argv.indexOf('--base');
+  const base = baseIdx >= 0 ? argv[baseIdx + 1] : 'main';
+  const cwdIdx = argv.indexOf('--cwd');
+  const cwd = cwdIdx >= 0 ? argv[cwdIdx + 1] : process.cwd();
+  const toolArgs = { base, cwd };
+  return { jsonOut, base, cwd, toolArgs };
 }
 
 function main() {
@@ -330,12 +610,8 @@ function main() {
     console.log(usage());
     process.exit(2);
   }
-  const jsonOut = argv.includes('--json');
-  const baseIdx = argv.indexOf('--base');
-  const base = baseIdx >= 0 ? argv[baseIdx + 1] : 'main';
+  const { jsonOut, base, cwd, toolArgs } = parseArgs(argv);
   const cmd = argv[0];
-  const toolArgs = {};
-  if (baseIdx >= 0) toolArgs.base = base;
 
   if (cmd === 'dod') {
     const sIdx = argv.indexOf('--state');
@@ -350,29 +626,17 @@ function main() {
     process.exit(out.ok ? 0 : 1);
   }
 
+  // Git context lock (Finding 4): khóa cwd/repo/branch/HEAD cho mọi nhánh IO.
+  const gitLock = createGitContext({ cwd });
+  if (!gitLock.ok) {
+    const payload = { ok: false, error: `git lock failed: ${gitLock.error}` };
+    console.log(jsonOut ? JSON.stringify(payload, null, 2) : JSON.stringify(payload));
+    process.exit(1);
+  }
+
   if (cmd === 'auto-commit-gate') {
-    const rs = toolRepoStatus();
-    const td = toolTestRun();
-    const vs = toolVerifyStatus();
-    const prs = toolPreReviewStatus({ base });
-    const hs = toolHandoffStatus();
-    const worktreeClean = rs.ok && !rs.data.worktreeDirty;
-    const pr = hs.data && hs.data.pr;
-    const ciPass = rs.ok;
-    const gate = checkAutoCommitGate({
-      branch: rs.data ? rs.data.branch : '',
-      headSha: rs.data ? rs.data.headSha : '',
-      worktreeClean,
-      testsPass: td.ok,
-      verifyPass: vs.ok,
-      preReviewPass: prs.ok,
-      dodState: null,
-      handoffMarker: !!(pr && pr.state === 'OPEN'),
-      ciRequiredChecksPass: ciPass,
-    });
-    const payload = { gate, inputs: { worktreeClean, testsPass: td.ok, verifyPass: vs.ok, preReviewPass: prs.ok, branch: rs.data && rs.data.branch, handoffMarker: !!(pr && pr.state === 'OPEN') } };
-    console.log(jsonOut ? JSON.stringify(payload, null, 2) : `auto-commit-gate: ${gate.ok ? 'OK' : 'MISSING ' + gate.missing.join(',')}`);
-    process.exit(gate.ok ? 0 : 1);
+    const out = runAutoCommitGate({ cwd, base, gitLock, jsonOut });
+    process.exit(out.gate.ok ? 0 : 1);
   }
 
   if (!TOOLS.includes(cmd)) { console.log(usage()); process.exit(2); }
@@ -381,14 +645,108 @@ function main() {
     console.log(jsonOut ? JSON.stringify(out, null, 2) : JSON.stringify(out));
     process.exit(0);
   }
-  const r = runTool(cmd, toolArgs);
+
+  // Single tool: dùng persisted breaker + DoD (Finding 1) + gitLock (Finding 4)
+  const persistBreaker = createPersistedBreaker(gitLock);
+  const ns = resolveBreakerNamespace(gitLock);
+  const dodSession = loadPersistedDod(ns) || createDod();
+  const r = runTool(cmd, toolArgs, { persistBreaker, gitLock, dod: dodSession });
+  // Persist DoD state (Finding 2)
+  if (r.dod && r.dod.ok) savePersistedDod(ns, r.dod);
   const payload = {
     broker_result: r,
     dod_summary: dodSummarize(r.dod),
     dod_one_line: dodOneLine(r.dod),
+    breaker_namespace: ns,
   };
   console.log(jsonOut ? JSON.stringify(payload, null, 2) : JSON.stringify(payload));
   process.exit(r.ok ? 0 : 1);
+}
+// runAutoCommitGate — auto-commit gate CLI với IO THẬT (Finding 2).
+// - CI: gh pr checks + evaluateChecks(policy) — KHÔNG suy diễn từ rs.ok
+// - handoffMarker: canonical marker comment — KHÔNG dùng PR OPEN
+// - dodState: đọc từ persisted dod-<namespace>.json
+// - worktreeClean: tách dirty-in-scope (dự kiến commit) vs dirty-out-of-scope
+export function runAutoCommitGate({ cwd = process.cwd(), base = 'main', gitLock = null, jsonOut = false } = {}) {
+  const lock = gitLock || createGitContext({ cwd });
+  if (!lock.ok) {
+    const fail = { gate: { ok: false, missing: ['gitLock'], checks: {} }, inputs: null, error: lock.error };
+    console.log(jsonOut ? JSON.stringify(fail, null, 2) : `auto-commit-gate: MISSING gitLock (${lock.error})`);
+    return fail;
+  }
+  const rs = toolRepoStatus({ cwd, gitLock: lock });
+  const td = toolTestRun({ cwd, gitLock: lock });
+  const vs = toolVerifyStatus({ cwd, gitLock: lock });
+  const prs = toolPreReviewStatus({ base, cwd, gitLock: lock });
+  const policyRes = loadPolicyAt(cwd);
+  // CI thật (Finding 2): không dùng rs.ok
+  let ciState = 'unknown';
+  let ciDetail = 'no policy / gh';
+  if (policyRes.policy) {
+    const ci = readCiStatus(lock, policyRes.policy);
+    ciState = ci.state;
+    ciDetail = ci.detail;
+  }
+  // Canonical handoff marker (Finding 2): không dùng PR OPEN
+  let handoffMarkerPresent = false;
+  let markerDetail = 'no policy version';
+  if (policyRes.policy) {
+    const m = hasCanonicalHandoffMarker(lock, policyRes.policy.policyVersion);
+    handoffMarkerPresent = m.present;
+    markerDetail = m.present ? 'canonical marker found' : 'no canonical marker';
+  }
+  // DoD persisted (Finding 2): đọc từ file dod-<namespace>.json
+  const ns = resolveBreakerNamespace(lock);
+  const dodState = loadPersistedDod(ns);
+  // Tách dirty-in-scope vs dirty-out-of-scope (Finding 2):
+  //   dirty-in-scope  = file có trong diff base..HEAD (dự kiến commit)
+  //   dirty-out-scope = file dirty KHÔNG nằm trong diff
+  const diffFiles = new Set();
+  if (rs.ok && rs.data) {
+    const numstat = exec('git', ['-C', cwd, 'diff', `${base}...HEAD`, '--name-only']);
+    if (numstat.ok) {
+      for (const f of numstat.stdout.split('\n').filter(Boolean)) diffFiles.add(f.trim());
+    }
+  }
+  const dirtyLines = (rs.ok && rs.data.worktreeLines) || [];
+  const dirtyOutOfScope = dirtyLines.filter((l) => {
+    const f = l.trim().slice(3); // bỏ XY status prefix
+    return f && !diffFiles.has(f);
+  });
+  const worktreeClean = rs.ok && dirtyOutOfScope.length === 0;
+  const gate = checkAutoCommitGate({
+    branch: rs.ok && rs.data ? rs.data.branch : '',
+    headSha: rs.ok && rs.data ? rs.data.headSha : '',
+    worktreeClean,
+    testsPass: td.ok,
+    verifyPass: vs.ok,
+    preReviewPass: prs.ok,
+    dodState: dodState ? dodState.state : null,
+    handoffMarker: handoffMarkerPresent,
+    ciRequiredChecksPass: ciState === 'pass',
+  });
+  const payload = {
+    gate,
+    inputs: {
+      branch: rs.ok && rs.data ? rs.data.branch : null,
+      headSha: rs.ok && rs.data ? rs.data.headSha : null,
+      worktreeClean,
+      dirtyOutOfScope,
+      dirtyInScopeCount: dirtyLines.length - dirtyOutOfScope.length,
+      testsPass: td.ok,
+      verifyPass: vs.ok,
+      preReviewPass: prs.ok,
+      dodState: dodState ? dodState.state : null,
+      handoffMarker: handoffMarkerPresent,
+      ciState,
+      ciDetail,
+      markerDetail,
+      policyVersion: policyRes.policy ? policyRes.policy.policyVersion : null,
+      breakerNamespace: ns,
+    },
+  };
+  console.log(jsonOut ? JSON.stringify(payload, null, 2) : `auto-commit-gate: ${gate.ok ? 'OK' : 'MISSING ' + gate.missing.join(',')}`);
+  return payload;
 }
 
 // Chạy CLI chỉ khi gọi trực tiếp.

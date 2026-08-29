@@ -6,7 +6,7 @@ import {
   BREAKER_STATES, BREAKER_REASONS,
   DEFAULT_THRESHOLD, DEFAULT_COOLDOWN_MS,
   createBreakerRegistry, recordFailure, recordSuccess,
-  shouldPause, peek, summarize,
+  shouldPause, peek, summarize, claimHalfOpenProbe,
 } from './circuit-breaker.mjs';
 
 const cases = [];
@@ -184,6 +184,76 @@ test('threshold=1: 1 failure đã mở OPEN', () => {
   const out = recordFailure(r, 't', 'e', 1000);
   assert.equal(out.opened, true);
   assert.equal(peek(out.registry, 't').state, BREAKER_STATES.OPEN);
+});
+
+// 15. claimHalfOpenProbe: OPEN + cooldown elapsed -> claimed, state HALF_OPEN
+test('claimHalfOpenProbe OPEN + cooldown elapsed -> claimed=true, HALF_OPEN', () => {
+  let r = createBreakerRegistry({ cooldownMs: 1000 });
+  r = recordFailure(r, 't', 'e1', 1000).registry;
+  r = recordFailure(r, 't', 'e2', 1100).registry;
+  r = recordFailure(r, 't', 'e3', 1200).registry;
+  const out = claimHalfOpenProbe(r, 't', 2300);
+  assert.equal(out.ok, true);
+  assert.equal(out.claimed, true);
+  assert.equal(out.entry.state, BREAKER_STATES.HALF_OPEN);
+  assert.equal(peek(out.registry, 't').state, BREAKER_STATES.HALF_OPEN);
+});
+
+// 16. claimHalfOpenProbe: OPEN còn cooldown -> claimed=false
+test('claimHalfOpenProbe OPEN còn cooldown -> claimed=false', () => {
+  let r = createBreakerRegistry({ cooldownMs: 1000 });
+  r = recordFailure(r, 't', 'e1', 1000).registry;
+  r = recordFailure(r, 't', 'e2', 1100).registry;
+  r = recordFailure(r, 't', 'e3', 1200).registry;
+  const out = claimHalfOpenProbe(r, 't', 1900);
+  assert.equal(out.claimed, false);
+  assert.match(out.reason, /cooldown/);
+});
+
+// 17. claimHalfOpenProbe: CLOSED/không tồn tại -> claimed=false
+test('claimHalfOpenProbe CLOSED -> claimed=false, reason not OPEN', () => {
+  const r = createBreakerRegistry();
+  const out = claimHalfOpenProbe(r, 'missing', 1000);
+  assert.equal(out.claimed, false);
+  assert.match(out.reason, /not OPEN|not found/);
+});
+
+// 18. Probe fail (HALF_OPEN -> recordFailure) reset openedAt (Finding 1)
+test('probe fail từ HALF_OPEN -> OPEN với openedAt=now (reset cooldown)', () => {
+  let r = createBreakerRegistry({ cooldownMs: 1000 });
+  r = recordFailure(r, 't', 'e1', 1000).registry;
+  r = recordFailure(r, 't', 'e2', 1100).registry;
+  r = recordFailure(r, 't', 'e3', 1200).registry;
+  const claim = claimHalfOpenProbe(r, 't', 2300);
+  assert.equal(claim.claimed, true);
+  // Probe chạy rồi fail
+  const fail = recordFailure(claim.registry, 't', 'probe failed', 2400);
+  assert.equal(fail.opened, true);
+  const p = peek(fail.registry, 't');
+  assert.equal(p.state, BREAKER_STATES.OPEN);
+  assert.equal(p.entry.openedAt, 2400); // reset openedAt
+});
+
+// 19. Probe success (HALF_OPEN -> recordSuccess) -> CLOSED (Finding 1)
+test('probe success từ HALF_OPEN -> CLOSED, recovered=true', () => {
+  let r = createBreakerRegistry({ cooldownMs: 1000 });
+  r = recordFailure(r, 't', 'e1', 1000).registry;
+  r = recordFailure(r, 't', 'e2', 1100).registry;
+  r = recordFailure(r, 't', 'e3', 1200).registry;
+  const claim = claimHalfOpenProbe(r, 't', 2300);
+  const out = recordSuccess(claim.registry, 't');
+  assert.equal(out.recovered, true);
+  assert.equal(peek(out.registry, 't').state, BREAKER_STATES.CLOSED);
+});
+
+// 20. claimHalfOpenProbe KHONG mutate registry input
+test('claimHalfOpenProbe KHONG mutate input registry', () => {
+  let r = createBreakerRegistry({ cooldownMs: 1000 });
+  r = recordFailure(r, 't', 'e1', 1000).registry;
+  r = recordFailure(r, 't', 'e2', 1100).registry;
+  r = recordFailure(r, 't', 'e3', 1200).registry;
+  claimHalfOpenProbe(r, 't', 2300);
+  assert.equal(peek(r, 't').state, BREAKER_STATES.OPEN); // vẫn OPEN
 });
 
 // Chay
