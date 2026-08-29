@@ -6,7 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, openSync, closeSync, writeSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { computeReportId, saveReport } from '../scripts/test-evidence-reporter.mjs';
 
@@ -73,16 +73,29 @@ export function createLock(root, key) {
   // cũ đã bị loại bỏ nguyên tử (cùng FS), wx open retry sẽ thắng. Nếu lockfile đã bị
   // unlink bởi owner trước đó → rename sẽ throw ENOENT → an toàn bỏ qua.
   // Suffix dùng nonce đọc từ lockfile (nếu có) + timestamp + pid hiện tại để tránh va chạm.
-  function quarantineLockFile(observedNonce) {
-    const suffix = observedNonce
-      ? observedNonce.slice(0, 8) + '-' + Date.now() + '-' + process.pid
-      : 'corrupt-' + Date.now() + '-' + process.pid;
-    const quarantine = lockFile + '.stale-' + suffix;
+  //
+  // GPT-REV-106 (Finding 3): chống race — đọc identity (pid:nonce) trước; re-read
+  // lockfile NGAY TRƯỚC rename. Nếu identity tại lockfile đã đổi (lock A bị quarantine
+  // bởi process khác rồi thay bằng lock B với identity khác giữa 2 lần đọc) →
+  // KHÔNG rename (sẽ move nhầm lock B đi, B mất identity). Trả {ok:false, reason}
+  // để caller retry vòng lặp và wx open lại trên state mới.
+  function quarantineLockFile(observedIdentity) {
+    if (!observedIdentity) return { ok: false, reason: 'no_observed_identity' };
+    // Re-read ngay trước rename; nếu identity lệch với observed → race detected.
+    let currentIdentity = null;
+    try { currentIdentity = readFileSync(lockFile, 'utf8').trim(); } catch { return { ok: false, reason: 'lockfile_gone' }; }
+    if (currentIdentity !== observedIdentity) {
+      return { ok: false, reason: 'race_detected' };
+    }
+    // Suffix theo FULL identity đã quan sát (audit trail chứng minh file bị rename
+    // đúng là lock với identity này, không phải nhầm lock B).
+    const ident = observedIdentity.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const quarantine = lockFile + '.stale-' + ident + '-' + process.pid + '-' + Date.now();
     try {
       renameSync(lockFile, quarantine);
-      return true;
+      return { ok: true, reason: 'quarantined', quarantinePath: quarantine };
     } catch {
-      return false;
+      return { ok: false, reason: 'rename_failed' };
     }
   }
 
@@ -108,9 +121,11 @@ export function createLock(root, key) {
           // KHÔNG dùng read-then-unlink (TOCTOU): dùng atomic quarantine rename.
           let ownerPid = null;
           let ownerNonce = null;
+          let ownerIdentity = null;
           let corrupt = false;
           try {
             const raw = readFileSync(lockFile, 'utf8').trim();
+            ownerIdentity = raw;
             const parts = raw.split(':');
             const pidStr = parts[0];
             const nonce = parts[1];
@@ -132,8 +147,16 @@ export function createLock(root, key) {
             || ownerPid === null
             || (ownerPid !== process.pid && !pidAlive(ownerPid));
           if (isStale) {
-            if (quarantineLockFile(ownerNonce)) continue;
-            // Quarantine fail (lockfile đã bị owner release giữa lúc đọc) → retry wx open.
+            // GPT-REV-106: truyền full identity (pid:nonce) để quarantineLockFile
+            // re-read verify lockfile VẪN có cùng identity trước khi rename
+            // (chống race: nếu lock A đã bị thay bằng lock B → KHÔNG rename nhầm B).
+            // Nếu lockfile đã corrupt (không parse được pid/nonce) → truyền raw nếu
+            // có, ngược lại bỏ qua (coi như 'corrupt' case).
+            const observed = ownerIdentity || (corrupt ? 'corrupt' : null);
+            const r = quarantineLockFile(observed);
+            if (r.ok) continue;
+            // Quarantine fail (lockfile đã bị owner release giữa lúc đọc HOẶC race
+            // detected lock đã bị thay) → retry wx open để xử lý state mới.
           }
           if (Date.now() > deadline) throw new Error('LOCK_TIMEOUT:' + key);
           await new Promise(r => setTimeout(r, 50));
@@ -158,14 +181,23 @@ export function createLock(root, key) {
     get lockFile() { return lockFile; },
     get identity() { return myIdentity; },
     get nonce() { return myNonce; },
+    // GPT-REV-106: test hook — cho phép test trực tiếp quarantineLockFile với
+    // observedIdentity tùy ý (mô phỏng race thay đổi lockfile giữa observation
+    // và rename). KHÔNG dùng ngoài test.
+    __quarantineForTest(observedIdentity) { return quarantineLockFile(observedIdentity); },
   };
 }
 
 // GPT-REV-105: build canonical CompactReport (schema v1) từ kết quả runGate và
 // persist vào runtime artifact store. reportId = computeReportId(headSha, manifestHash).
 // Chặn absolute path / traversal khi lưu (safePath trong saveReport).
+//
+// GPT-REV-106 (Finding 2): reportId phải bind gateId để 2 gate cùng head+manifest
+// có reportId khác nhau (canonical identity tổng hợp). Dùng 3-arg computeReportId
+// với gateId. Lưu gateId trong report (read tools có thể lọc theo gate).
 export function writeRuntimeReport({ projectId, headSha, manifestHash, gateId, envFingerprint }, result, root) {
-  const reportId = computeReportId(headSha, manifestHash);
+  if (!gateId) throw new Error('writeRuntimeReport: gateId bắt buộc (canonical identity tổng hợp)');
+  const reportId = computeReportId(headSha, manifestHash, gateId);
   const failures = (result.stepResults || [])
     .filter(sr => sr.exitCode !== 0 || sr.timedOut || sr.stdoutTruncated || sr.stderrTruncated)
     .map(sr => ({
@@ -177,6 +209,7 @@ export function writeRuntimeReport({ projectId, headSha, manifestHash, gateId, e
   const report = {
     schemaVersion: '1.0',
     headSha,
+    gateId, // GPT-REV-106: bind gateId trong report để read tools verify identity.
     passed: result.passed,
     tests: { passed: result.passedCount, failed: result.failedCount, total: result.total },
     duration: result.duration,
@@ -217,6 +250,10 @@ export function verifyCacheIntegrity(meta, key) {
   return recomputed === key;
 }
 
+// GPT-REV-106: checkCache đọc canonical cached artifact từ artifactDirPath để trả
+// result đầy đủ cho opTestRun. Trước đây chỉ trả metadata (headSha/gateId/...) khiến
+// `cached.result` undefined → crash khi cache hit. Verify integrity cả meta lẫn
+// artifact: nếu identity meta OK nhưng artifact sai/thiếu → fail-closed CORRUPTED.
 export function checkCache(cacheDirP, key) {
   const metaFile = join(cacheDirP, key + '.meta.json');
   if (!existsSync(metaFile)) return { valid: false, reason: 'MISSING' };
@@ -226,7 +263,13 @@ export function checkCache(cacheDirP, key) {
     if (age > CACHE_TTL_MS) return { valid: false, reason: 'TTL_EXPIRED', age };
     if (!meta.passed) return { valid: false, reason: 'NOT_PASS', passed: false };
     if (!verifyCacheIntegrity(meta, key)) return { valid: false, reason: 'IDENTITY_MISMATCH' };
-    return { valid: true, cachedAt: meta.cachedAt, headSha: meta.headSha, gateId: meta.gateId, manifestHash: meta.manifestHash, envFingerprint: meta.envFingerprint };
+    // Đọc canonical artifact theo key (cùng shard cacheKey.slice(0,2) với meta).
+    const artifactFile = join(artifactDirPath(key, dirname(dirname(cacheDirP))), key + '.artifact.json');
+    if (!existsSync(artifactFile)) return { valid: false, reason: 'ARTIFACT_MISSING' };
+    let result;
+    try { result = JSON.parse(readFileSync(artifactFile, 'utf8')); }
+    catch { return { valid: false, reason: 'ARTIFACT_CORRUPTED' }; }
+    return { valid: true, cachedAt: meta.cachedAt, headSha: meta.headSha, gateId: meta.gateId, manifestHash: meta.manifestHash, envFingerprint: meta.envFingerprint, result };
   } catch { return { valid: false, reason: 'CORRUPTED' }; }
 }
 

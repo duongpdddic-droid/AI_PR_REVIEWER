@@ -154,9 +154,13 @@ export function findReport(artifactDirs, { reportId, headSha, manifestHash }) {
       try { report = readJson(safe.filePath); } catch { continue; }
       const v = validateReport(report);
       if (!v.valid) continue;
-      // bind identity tuyệt đối: filename/requested id === report.reportId === canonical(head+manifestHash)
+      // bind identity tuyệt đối: filename/requested id === report.reportId === canonical
+      // GPT-REV-106 (Finding 2): nếu report có gateId, dùng 3-arg computeReportId
+      // (canonical identity tổng hợp bind gate). Ngược lại 2-arg (legacy Phase 2).
       if (report.reportId !== reportId) continue;
-      const canonical = computeReportId(report.headSha, report.manifestHash);
+      const canonical = report.gateId
+        ? computeReportId(report.headSha, report.manifestHash, report.gateId)
+        : computeReportId(report.headSha, report.manifestHash);
       if (report.reportId !== canonical) continue;
       return report;
     }
@@ -170,7 +174,7 @@ export function findReport(artifactDirs, { reportId, headSha, manifestHash }) {
     for (const artifactDir of dirs) {
       for (const r of listReports(artifactDir)) {
         if (r.headSha === headSha && validateReport(r).valid
-          && r.reportId === computeReportId(r.headSha, r.manifestHash)) {
+          && r.reportId === computeReportId(r.headSha, r.manifestHash, r.gateId)) {
           candidates.push(r);
         }
       }
@@ -464,16 +468,26 @@ async function opTestRun(args, ctx) {
   const cdPath = buildCacheDir(runtimeRoot, key);
   const cached = checkCache(cdPath, key);
   if (cached.valid && !forceOverwrite) {
-    const rep = writeRuntimeReport({ projectId, headSha: realHead, manifestHash: canonicalManifestHash, gateId: gate, envFingerprint }, cached.result, runtimeRoot);
-    return { cached: true, projectId, headSha: realHead, gate, cacheKey: key, reportId: rep.reportId, passed: true, source: 'cache' };
+    // GPT-REV-106 (Finding 1): checkCache giờ trả cached.result đầy đủ (đọc canonical
+    // artifact). Nếu thiếu result (phiên bản cũ / corrupt) → fail-closed chạy lại
+    // executor thay vì crash.
+    if (!cached.result) {
+      // fallthrough: chạy executor, ghi đè cache.
+    } else {
+      const rep = writeRuntimeReport({ projectId, headSha: realHead, manifestHash: canonicalManifestHash, gateId: gate, envFingerprint }, cached.result, runtimeRoot);
+      return { cached: true, projectId, headSha: realHead, gate, cacheKey: key, reportId: rep.reportId, passed: true, source: 'cache' };
+    }
   }
   const lock = createLock(runtimeRoot, key);
   await lock.acquire();
   try {
     const cached2 = checkCache(buildCacheDir(runtimeRoot, key), key);
     if (cached2.valid && !forceOverwrite) {
-      const rep = writeRuntimeReport({ projectId, headSha: realHead, manifestHash: canonicalManifestHash, gateId: gate, envFingerprint }, cached2.result, runtimeRoot);
-      return { cached: true, projectId, headSha: realHead, gate, cacheKey: key, reportId: rep.reportId, passed: true, source: 'cache' };
+      if (cached2.result) {
+        const rep = writeRuntimeReport({ projectId, headSha: realHead, manifestHash: canonicalManifestHash, gateId: gate, envFingerprint }, cached2.result, runtimeRoot);
+        return { cached: true, projectId, headSha: realHead, gate, cacheKey: key, reportId: rep.reportId, passed: true, source: 'cache' };
+      }
+      // cached2.result missing → fallthrough chạy executor.
     }
     const result = await runGate(ctx.manifest, gate, { root: ctx.root });
     // test_run tạo canonical CompactReport vào runtime artifact store; read tools

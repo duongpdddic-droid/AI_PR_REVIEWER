@@ -6,7 +6,7 @@ import {
   checkCache, writeCache, prepareRuntime, createLock, cleanupExpired, verifyCacheIntegrity,
 } from './cache.mjs';
 import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync, realpathSync, openSync, readFileSync, readdirSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { join, sep, dirname, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -342,6 +342,45 @@ console.log('11c. verifyCacheIntegrity (meta thật)');
     assert.strictEqual(threwTamper, true, 'artifact tamper (reportId lệch) bị từ chối');
   }
   console.log('16. artifact tamper (Finding 4)');
+
+  // GPT-REV-106 (Finding 3): stale-lock race — đọc identity A, atomic-swap lockfile
+  // thành B giữa observation và quarantine → B KHÔNG bị mất. Test bằng test hook
+  // __quarantineForTest: mô phỏng race bằng cách set lockFile = identity A, gọi
+  // __quarantineForTest(A) nhưng ngay trước khi nó re-read, swap lockFile thành B
+  // (thông qua side effect: trong test này, gọi __quarantineForTest với observed=A
+  // nhưng lockFile hiện tại đã là B) → phải trả race_detected, KHÔNG rename.
+  {
+    const raceKey = 'racetest' + '0'.repeat(58);
+    const raceRoot = join(tmpdir(), 'fake-race-' + Date.now());
+    const raceLock = createLock(raceRoot, raceKey);
+    const lockPath = raceLock.lockFile;
+    // Identity A: PID chết (giả), nonce A.
+    const identA = '99999:aaaaaaaaaaaaaaaa';
+    writeFileSync(lockPath, identA);
+    // Atomic swap lockFile thành identity B (mô phỏng process khác đã quarantine A
+    // rồi ghi B với identity khác). Trong test, swap = writeFileSync lại với B
+    // (lockfile path như nhau, content đã đổi).
+    const identB = '88888:bbbbbbbbbbbbbbbb';
+    writeFileSync(lockPath, identB);
+    // Gọi quarantine với observed=A, nhưng lockfile hiện tại = B → race detected.
+    const r = raceLock.__quarantineForTest(identA);
+    assert.strictEqual(r.ok, false, 'race: identity đã đổi → ok=false');
+    assert.strictEqual(r.reason, 'race_detected', 'race: reason=race_detected');
+    // Verify lockfile vẫn còn identity B (KHÔNG bị rename nhầm).
+    assert.strictEqual(readFileSync(lockPath, 'utf8').trim(), identB, 'race: B vẫn còn identity nguyên vẹn');
+    // Verify không có stale file nào được tạo (vì rename không xảy ra).
+    const dir = dirname(lockPath);
+    const stale = readdirSync(dir).filter(f => f.startsWith(basename(lockPath) + '.stale-'));
+    assert.strictEqual(stale.length, 0, 'race: không tạo stale file (rename đã bị chặn)');
+    // Cleanup: rename thật với observed=B để lockfile B được move ra stale (đúng).
+    const r2 = raceLock.__quarantineForTest(identB);
+    assert.strictEqual(r2.ok, true, 'sau khi re-read đồng bộ → rename OK');
+    const stale2 = readdirSync(dir).filter(f => f.startsWith(basename(lockPath) + '.stale-'));
+    assert.strictEqual(stale2.length, 1, 'sau rename: 1 stale file');
+    assert.ok(stale2[0].includes('bbbbbbbbbbbbbbbb'), 'stale file suffix chứa identity B (KHÔNG chứa A)');
+    try { rmSync(raceRoot, { recursive: true, force: true }); } catch {}
+  }
+  console.log('17. stale-lock race (Finding 3)');
 
   try { rmSync(fakeRoot, { recursive: true, force: true }); } catch {}
   console.log('ALL TESTS PASSED');

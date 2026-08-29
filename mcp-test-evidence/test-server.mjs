@@ -8,11 +8,12 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computeReportId, computeManifestHash } from "../scripts/test-evidence-reporter.mjs";
+import { runtimeRoot } from "./cache.mjs";
 
 const SERVER = fileURLToPath(new URL("./server.mjs", import.meta.url));
 const PASS_HEAD = "1111111111111111111111111111111111111111";
@@ -43,6 +44,13 @@ function buildFixture() {
         { id: "syntax", name: "node --check", command: "node", args: ["scripts/full-verify.mjs"] },
         { id: "unit", name: "test-pure-logic", command: "node", args: ["scripts/test-pure-logic.mjs"] },
         { id: "integration", name: "integration tests", command: "node", args: ["scripts/test-integration-orchestrator.mjs"] },
+      ],
+      // GPT-REV-106 (Finding 2): gate thứ 2 cùng head+manifest nhưng kết quả khác
+      // (PASS). Hai gate phải sinh reportId khác nhau (canonical identity tổng hợp
+      // bind gateId), không ghi đè artifact lẫn nhau. Step id "unit2" (KHÔNG trùng
+      // "unit" trong verify) để stepIndex map đúng gate, không phá test cũ.
+      unit_only: [
+        { id: "unit2", name: "test-pure-logic-alt", command: "node", args: ["scripts/test-pure-logic.mjs"] },
       ],
     },
   };
@@ -307,6 +315,47 @@ async function run() {
     const lg = await call("test_log_excerpt", { reportId: runReportId, failureIndex: 0, maxLines: 3 });
     ok(lg.result && !lg.result.isError && typeof lg.data.logExcerpt === "string",
       "REV-105: test_log_excerpt đọc được log từ runtime report");
+
+    // ── GPT-REV-106 (Finding 1): test_run 2 lần cùng gate → lần 2 cached=true, không crash.
+    // Cleanup runtime cache (cùng projectId có thể cache từ session trước) để test
+    // lần 1 chắc chắn MISS, lần 2 chắc chắn HIT.
+    try { rmSync(runtimeRoot("fixture-project"), { recursive: true, force: true }); } catch {}
+    // Trước fix: checkCache không trả cached.result → writeRuntimeReport nhận undefined
+    // → saveReport throw vì result.stepResults undefined. Bây giờ checkCache đọc canonical
+    // artifact, trả result đầy đủ → cache hit ghi report mới cùng reportId (idempotent).
+    const tr1 = await call("test_run", { gate: "unit_only", projectId: "fixture-project" });
+    ok(tr1.result && !tr1.result.isError && tr1.data.cached === false && tr1.data.passed === true,
+      "REV-106: test_run lần 1 (unit_only) → cached=false, passed=true");
+    const tr1Id = tr1.data.reportId;
+    const tr1Key = tr1.data.cacheKey;
+    const tr2 = await call("test_run", { gate: "unit_only", projectId: "fixture-project" });
+    ok(tr2.result && !tr2.result.isError && tr2.data.cached === true,
+      "REV-106 (Finding 1): test_run lần 2 cùng gate → cached=true, không crash");
+    ok(typeof tr2.data.reportId === "string" && /^[0-9a-f]{16}$/.test(tr2.data.reportId),
+      "REV-106: test_run cache hit trả reportId hợp lệ");
+    ok(tr2.data.cacheKey === tr1Key, "REV-106: cacheKey ổn định qua 2 lần gọi");
+    // Cache hit dùng cùng gateId (3-arg computeReportId) → reportId giống lần 1.
+    ok(tr2.data.reportId === tr1Id, "REV-106: cache hit → reportId ổn định (gate-specific canonical)");
+
+    // ── GPT-REV-106 (Finding 2): 2 gate cùng head+manifest → 2 reportId KHÁC NHAU.
+    // Trước fix: computeReportId(headSha, manifestHash) không bind gateId → 2 gate trùng
+    // reportId → ghi đè artifact. Bây giờ computeReportId thêm gateId → 2 reportId
+    // distinct, 2 artifact file distinct. Verify qua test_status (read tool enumerate
+    // runtime shards, không cần truy cập file trực tiếp).
+    const trVerify = await call("test_run", { gate: "verify", projectId: "fixture-project" });
+    const trUnit = await call("test_run", { gate: "unit_only", projectId: "fixture-project" });
+    ok(trVerify.result && !trVerify.result.isError && trUnit.result && !trUnit.result.isError,
+      "REV-106 (Finding 2): 2 gate chạy được đồng thời");
+    ok(trVerify.data.reportId !== trUnit.data.reportId,
+      "REV-106 (Finding 2): 2 gate cùng head+manifest → 2 reportId KHÁC nhau (canonical identity tổng hợp bind gateId)");
+    // test_status theo reportId của từng gate phải đọc đúng report tương ứng (chứng minh
+    // 2 artifact tồn tại độc lập vì nếu ghi đè, cùng reportId → test_status trả cùng
+    // kết quả; khác reportId + kết quả khác nhau → 2 artifact distinct).
+    const stVerify = await call("test_status", { reportId: trVerify.data.reportId, projectId: "fixture-project" });
+    const stUnit = await call("test_status", { reportId: trUnit.data.reportId, projectId: "fixture-project" });
+    ok(stVerify.result && !stVerify.result.isError && stVerify.data.passed === false
+      && stUnit.result && !stUnit.result.isError && stUnit.data.passed === true,
+      "REV-106: test_status theo reportId từng gate đọc đúng kết quả (verify FAIL, unit_only PASS) → 2 artifact độc lập");
 
     console.log("[3] negative fail-closed");
     for (const c of [

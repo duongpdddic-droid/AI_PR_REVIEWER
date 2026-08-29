@@ -11,9 +11,12 @@ const REPORT_SCHEMA_VERSION = '1.0';
 const MAX_PASS_JSON_BYTES = 4096;
 const MAX_LOG_EXCERPT_LINES = 50;
 
+// GPT-REV-106 (Finding 2): gateId là trường hợp lệ trong report — canonical binding
+// reportId đã bind gateId, nên report phải mang gateId để read tools verify identity
+// (hai gate cùng head+manifest có reportId khác nhau, không ghi đè).
 const REPORT_FIELDS = new Set([
   'schemaVersion', 'headSha', 'passed', 'tests', 'duration', 'reportId',
-  'manifestHash', 'blocking', 'failureCodes', 'failures', 'environmentFingerprint', 'artifacts',
+  'manifestHash', 'blocking', 'failureCodes', 'failures', 'environmentFingerprint', 'artifacts', 'gateId',
 ]);
 const MANIFEST_FIELDS = new Set([
   'schemaVersion', 'projectId', 'repository', 'headSha', 'gates', 'environmentFingerprint', 'generatedAt',
@@ -51,8 +54,16 @@ export function computeManifestHash(manifest) {
   return sha256hex(JSON.stringify(rest));
 }
 
-export function computeReportId(headSha, manifestHash) {
-  return sha256hex(`${headSha}:${manifestHash}`).slice(0, 16);
+// GPT-REV-106 (Finding 2): 2 gate cùng HEAD + manifest phải có reportId KHÁC nhau.
+// Canonical binding: reportId = sha256(headSha|manifestHash|gateId)[:16]. Phase 2
+// read-only dùng 2-arg (backward compat); Phase 3 runtime report (writeRuntimeReport)
+// dùng 3-arg để gate-specific. Overload: nếu gateId falsy → giữ legacy 2-trường
+// (Phase 2 artifact đã seed theo công thức cũ, không phá compat).
+export function computeReportId(headSha, manifestHash, gateId) {
+  const raw = gateId
+    ? `${headSha}|${manifestHash}|${gateId}`
+    : `${headSha}:${manifestHash}`;
+  return sha256hex(raw).slice(0, 16);
 }
 
 // ── Compact formatting ─────────────────────────────────────────────
