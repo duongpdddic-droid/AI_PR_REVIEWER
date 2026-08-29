@@ -8,11 +8,12 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computeReportId, computeManifestHash } from "../scripts/test-evidence-reporter.mjs";
+import { runtimeRoot } from "./cache.mjs";
 
 const SERVER = fileURLToPath(new URL("./server.mjs", import.meta.url));
 const PASS_HEAD = "1111111111111111111111111111111111111111";
@@ -44,6 +45,13 @@ function buildFixture() {
         { id: "unit", name: "test-pure-logic", command: "node", args: ["scripts/test-pure-logic.mjs"] },
         { id: "integration", name: "integration tests", command: "node", args: ["scripts/test-integration-orchestrator.mjs"] },
       ],
+      // GPT-REV-106 (Finding 2): gate thứ 2 cùng head+manifest nhưng kết quả khác
+      // (PASS). Hai gate phải sinh reportId khác nhau (canonical identity tổng hợp
+      // bind gateId), không ghi đè artifact lẫn nhau. Step id "unit2" (KHÔNG trùng
+      // "unit" trong verify) để stepIndex map đúng gate, không phá test cũ.
+      unit_only: [
+        { id: "unit2", name: "test-pure-logic-alt", command: "node", args: ["scripts/test-pure-logic.mjs"] },
+      ],
     },
   };
   writeFileSync(path.join(agent, "project.json"), JSON.stringify({
@@ -55,6 +63,13 @@ function buildFixture() {
   const STALE_HEAD = "3333333333333333333333333333333333333333";
   manifest.headSha = STALE_HEAD;
   writeFileSync(path.join(agent, "test-manifest.json"), JSON.stringify(manifest, null, 2));
+  // GPT-REV-105 (Finding 2): tạo stub scripts trong fixture root để test_run thực thi
+  // (canonicalizeNodeArgs resolve + realpath containment). integration FAIL để test_run FAIL.
+  const scriptsDir = path.join(root, "scripts");
+  mkdirSync(scriptsDir, { recursive: true });
+  writeFileSync(path.join(scriptsDir, "full-verify.mjs"), "console.log('syntax ok');\n");
+  writeFileSync(path.join(scriptsDir, "test-pure-logic.mjs"), "console.log('unit ok');\n");
+  writeFileSync(path.join(scriptsDir, "test-integration-orchestrator.mjs"), "console.error('integration boom'); process.exit(1);\n");
   const mhPass = computeManifestHash({ ...manifest, headSha: PASS_HEAD });
   const mhFail = computeManifestHash({ ...manifest, headSha: FAIL_HEAD });
   const PASS_REPORT = computeReportId(PASS_HEAD, mhPass);
@@ -164,8 +179,8 @@ async function run() {
     const tools = await rpc("tools/list", {});
     const names = tools.result.tools.map((t) => t.name);
     ok(JSON.stringify(names) === JSON.stringify(
-      ["test_status", "test_failures", "test_failure_detail", "test_log_excerpt", "test_finding_map"]),
-      `tools/list đủ 5 read-only tools (${names.join(", ")})`);
+      ["test_run", "test_status", "test_failures", "test_failure_detail", "test_log_excerpt", "test_finding_map", "test_verify_identity"]),
+      `tools/list đủ 7 tools (test_run + 5 read-only + test_verify_identity) (${names.join(", ")})`);
 
     const call = async (name, args) => {
       const r = await rpc("tools/call", { name, arguments: args });
@@ -216,11 +231,13 @@ async function run() {
 
     // ── GPT-REV-098: headSha hash manifest RUNTIME (thay headSha), không hash manifest committed stale ─
     // Manifest committed (STALE_HEAD) ≠ FAIL_HEAD. Server phải hash {manifest, headSha: FAIL_HEAD}
-    // (giống reporter full-verify) để test_status({headSha}) đọc đúng artifact canonical dù file stale.
+    // (giống reporter full-verify) để test_status({reportId}) đọc đúng artifact canonical dù file stale.
+    // REGRESSION Finding 3: dùng reportId (deterministic) thay vì headSha-only để tránh
+    // ambiguous sau khi test_run tạo thêm report runtime cho cùng headSha.
     ok(manifest.headSha === STALE_HEAD, "fixture: manifest committed có headSha STALE (khác requested HEAD)");
-    const sStale = await call("test_status", { headSha: FAIL_HEAD });
+    const sStale = await call("test_status", { reportId: FAIL_REPORT });
     ok(sStale.result && !sStale.result.isError && sStale.data.passed === false && sStale.data.blocking === 2,
-      "GPT-REV-098: test_status theo headSha thành công dù manifest committed headSha stale (hash runtime)");
+      "GPT-REV-098: test_status theo reportId thành công dù manifest committed headSha stale (hash runtime)");
     // Artifact built từ manifest NỘI DUNG sai (headSha đúng nhưng phần còn lại lệch) → manifestHash
     // khác canonical hiện tại → findReport theo headSha+manifestHash phải fail-closed.
     const WRONG = "abcdef0123456789abcdef0123456789abcdef01";
@@ -235,7 +252,111 @@ async function run() {
     ok(wrongR.result?.isError === true && /không có report artifact/.test(wrongR.result.content[0].text),
       "GPT-REV-098: artifact từ manifest nội dung sai → test_status(headSha) fail-closed (không khớp canonical)");
 
-    // ── Negative fail-closed ────────────────────────────────────────
+    // ── GPT-REV-105 (Finding 1): test_verify_identity — server tự tính real identity ──
+    // Server lấy real Git HEAD (SKIP_REMOTE → manifest.headSha), canonical manifestHash,
+    // allowlisted envFingerprint. Caller chỉ assert expected; mismatch → fail-closed.
+    const vi = await call("test_verify_identity", {
+      gate: "verify", projectId: "fixture-project",
+    });
+    ok(vi.result && !vi.result.isError, "REV-105: test_verify_identity không lỗi");
+    ok(typeof vi.data === "object" && vi.data.cacheKey && /^[0-9a-f]{64}$/.test(vi.data.cacheKey),
+      "REV-105: identity trả cacheKey thực (không phải {})");
+    ok(vi.data.selfComputed === true, "REV-105: selfComputed=true (server tự tính)");
+    ok(vi.data.status !== "approved", "REV-105: KHÔNG tự gắn status:approved");
+    // SKIP_REMOTE → real Git HEAD null → fallback manifest.headSha (STALE_HEAD, committed).
+    ok(vi.data.headSha === STALE_HEAD, "REV-105: real HEAD = manifest.headSha (SKIP_REMOTE fallback)");
+    // canonical manifestHash tính từ manifest runtime copy (headSha=STALE_HEAD).
+    const mhStale = computeManifestHash({ ...manifest, headSha: STALE_HEAD });
+    ok(vi.data.manifestHash === mhStale, "REV-105: canonical manifestHash khớp manifest runtime (headSha=STALE_HEAD)");
+    // mismatch fail-closed: caller assert sai expected → lỗi IDENTITY_MISMATCH.
+    const bad = await call("test_verify_identity", {
+      gate: "verify", projectId: "fixture-project",
+      expectHeadSha: "0000000000000000000000000000000000000000",
+    });
+    ok(bad.result?.isError === true && /IDENTITY_MISMATCH/.test(bad.result.content[0].text),
+      "REV-105: expectHeadSha sai → fail-closed IDENTITY_MISMATCH");
+
+    // ── GPT-REV-100/105 (Finding 1 + Finding 3): test_run tạo CompactReport vào runtime store ──
+    // Server tự tính identity từ Project Registry + real Git HEAD (SKIP_REMOTE → manifest.headSha)
+    // + canonical manifestHash + allowlisted envFingerprint. Caller KHÔNG gửi headSha/manifestHash/
+    // envFingerprint nữa; có thể gửi expectXxx để assert.
+    // → test_status/failures/detail/log đọc được qua reportId.
+    const tr = await call("test_run", {
+      gate: "verify", projectId: "fixture-project",
+    });
+    ok(tr.result && !tr.result.isError && typeof tr.data === "object" && tr.data.cacheKey,
+      "REV-100: test_run dispatch await → data có cacheKey thực (không phải {})");
+    ok(typeof tr.data.reportId === "string" && /^[0-9a-f]{16}$/.test(tr.data.reportId),
+      "REV-105: test_run trả reportId (CompactReport đã ghi runtime store)");
+    ok(tr.data.headSha === STALE_HEAD,
+      "Finding 1: test_run trả headSha từ server-derived (SKIP_REMOTE → manifest.headSha), caller không tự quyết");
+    const runReportId = tr.data.reportId;
+    // REGRESSION Finding 1: caller pass expectHeadSha SAI → fail-closed IDENTITY_MISMATCH.
+    const badRun = await call("test_run", {
+      gate: "verify", projectId: "fixture-project",
+      expectHeadSha: "0000000000000000000000000000000000000000",
+    });
+    ok(badRun.result?.isError === true && /IDENTITY_MISMATCH/.test(badRun.result.content[0].text),
+      "Finding 1 REGRESSION: test_run expectHeadSha sai → IDENTITY_MISMATCH fail-closed");
+    // REGRESSION Finding 3: test_run ghi vào shard KHÔNG PHẢI 'xx' (cacheKey dài hex).
+    // test_status vẫn tìm được qua reportId nhờ enumerate mọi runtime shard.
+    // verify gate: 3 steps (syntax, unit, integration). integration exit 1 → 1 failure,
+    // blocking = max(1, failures.length) = 1. Trước fix: resolveReport luôn đọc shard 'xx'
+    // → miss hoàn toàn; assert cũ `blocking===2` dựa trên pre-seeded FAIL_REPORT khác.
+    const st = await call("test_status", { reportId: runReportId, projectId: "fixture-project" });
+    ok(st.result && !st.result.isError && st.data.passed === false && st.data.blocking === 1,
+      "Finding 3: test_status đọc được report runtime store (mọi shard) (blocking=1, integration fail)");
+    // detail + log qua cùng reportId.
+    // Fixture: verify gate có 3 steps (syntax, unit, integration); unit stub PASS,
+    // integration stub exit 1 → failures = [integration], code = STEP_INTEGRATION_FAIL.
+    const dt = await call("test_failure_detail", { reportId: runReportId, failureIndex: 0 });
+    ok(dt.result && !dt.result.isError && /STEP_INTEGRATION_FAIL/.test(dt.data.failure || ""),
+      "REV-105: test_failure_detail đọc được failure từ runtime report");
+    const lg = await call("test_log_excerpt", { reportId: runReportId, failureIndex: 0, maxLines: 3 });
+    ok(lg.result && !lg.result.isError && typeof lg.data.logExcerpt === "string",
+      "REV-105: test_log_excerpt đọc được log từ runtime report");
+
+    // ── GPT-REV-106 (Finding 1): test_run 2 lần cùng gate → lần 2 cached=true, không crash.
+    // Cleanup runtime cache (cùng projectId có thể cache từ session trước) để test
+    // lần 1 chắc chắn MISS, lần 2 chắc chắn HIT.
+    try { rmSync(runtimeRoot("fixture-project"), { recursive: true, force: true }); } catch {}
+    // Trước fix: checkCache không trả cached.result → writeRuntimeReport nhận undefined
+    // → saveReport throw vì result.stepResults undefined. Bây giờ checkCache đọc canonical
+    // artifact, trả result đầy đủ → cache hit ghi report mới cùng reportId (idempotent).
+    const tr1 = await call("test_run", { gate: "unit_only", projectId: "fixture-project" });
+    ok(tr1.result && !tr1.result.isError && tr1.data.cached === false && tr1.data.passed === true,
+      "REV-106: test_run lần 1 (unit_only) → cached=false, passed=true");
+    const tr1Id = tr1.data.reportId;
+    const tr1Key = tr1.data.cacheKey;
+    const tr2 = await call("test_run", { gate: "unit_only", projectId: "fixture-project" });
+    ok(tr2.result && !tr2.result.isError && tr2.data.cached === true,
+      "REV-106 (Finding 1): test_run lần 2 cùng gate → cached=true, không crash");
+    ok(typeof tr2.data.reportId === "string" && /^[0-9a-f]{16}$/.test(tr2.data.reportId),
+      "REV-106: test_run cache hit trả reportId hợp lệ");
+    ok(tr2.data.cacheKey === tr1Key, "REV-106: cacheKey ổn định qua 2 lần gọi");
+    // Cache hit dùng cùng gateId (3-arg computeReportId) → reportId giống lần 1.
+    ok(tr2.data.reportId === tr1Id, "REV-106: cache hit → reportId ổn định (gate-specific canonical)");
+
+    // ── GPT-REV-106 (Finding 2): 2 gate cùng head+manifest → 2 reportId KHÁC NHAU.
+    // Trước fix: computeReportId(headSha, manifestHash) không bind gateId → 2 gate trùng
+    // reportId → ghi đè artifact. Bây giờ computeReportId thêm gateId → 2 reportId
+    // distinct, 2 artifact file distinct. Verify qua test_status (read tool enumerate
+    // runtime shards, không cần truy cập file trực tiếp).
+    const trVerify = await call("test_run", { gate: "verify", projectId: "fixture-project" });
+    const trUnit = await call("test_run", { gate: "unit_only", projectId: "fixture-project" });
+    ok(trVerify.result && !trVerify.result.isError && trUnit.result && !trUnit.result.isError,
+      "REV-106 (Finding 2): 2 gate chạy được đồng thời");
+    ok(trVerify.data.reportId !== trUnit.data.reportId,
+      "REV-106 (Finding 2): 2 gate cùng head+manifest → 2 reportId KHÁC nhau (canonical identity tổng hợp bind gateId)");
+    // test_status theo reportId của từng gate phải đọc đúng report tương ứng (chứng minh
+    // 2 artifact tồn tại độc lập vì nếu ghi đè, cùng reportId → test_status trả cùng
+    // kết quả; khác reportId + kết quả khác nhau → 2 artifact distinct).
+    const stVerify = await call("test_status", { reportId: trVerify.data.reportId, projectId: "fixture-project" });
+    const stUnit = await call("test_status", { reportId: trUnit.data.reportId, projectId: "fixture-project" });
+    ok(stVerify.result && !stVerify.result.isError && stVerify.data.passed === false
+      && stUnit.result && !stUnit.result.isError && stUnit.data.passed === true,
+      "REV-106: test_status theo reportId từng gate đọc đúng kết quả (verify FAIL, unit_only PASS) → 2 artifact độc lập");
+
     console.log("[3] negative fail-closed");
     for (const c of [
       { name: "test_status", args: { reportId: "../evil" }, expect: "reportId" },
