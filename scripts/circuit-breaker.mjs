@@ -121,6 +121,28 @@ export function shouldPause(reg, tool, now = Date.now()) {
   return { pause: false, state: BREAKER_STATES.OPEN, reason: 'cooldown elapsed — probe allowed' };
 }
 
+// claimHalfOpenProbe(reg, tool, now=Date.now()) -> {ok, claimed, entry, registry, reason}
+// Atomic claim HALF_OPEN probe (finding 1): CHỈ chuyển OPEN -> HALF_OPEN khi cooldown đã elapsed.
+// KHONG mutate registry input; trả registry MOI. Fail-closed: tool không OPEN / chưa hết cooldown -> claimed:false.
+export function claimHalfOpenProbe(reg, tool, now = Date.now()) {
+  if (!reg || !reg.ok || typeof tool !== 'string' || !tool) {
+    return { ok: false, claimed: false, entry: null, registry: null, reason: BREAKER_REASONS.INVALID_TOOL };
+  }
+  const entry = reg.tools[tool];
+  if (!entry || entry.state !== BREAKER_STATES.OPEN) {
+    return { ok: true, claimed: false, entry: entry || null, registry: reg,
+      reason: entry ? `tool state is ${entry.state}, not OPEN` : 'tool not found' };
+  }
+  const elapsed = now - (entry.openedAt || 0);
+  if (elapsed < reg.cooldownMs) {
+    return { ok: true, claimed: false, entry, registry: reg,
+      reason: `cooldown ${Math.max(0, reg.cooldownMs - elapsed)}ms remaining` };
+  }
+  const next = { ...entry, state: BREAKER_STATES.HALF_OPEN, lastReason: 'probe_claimed' };
+  const newReg = { ...reg, tools: { ...reg.tools, [tool]: next } };
+  return { ok: true, claimed: true, entry: next, registry: newReg, reason: null };
+}
+
 // peek(reg, tool) -> {ok, entry, state, failures} (read-only)
 export function peek(reg, tool) {
   if (!reg || !reg.ok) return { ok: false, entry: null, state: null, failures: 0 };

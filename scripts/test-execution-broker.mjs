@@ -6,7 +6,8 @@
 import assert from 'node:assert/strict';
 import {
   TOOLS, AUTO_COMMIT_REQUIREMENTS,
-  checkAutoCommitGate, runTool,
+  checkAutoCommitGate, runTool, shouldEmitDodEvent,
+  originToRepo, mutationKey, HANDOFF_ACTION, MANDATORY_TEST_SUITES,
 } from './execution-broker.mjs';
 import { DOD_STATES, DOD_EVENTS, createDod, apply } from './dod.mjs';
 import {
@@ -115,10 +116,78 @@ test('DoD session IMPLEMENTED + verification event -> VERIFIED_NOT_PUSHED', () =
   assert.equal(s.state, DOD_STATES.VERIFIED_NOT_PUSHED);
 });
 
+// 6. shouldEmitDodEvent (Finding 3)
+test('shouldEmitDodEvent repo_diff totalFiles=0 -> false', () => {
+  assert.equal(shouldEmitDodEvent('repo_diff', { ok: true, data: { totalFiles: 0 } }), false);
+});
+test('shouldEmitDodEvent repo_diff totalFiles=5 -> true', () => {
+  assert.equal(shouldEmitDodEvent('repo_diff', { ok: true, data: { totalFiles: 5 } }), true);
+});
+test('shouldEmitDodEvent repo_diff ok=false -> false', () => {
+  assert.equal(shouldEmitDodEvent('repo_diff', { ok: false }), false);
+});
+test('shouldEmitDodEvent test_run allPass=true -> true', () => {
+  assert.equal(shouldEmitDodEvent('test_run', { ok: true, data: { allPass: true } }), true);
+});
+test('shouldEmitDodEvent test_run allPass=false -> false', () => {
+  assert.equal(shouldEmitDodEvent('test_run', { ok: true, data: { allPass: false } }), false);
+});
+test('shouldEmitDodEvent handoff_status markerValid=true -> true', () => {
+  assert.equal(shouldEmitDodEvent('handoff_status', { ok: true, data: { handoffMarkerValid: true } }), true);
+});
+test('shouldEmitDodEvent handoff_status markerValid=false -> false', () => {
+  assert.equal(shouldEmitDodEvent('handoff_status', { ok: true, data: { handoffMarkerValid: false } }), false);
+});
+test('shouldEmitDodEvent verify_status allPass undefined -> false (fail-closed)', () => {
+  assert.equal(shouldEmitDodEvent('verify_status', { ok: true, data: {} }), false);
+});
+test('shouldEmitDodEvent repo_status (không mapping) -> true', () => {
+  assert.equal(shouldEmitDodEvent('repo_status', { ok: true, data: {} }), true);
+});
+
+// 7. originToRepo (Finding 4)
+test('originToRepo https URL -> owner/repo', () => {
+  assert.equal(originToRepo('https://github.com/duongpdddic-droid/AI_PR_REVIEWER.git'), 'duongpdddic-droid/AI_PR_REVIEWER');
+});
+test('originToRepo git@ssh URL -> owner/repo', () => {
+  assert.equal(originToRepo('git@github.com:user/project.git'), 'user/project');
+});
+test('originToRepo invalid URL -> null', () => {
+  assert.equal(originToRepo('https://other.com/repo.git'), null);
+  assert.equal(originToRepo(''), null);
+  assert.equal(originToRepo(null), null);
+});
+
+// 8. mutationKey
+test('mutationKey format', () => {
+  const k = mutationKey({ repository: 'o/r', prNumber: 7, headSha: 'a'.repeat(40), policyVersion: 'v1', action: 'handoff:ready' });
+  assert.equal(k, 'o/r::7::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa::v1::handoff:ready');
+});
+
+// 9. HANDOFF_ACTION
+test('HANDOFF_ACTION = handoff:ready', () => {
+  assert.equal(HANDOFF_ACTION, 'handoff:ready');
+});
+
+// 10. MANDATORY_TEST_SUITES (Finding 3)
+test('MANDATORY_TEST_SUITES co 5 suites', () => {
+  assert.equal(MANDATORY_TEST_SUITES.length, 5);
+  assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-pure-logic.mjs'));
+  assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-dod.mjs'));
+  assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-circuit-breaker.mjs'));
+  assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-execution-broker.mjs'));
+  assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-breaker-persist.mjs'));
+});
+
 // Run
 for (const c of cases) {
   try { c.fn(); log(true, c.name, null); }
   catch (e) { log(false, c.name, e); }
+}
+// Invariant: passed không bao giờ vượt cases.length (chống duplicate runner loop)
+if (passed !== cases.length) {
+  console.log(`\nINVARIANT FAIL: passed=${passed} !== cases.length=${cases.length}`);
+  process.exit(1);
 }
 console.log(`\nTổng: ${passed}/${cases.length} PASS`);
 process.exit(failed === 0 ? 0 : 1);

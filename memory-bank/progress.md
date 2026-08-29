@@ -1,3 +1,21 @@
+## 30/08/2026 02:15 — Fix 4 findings GPT review PR #28 (breaker persist + gate không suy diễn)
+- [x] `scripts/breaker-persist.mjs` (mới): atomicWriteJson/readJsonSafe, acquireLock/withFileLock exclusive, loadBreaker/saveBreaker/buildBreakerNamespace + safeFilePart Windows-safe.
+- [x] `scripts/circuit-breaker.mjs`: `claimHalfOpenProbe` persist sang file per-tool (cooldown, fail reset OPEN, success CLOSED).
+- [x] `scripts/execution-broker.mjs`: `shouldEmitDodEvent` gate `allPass === true` (fail-closed undefined/null); `toolVerifyStatus` trả `allPass: r.ok`; auto-commit gate không suy diễn; git/gh lock cwd/repo/branch/HEAD.
+- [x] Tests: `test-breaker-persist.mjs` mới 11 tests (cross-process claim 5 child → 1 winner; git lock negative repo/HEAD mismatch); cập nhật breaker 22, broker 28; `MANDATORY_TEST_SUITES` 5 suites.
+- [x] Verify: `pnpm test` 308/308 PASS; thêm invariant `passed !== cases.length` chống duplicate runner loop (root cause `40/28` cũ đã fix). `full-verify` 152/153 (1 FAIL pre-existing mcp-test-evidence, ngoài scope); `test-evidence-e2e` 23/23 sau khi restore manifest bị corrupt.
+- [x] "pnpm verify treo" = harness timeout redirect, không phải treo thật (log đã 154/154 PASS).
+- Bước tiếp: commit + push PR #28 → re-handoff GPT.
+## 30/08/2026 01:56 — Issue #25 Phase 4A COMPLETED — PR #28 mở + CI xanh
+- [x] `scripts/dod.mjs` (9-state DoD machine + transition matrix + event/reason + summary/oneLine), `scripts/circuit-breaker.mjs` (per-tool breaker registry, threshold=3, cooldown=60s), `scripts/execution-broker.mjs` (CLI facade 6 tool + auto-commit gate 8 điều kiện + DoD emission + breaker integration).
+- [x] Test: `test-dod.mjs` 18, `test-circuit-breaker.mjs` 16, `test-execution-broker.mjs` 13; wire vào `pnpm test` → **276/276 PASS** (pure-logic 229 + 47 mới).
+- [x] `pnpm verify` RESULT PASS (full-verify + test-e2e 23 assertions); CI Verify success @ HEAD `4d81a334500e1b4a4cfa1f759291eeda31843b0b`.
+- [x] PR #28 https://github.com/duongpdddic-droid/AI_PR_REVIEWER/pull/28 — churn 1291 < policy maxLines 1500; base main, head `feat/issue-25-phase4a-deterministic-dod-clean`.
+- [x] Theo chỉ thị Bố: stash Phase 4A riêng + branch sạch từ main@0cf7b18 (không chứa d7b92a8/Phase B); branch cũ giữ nguyên, không force-push.
+- [x] Audit policy (lệnh Bố): `diffLimits.maxLines = 1500` canonical; default sai 100 trong `toolPreReviewStatus` đã sửa → 1500 (L-050).
+- [x] Learnings mới: L-048, L-049, L-050. Stash AC14 giữ nguyên (`stash@{0}`/`stash@{1}`).
+- Bước tiếp: GPT review PR #28; tích hợp broker vào autonomous-run (Phase 4A AC còn lại — xem Issue #25).
+- Chi tiết: activeContext.md "Issue #25 Phase 4A".
 ## 28/08/2026 00:19 — Re-handoff PR #21 khóa HEAD + Issue #22
 - A: chạy orchestrator THẬT tạo PRE_REVIEW_PASS mới khóa đúng HEAD `039c721` (policy 2026-08-23.7, openBlocking 0), labels `agent:gpt`+`status:review-requested`, CI success, HEAD frozen.
 - B: Issue follow-up #22 "HEAD-Lock Lifecycle & Handoff Gate" (labels rỗng, không auto-claim).
