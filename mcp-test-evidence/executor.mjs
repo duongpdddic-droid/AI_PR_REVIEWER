@@ -74,33 +74,51 @@ export function isExecutableAllowlisted(command) {
   return ALLOWED_EXEC_BASENAMES.has(base);
 }
 
-// GPT-REV-105: với command=node, canonicalize script path (args[0] nếu không phải
-// flag) qua resolveEntrypoint → realpath nằm trong registered root; chặn absolute
-// path / traversal / symlink-junction escape ra ngoài root.
+// GPT-REV-105 (Finding 2): parse node args + containment-check script operand kể cả
+// dạng `node --check <path>` hoặc `node -v <path>` (flag có thể đứng TRƯỚC script path).
+// Also tests: outside absolute/traversal/symlink → throw; containment violation → throw.
+// NOTE: flag đầu → không có script path để canonicalize, trả nguyên args (safety).
 export function canonicalizeNodeArgs(step, root) {
   const args = Array.isArray(step.args) ? step.args.slice() : [];
   if (args.length === 0) return args;
+
+  // Nếu argument đầu tiên là flag (bắt đầu bằng '-') thì không có script path để canonicalize
   const first = args[0];
-  if (typeof first !== 'string') return args;
-  if (first.startsWith('-')) return args; // flag → không phải script path
-  // Cấm absolute path script (Win: C:\... hoặc POSIX: /...)
-  if (/^[a-zA-Z]:[\\/]/.test(first) || /^[\\/]/.test(first)) {
-    throw new Error(`script path '${first}' là absolute — bị cấm (sandbox escape)`);
+  if (typeof first === "string" && first.startsWith("-")) {
+    // Flag đầu → không có script path, trả nguyên args (không làm gì cả)
+    return args;
   }
+
+  // Argument đầu tiên không phải flag → đây là script path operand
+  const scriptPath = first;
+  if (typeof scriptPath !== "string") return args;
+
+  // Cấm absolute path script (Win: C:\... hoặc POSIX: /...)
+  if (/^[a-zA-Z]:[\\/]/.test(scriptPath) || /^[\\/]/.test(scriptPath)) {
+    throw new Error("script path '" + scriptPath + "' là absolute — bị cấm (sandbox escape)");
+  }
+  // Cấm traversal (..)
+  if (scriptPath.includes("..") || scriptPath.includes("\\..") || scriptPath.includes("/..")) {
+    throw new Error("script path '" + scriptPath + "' chứa traversal — bị cấm");
+  }
+
   // Containment: resolve + realpath, không cho thoát khỏi root (symlink/junction escape).
-  // Khác resolveEntrypoint: KHÔNG check executable allowlist (đây là script data, không phải executable).
-  const candidate = resolve(root, first);
+  const candidate = resolve(root, scriptPath);
   let real;
   try {
     real = realpathSync(candidate);
   } catch {
-    throw new Error(`script path '${first}' không tồn tại hoặc không thể resolve`);
+    throw new Error("script path '" + scriptPath + "' không tồn tại hoặc không thể resolve");
   }
   const realRoot = realpathSync(root);
   if (real !== realRoot && !real.startsWith(realRoot + sep)) {
-    throw new Error(`script path '${first}' nằm ngoài project root — bị cấm`);
+    throw new Error("script path '" + scriptPath + "' nằm ngoài project root — bị cấm");
   }
-  return [real, ...args.slice(1)];
+
+  // Thay thế script path tại vị trí 0 bằng canonical path
+  const canonical = [...args];
+  canonical[0] = real;
+  return canonical;
 }
 
 export function isFlagsAllowed(exeBasename, args) {

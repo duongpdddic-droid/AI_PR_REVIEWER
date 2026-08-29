@@ -70,16 +70,24 @@ function buildContext(env = process.env) {
   const artifactDir = path.resolve(env.MCP_TEST_EVIDENCE_ARTIFACT_DIR || path.join(root, '.agent', 'test-evidence'));
   const repo = env.MCP_TEST_EVIDENCE_REPO || manifest.repository;
   const skipRemote = env.MCP_TEST_EVIDENCE_SKIP_REMOTE === '1';
-  // GPT-REV-105: real Git HEAD — null khi skipRemote hoặc git fail.
+  // GPT-REV-105 (Finding 1): server tự tính real identity — projectId, real Git HEAD, canonical manifestHash, envFingerprint.
+  // Caller (test_verify_identity) chỉ assert expected giá trị; mismatch → fail-closed IDENTITY_MISMATCH.
+  // projectId: từ Project Registry (.agent/project.json), không tin caller gửi lên.
+  const canonicalProjectId = project.projectId;
+  // real Git HEAD — null khi skipRemote hoặc git fail.
   const realHead = realGitHead(root, skipRemote);
-  // canonical manifestHash (runtime copy với headSha=HEAD nếu có realHead).
+  // canonical manifestHash: nếu có realHead khác manifest.headSha → dùng runtime manifest với headSha mới,
+  // ngược lại dùng manifest committed (file immutable). đảm bảo hash luôn khớp với artifact binding.
   const manifestForHash = realHead && manifest.headSha !== realHead
     ? { ...manifest, headSha: realHead }
     : manifest;
   const canonicalManifestHash = computeManifestHash(manifestForHash);
-  // allowlisted envFingerprint (chỉ version/platform/arch).
+  // allowlisted envFingerprint (chỉ version/platform/arch — không bao gồm bí mật/token).
   const canonicalEnvFingerprint = computeEnvironmentFingerprint();
-  return { root, manifest, project, artifactDir, repo, skipRemote, realHead, canonicalManifestHash, canonicalEnvFingerprint };
+  return {
+    root, manifest, project, artifactDir, repo, skipRemote,
+    realHead, canonicalProjectId, canonicalManifestHash, canonicalEnvFingerprint,
+  };
 }
 
 function gitRemoteMatches(manifestRepo, root) {

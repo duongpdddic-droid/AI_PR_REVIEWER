@@ -1,4 +1,13 @@
 # Active Context
+## Phase 3 PR #24 hoàn tất (29/08/2026 09:04) — GPT-REV-105
+- **Mục tiêu**: Harden `cache.createLock` + fix cross-platform test deadlock (Windows).
+- **Thay đổi chính**:
+  - `cache.mjs`: atomic `wx` lock, owner-only release (PID check), stale-safe `pidAlive` dùng `process.kill(pid,0)` (Windows: EPERM=alive, ESRCH=dead). Không dùng `tasklist`.
+  - `test-executor.mjs`: redesign concurrent lock test thành cross-process (parent acquire bị chặn bởi child giữ 2.5s) — tránh deadlock parent-child test cũ. Fix Windows ESM import cache.mjs qua `pathToFileURL` + `file://` URL.
+  - `executor.mjs` / `server.mjs`: không thay đổi logic (chỉ dùng cache lock).
+- **Verification**: `node scripts/full-verify.mjs` **137/137 PASS exit 0** (executor 16 groups + server 50 assertions); CI `verify` PASS 39s (Actions run 33227728522).
+- **Commit**: `68ead96` (feat/issue-19-phase3-allowlisted-executor) → PR #24 `Ref #19`. Chờ GPT re-review.
+
 ## Vòng review-fix PR #21 — GPT-REV-094..097 (28/08/2026 01:53)
 - GPT verdict CHANGES_REQUESTED (0 Critical, 4 Important):
   - **094** MCP redaction bypass: `opLogExcerpt` đọc `logExcerpt` raw, `collectFindings` trả `detail` raw — test cũ `maxLines:1` bỏ sót (secret ở dòng 2).

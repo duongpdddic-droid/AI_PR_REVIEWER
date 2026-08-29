@@ -1,3 +1,7 @@
+## 29/08/2026 09:04 — Phase 3 PR #24 hardened (GPT-REV-105)
+- Fix concurrency lock (`cache.createLock`): atomic `wx`, owner-only release, stale-safe `pidAlive` via `process.kill(pid,0)` (EPERM=alive) — multi-process an toàn. `test-executor` redesign concurrent test sang cross-process (parent bị chặn child giữ 2.5s) — tránh deadlock Windows; chữa test lỗi Windows ESM import URL qua `pathToFileURL`.
+- Verify: `node scripts/full-verify.mjs` **137/137 PASS exit 0** (executor 16 groups + server 50 assertions); CI `verify` PASS 39s. Commit `68ead96` + push `feat/issue-19-phase3-allowlisted-executor` → PR #24 chờ GPT re-review.
+
 ## 28/08/2026 00:19 — Re-handoff PR #21 khóa HEAD + Issue #22
 - A: chạy orchestrator THẬT tạo PRE_REVIEW_PASS mới khóa đúng HEAD `039c721` (policy 2026-08-23.7, openBlocking 0), labels `agent:gpt`+`status:review-requested`, CI success, HEAD frozen.
 - B: Issue follow-up #22 "HEAD-Lock Lifecycle & Handoff Gate" (labels rỗng, không auto-claim).
