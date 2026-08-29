@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert';
+import { createHash } from 'node:crypto';
 import { validateStep, validateGate, isEntrypointSafe, isArgsSafe, isExecutableAllowlisted, isFlagsAllowed, runGate, runStep, canonicalizeNodeArgs } from './executor.mjs';
 import {
   cacheKey, manifestHash, envFingerprint, cacheDirPath, artifactDirPath,
@@ -377,6 +378,107 @@ const directHit = checkCache(cd, key);
 assert.strictEqual(directHit.manifestHash, mhStr, 'hit trả về manifestHash');
 assert.strictEqual(directHit.envFingerprint, efStr, 'hit trả về envFingerprint');
 console.log('11c. verifyCacheIntegrity (meta thật)');
+
+// GPT-REV-107: regression cache artifact integrity. Cache HIT chỉ hợp lệ khi
+// artifact bytes trên disk hash khớp meta.artifactSha256 + result shape hợp lệ +
+// result.passed === true. Mọi sửa/thiếu/corrupt phải trả { valid:false }.
+
+// 11d: artifact bị sửa 1 byte sau write → checksum mismatch → fail-closed.
+{
+  const artPath = join(ad, key + '.artifact.json');
+  const orig = readFileSync(artPath, 'utf8');
+  // Sửa 1 byte (thay 'true' đầu tiên thành 'True' — vẫn parse được nhưng bytes khác).
+  const tampered = orig.replace('"passed": true', '"passed": true ');
+  writeFileSync(artPath, tampered, 'utf8');
+  const r = checkCache(cd, key);
+  assert.strictEqual(r.valid, false, '11d: artifact sửa → valid:false');
+  assert.strictEqual(r.reason, 'CHECKSUM_MISMATCH', '11d: reason = CHECKSUM_MISMATCH');
+  // Phục hồi để test tiếp dùng lại.
+  writeFileSync(artPath, orig, 'utf8');
+  const recover = checkCache(cd, key);
+  assert.strictEqual(recover.valid, true, '11d: phục hồi bytes gốc → hit lại');
+}
+console.log('11d. artifact tampered → CHECKSUM_MISMATCH');
+
+// 11e: tráo artifact giữa 2 cache key (key B có artifact khác, lấy artifact B
+// gán cho key A) → checksum mismatch vì A.artifactSha256 vẫn là hash của A).
+{
+  // Tạo key B với cùng shard (head/proj/.../gate khác → cacheKey khác).
+  const keyB = cacheKey(proj, head, mhStr, efStr, 'othergate');
+  const cdB = cacheDirPath(keyB, fakeRoot);
+  const adB = artifactDirPath(keyB, fakeRoot);
+  writeCache({ projectId: proj, headSha: head, gateId: 'othergate', manifestHash: mhStr, envFingerprint: efStr },
+    { ...fakeResult, stepResults: [{ ...fakeResult.stepResults[0], id: 'other' }] }, keyB, fakeRoot);
+  // Tráo artifact A ← B (B's bytes khác A's, A's checksum không khớp).
+  const artA = join(ad, key + '.artifact.json');
+  const artB = join(adB, keyB + '.artifact.json');
+  const bBytes = readFileSync(artB);
+  writeFileSync(artA, bBytes);
+  const r = checkCache(cd, key);
+  assert.strictEqual(r.valid, false, '11e: swap artifact → valid:false');
+  assert.strictEqual(r.reason, 'CHECKSUM_MISMATCH', '11e: reason = CHECKSUM_MISMATCH');
+  // Phục hồi A.
+  writeCache({ projectId: proj, headSha: head, gateId: gid, manifestHash: mhStr, envFingerprint: efStr },
+    fakeResult, key, fakeRoot);
+  // Dọn B để không ảnh hưởng test khác.
+  try { unlinkSync(artB); } catch {}
+  try { unlinkSync(join(cdB, keyB + '.meta.json')); } catch {}
+}
+console.log('11e. swap artifact between keys → CHECKSUM_MISMATCH');
+
+// 11f: meta thiếu artifactSha256 (hoặc sai shape) → CHECKSUM_MISSING, fail-closed.
+{
+  const metaPath = join(cd, key + '.meta.json');
+  const orig = readFileSync(metaPath, 'utf8');
+  const noChecksum = JSON.parse(orig);
+  delete noChecksum.artifactSha256;
+  writeFileSync(metaPath, JSON.stringify(noChecksum), 'utf8');
+  const r = checkCache(cd, key);
+  assert.strictEqual(r.valid, false, '11f: meta thiếu checksum → valid:false');
+  assert.strictEqual(r.reason, 'CHECKSUM_MISSING', '11f: reason = CHECKSUM_MISSING');
+  // Sai shape (không phải 64-hex) cũng CHECKSUM_MISSING.
+  const wrongShape = JSON.parse(orig);
+  wrongShape.artifactSha256 = 'not-a-sha256';
+  writeFileSync(metaPath, JSON.stringify(wrongShape), 'utf8');
+  const r2 = checkCache(cd, key);
+  assert.strictEqual(r2.valid, false, '11f: checksum sai shape → valid:false');
+  assert.strictEqual(r2.reason, 'CHECKSUM_MISSING', '11f: shape lỗi → CHECKSUM_MISSING');
+  // Phục hồi (writeCache ghi lại meta chuẩn).
+  writeCache({ projectId: proj, headSha: head, gateId: gid, manifestHash: mhStr, envFingerprint: efStr },
+    fakeResult, key, fakeRoot);
+}
+console.log('11f. meta thiếu/sai checksum → CHECKSUM_MISSING');
+
+// 11g: artifact malformed JSON (parse lỗi) nhưng checksum match — vẫn fail-closed.
+// Đây là case "không thể tự nhiên xảy ra" vì checksum match nghĩa là bytes ta hash
+// đúng là bytes đó; nhưng nếu artifact được ghi bởi process khác với cùng bytes
+// (vd recovery từ backup) thì vẫn phải parse được. Force checksum khớp nhưng JSON hỏng.
+{
+  const artPath = join(ad, key + '.artifact.json');
+  const metaPath = join(cd, key + '.meta.json');
+  const garbage = 'this is not json {';
+  const realSha = createHash('sha256').update(garbage).digest('hex');
+  writeFileSync(artPath, garbage, 'utf8');
+  const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+  meta.artifactSha256 = realSha;
+  writeFileSync(metaPath, JSON.stringify(meta), 'utf8');
+  const r = checkCache(cd, key);
+  assert.strictEqual(r.valid, false, '11g: artifact malformed → valid:false');
+  assert.strictEqual(r.reason, 'ARTIFACT_CORRUPTED', '11g: reason = ARTIFACT_CORRUPTED');
+  // Phục hồi.
+  writeCache({ projectId: proj, headSha: head, gateId: gid, manifestHash: mhStr, envFingerprint: efStr },
+    fakeResult, key, fakeRoot);
+}
+console.log('11g. artifact malformed JSON → ARTIFACT_CORRUPTED');
+
+// 11h: cache hợp lệ vẫn hit sau khi qua tất cả regression ở trên (sanity).
+{
+  const r = checkCache(cd, key);
+  assert.strictEqual(r.valid, true, '11h: cache hợp lệ vẫn hit');
+  assert.strictEqual(r.result.passed, true, '11h: result.passed === true');
+  assert.strictEqual(r.result.total, 1);
+}
+console.log('11h. valid cache vẫn hit sau regression');
 
 (async () => {
   // FAIL không cache — key riêng

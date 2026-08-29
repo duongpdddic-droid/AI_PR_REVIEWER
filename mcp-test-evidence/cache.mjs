@@ -284,27 +284,69 @@ export function verifyCacheIntegrity(meta, key) {
   return recomputed === key;
 }
 
-// GPT-REV-106: checkCache đọc canonical cached artifact từ artifactDirPath để trả
-// result đầy đủ cho opTestRun. Trước đây chỉ trả metadata (headSha/gateId/...) khiến
-// `cached.result` undefined → crash khi cache hit. Verify integrity cả meta lẫn
-// artifact: nếu identity meta OK nhưng artifact sai/thiếu → fail-closed CORRUPTED.
+// GPT-REV-107 (hardened): checkCache enforce verification toàn vẹn artifact dựa trên
+// checksum trong meta. Defense-in-depth: ngoài identity meta (verifyCacheIntegrity),
+// BẮT BUỘC:
+//   1. meta.artifactSha256 hợp lệ 64-hex SHA-256 (thiếu/sai shape → CHECKSUM_MISSING);
+//   2. đọc raw artifact bytes, hash lại SHA-256 → so khớp meta.artifactSha256
+//      (mismatch → CHECKSUM_MISMATCH, tuyệt đối KHÔNG trả cached PASS);
+//   3. validate result shape (passed boolean, total number, passedCount number,
+//      failedCount number, duration number) + result.passed === true
+//      (shape sai hoặc passed=false → SHAPE_INVALID / NOT_PASS, fail-closed).
+// Lý do: nếu attacker/proc lỗi ghi đè file artifact (sửa 1 byte để đổi result.passed
+// sang true) nhưng meta identity vẫn hợp lệ → identity check vẫn pass; chỉ checksum
+// mismatch mới chặn. Artifact-first (ghi artifact trước) + checksum trong meta
+// (ghi meta cuối cùng như commit point) đảm bảo meta không refer artifact cũ khi write.
 export function checkCache(cacheDirP, key) {
   const metaFile = join(cacheDirP, key + '.meta.json');
   if (!existsSync(metaFile)) return { valid: false, reason: 'MISSING' };
-  try {
-    const meta = JSON.parse(readFileSync(metaFile, 'utf8'));
-    const age = Date.now() - (meta.cachedAt || 0);
-    if (age > CACHE_TTL_MS) return { valid: false, reason: 'TTL_EXPIRED', age };
-    if (!meta.passed) return { valid: false, reason: 'NOT_PASS', passed: false };
-    if (!verifyCacheIntegrity(meta, key)) return { valid: false, reason: 'IDENTITY_MISMATCH' };
-    // Đọc canonical artifact theo key (cùng shard cacheKey.slice(0,2) với meta).
-    const artifactFile = join(artifactDirPath(key, dirname(dirname(cacheDirP))), key + '.artifact.json');
-    if (!existsSync(artifactFile)) return { valid: false, reason: 'ARTIFACT_MISSING' };
-    let result;
-    try { result = JSON.parse(readFileSync(artifactFile, 'utf8')); }
-    catch { return { valid: false, reason: 'ARTIFACT_CORRUPTED' }; }
-    return { valid: true, cachedAt: meta.cachedAt, headSha: meta.headSha, gateId: meta.gateId, manifestHash: meta.manifestHash, envFingerprint: meta.envFingerprint, result };
-  } catch { return { valid: false, reason: 'CORRUPTED' }; }
+  let meta;
+  try { meta = JSON.parse(readFileSync(metaFile, 'utf8')); }
+  catch { return { valid: false, reason: 'CORRUPTED' }; }
+  const age = Date.now() - (meta.cachedAt || 0);
+  if (age > CACHE_TTL_MS) return { valid: false, reason: 'TTL_EXPIRED', age };
+  if (!meta.passed) return { valid: false, reason: 'NOT_PASS', passed: false };
+  if (!verifyCacheIntegrity(meta, key)) return { valid: false, reason: 'IDENTITY_MISMATCH' };
+  // Bắt buộc artifactSha256 hợp lệ 64-hex; thiếu/sai shape → fail-closed.
+  const expectedSha = String(meta.artifactSha256 || '');
+  if (!/^[0-9a-f]{64}$/.test(expectedSha)) {
+    return { valid: false, reason: 'CHECKSUM_MISSING' };
+  }
+  // Đọc canonical artifact theo key (cùng shard cacheKey.slice(0,2) với meta).
+  const artifactFile = join(artifactDirPath(key, dirname(dirname(cacheDirP))), key + '.artifact.json');
+  if (!existsSync(artifactFile)) return { valid: false, reason: 'ARTIFACT_MISSING' };
+  // Hash raw bytes (KHÔNG parse trước) để so khớp với checksum lúc ghi.
+  let artifactBytes;
+  try { artifactBytes = readFileSync(artifactFile); }
+  catch { return { valid: false, reason: 'ARTIFACT_CORRUPTED' }; }
+  const actualSha = createHash('sha256').update(artifactBytes).digest('hex');
+  if (actualSha !== expectedSha) {
+    return { valid: false, reason: 'CHECKSUM_MISMATCH' };
+  }
+  // Parse + validate shape SAU khi checksum khớp.
+  let result;
+  try { result = JSON.parse(artifactBytes.toString('utf8')); }
+  catch { return { valid: false, reason: 'ARTIFACT_CORRUPTED' }; }
+  if (!isValidCachedResultShape(result)) return { valid: false, reason: 'SHAPE_INVALID' };
+  if (result.passed !== true) return { valid: false, reason: 'NOT_PASS', passed: false };
+  return { valid: true, cachedAt: meta.cachedAt, headSha: meta.headSha, gateId: meta.gateId, manifestHash: meta.manifestHash, envFingerprint: meta.envFingerprint, result };
+}
+
+// Validate shape result lưu trong cache: bắt buộc đủ trường + đúng kiểu primitive.
+// Trả true nếu result hợp lệ, false nếu thiếu/sai kiểu. KHÔNG trust cờ `passed`
+// trước khi shape OK (shape sai → fail-closed dù passed có là true).
+function isValidCachedResultShape(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (typeof result.passed !== 'boolean') return false;
+  if (typeof result.total !== 'number' || !Number.isInteger(result.total) || result.total < 0) return false;
+  if (typeof result.passedCount !== 'number' || !Number.isInteger(result.passedCount) || result.passedCount < 0) return false;
+  if (typeof result.failedCount !== 'number' || !Number.isInteger(result.failedCount) || result.failedCount < 0) return false;
+  if (typeof result.duration !== 'number' || !Number.isFinite(result.duration) || result.duration < 0) return false;
+  if (!Array.isArray(result.failureCodes)) return false;
+  if (!Array.isArray(result.stepResults)) return false;
+  // passed/failed phải nhất quán với total.
+  if (result.passedCount + result.failedCount !== result.total) return false;
+  return true;
 }
 
 export function writeCache(meta, result, key, root) {
@@ -324,8 +366,17 @@ export function writeCache(meta, result, key, root) {
       duration: sr.duration,
     })),
   };
-  atomicWrite(metaFile, JSON.stringify({ ...meta, cacheKey: key, cachedAt: Date.now(), passed: result.passed }));
-  atomicWrite(artifactFile, JSON.stringify(redactedResult, null, 2));
+  // GPT-REV-107: artifact-first + checksum trong meta.
+  // Serialize 1 LẦN, dùng cả cho hash lẫn ghi → checksum khớp tuyệt đối bytes trên disk.
+  const artifactBytes = JSON.stringify(redactedResult, null, 2);
+  const artifactSha256 = createHash('sha256').update(artifactBytes).digest('hex');
+  // Artifact TRƯỚC (nếu fail, meta chưa có checksum, checkCache fail-closed).
+  atomicWrite(artifactFile, artifactBytes);
+  // Meta SAU CÙNG — commit point, có artifactSha256 để verify khi đọc lại.
+  atomicWrite(metaFile, JSON.stringify({
+    ...meta, cacheKey: key, cachedAt: Date.now(),
+    passed: result.passed, artifactSha256,
+  }));
 }
 
 export function cleanupExpired(root) {
