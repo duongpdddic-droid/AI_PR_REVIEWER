@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // test-project-registry.mjs — integration tests cho Project Registry + versioned manifest (Issue #14).
 // KHÔNG framework. Exit 0 = PASS, 1 = FAIL.
-import { readFileSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import {
   validateManifest, scanForSecrets, scanForAbsolutePaths,
   loadRegistry, saveRegistry, detectConflicts, assertWorkspaceRemote,
-  registerProject, migrateManifest, assertSingleOwner, registryOutsideWorktree,
+  registerProject, removeProject, REMOVE_REASONS,
+  migrateManifest, assertSingleOwner, registryOutsideWorktree,
   OWNERSHIP_MATRIX, isAllowedOverride, DEFAULT_REGISTRY_PATH,
   CANONICAL_POLICY_VERSION, SCHEMA_PATH,
   ROLLBACK_PLAN_VERSION, UPGRADE_ALLOWED_ADDED_KEYS,
@@ -375,6 +376,85 @@ const tmpPath = path.join(os.tmpdir(), `reg-test-${Date.now()}-${Math.random().t
   eq('AC13 persisted customExtension nguyên vẹn',
     JSON.stringify(saved.customExtension), JSON.stringify({ keep: true }));
 }
+
+// AC14: removeProject — symmetric counterpart cua registerProject.
+// Tests dung tmpPath rieng (khong ghi vao DEFAULT_REGISTRY_PATH production).
+// Clean-up try/finally dam bao khong leak file/registry.
+{
+  const removeTmp = path.join(os.tmpdir(), `reg-remove-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  let created = false;
+  try {
+    // Seed: registry rong, sau do register 1 product, 1 control-plane.
+    saveRegistry({ registry: { schemaVersion: '1.0', projects: [] }, registryPath: removeTmp });
+    const productM = { ...load('ai-pr-reviewer.json'), projectId: 'rm-prod', repository: 'owner/rm-prod', projectType: 'product', telegram: { route: 'rm-prod-route' }, workspace: { workspaceId: 'rm-prod-ws' } };
+    const cpM = { ...load('ai-pr-reviewer.json'), projectId: 'rm-cp', repository: 'owner/rm-cp', projectType: 'control-plane', telegram: { route: 'rm-cp-route' }, workspace: { workspaceId: 'rm-cp-ws' } };
+    const r1 = registerProject({ manifest: productM, registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp, actualRemote: 'https://github.com/' + productM.repository + '.git', force: true });
+    tru('AC14 setup register productM thanh cong', r1.ok);
+    const r2 = registerProject({ manifest: cpM, registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp, actualRemote: 'https://github.com/' + cpM.repository + '.git', force: true });
+    tru('AC14 setup register control-plane thanh cong', r2.ok);
+    created = true;
+
+    // Gate 1: projectId rong / khong string -> MISSING_PROJECT_ID.
+    const g1a = removeProject({ projectId: '', registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp });
+    eq('AC14 gate1 empty projectId reason', g1a.reason, REMOVE_REASONS.MISSING_PROJECT_ID);
+    falsy('AC14 gate1 empty projectId ok=false', g1a.ok);
+    const g1b = removeProject({ projectId: 42, registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp });
+    eq('AC14 gate1 non-string projectId reason', g1b.reason, REMOVE_REASONS.MISSING_PROJECT_ID);
+
+    // Gate 2: registry shape invalid -> REGISTRY_SHAPE_INVALID.
+    const g2 = removeProject({ projectId: 'rm-prod', registry: { foo: 'bar' }, registryPath: removeTmp });
+    eq('AC14 gate2 shape invalid reason', g2.reason, REMOVE_REASONS.REGISTRY_SHAPE_INVALID);
+    const g2b = removeProject({ projectId: 'rm-prod', registry: null, registryPath: removeTmp });
+    eq('AC14 gate2 null registry reason', g2b.reason, REMOVE_REASONS.REGISTRY_SHAPE_INVALID);
+
+    // Gate 3: idempotent no-op khi khong co project.
+    const g3 = removeProject({ projectId: 'nonexistent', registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp });
+    tru('AC14 gate3 idempotent no-op ok=true', g3.ok);
+    falsy('AC14 gate3 idempotent removed=false', g3.removed);
+    tru('AC14 gate3 idempotent co fingerprint', typeof g3.fingerprint === 'string' && g3.fingerprint.length === 64);
+
+    // Gate 4: ambiguous identity (2 entries cung projectId) -> AMBIGUOUS_IDENTITY.
+    const cur = loadRegistry({ registryPath: removeTmp });
+    cur.projects.push({ projectId: 'rm-prod', repository: 'evil/rm-prod' });
+    saveRegistry({ registry: cur, registryPath: removeTmp });
+    const g4 = removeProject({ projectId: 'rm-prod', registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp });
+    eq('AC14 gate4 ambiguous reason', g4.reason, REMOVE_REASONS.AMBIGUOUS_IDENTITY);
+    // Khoi phuc: xoa entry trung.
+    const cur2 = loadRegistry({ registryPath: removeTmp });
+    const seen = new Set();
+    cur2.projects = cur2.projects.filter((p) => { if (seen.has(p.projectId)) return false; seen.add(p.projectId); return true; });
+    saveRegistry({ registry: cur2, registryPath: removeTmp });
+
+    // Gate 5: control-plane -> CONTROL_PLANE_REMOVAL_FORBIDDEN.
+    const g5 = removeProject({ projectId: 'rm-cp', registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp });
+    eq('AC14 gate5 control-plane reason', g5.reason, REMOVE_REASONS.CONTROL_PLANE_REMOVAL_FORBIDDEN);
+    falsy('AC14 gate5 control-plane ok=false', g5.ok);
+    const afterG5 = loadRegistry({ registryPath: removeTmp });
+    tru('AC14 gate5 registry van con rm-cp', afterG5.projects.some((p) => p.projectId === 'rm-cp'));
+
+    // Gate 6: input registry khong bi mutate.
+    const original = loadRegistry({ registryPath: removeTmp });
+    const beforeOriginal = JSON.stringify(original);
+    const r6 = removeProject({ projectId: 'rm-prod', registry: original, registryPath: removeTmp });
+    eq('AC14 gate6 input original khong mutate (deep equal)', JSON.stringify(original), beforeOriginal);
+    tru('AC14 gate6 removed=true', r6.removed);
+    tru('AC14 gate6 registry tra ve reload tu file', r6.registry && r6.registry.projects && !r6.registry.projects.some((p) => p.projectId === 'rm-prod'));
+
+    // Gate 7: persistence integrity. Sau khi remove, file on-disk khong con projectId.
+    const final = loadRegistry({ registryPath: removeTmp });
+    falsy('AC14 gate7 final state: rm-prod vang mat', final.projects.some((p) => p.projectId === 'rm-prod'));
+    tru('AC14 gate7 final state: rm-cp van con', final.projects.some((p) => p.projectId === 'rm-cp'));
+    tru('AC14 gate7 final state: dung 1 entry', final.projects.length === 1);
+
+    // Second remove: idempotent (khong con rm-prod).
+    const r7 = removeProject({ projectId: 'rm-prod', registry: loadRegistry({ registryPath: removeTmp }), registryPath: removeTmp });
+    tru('AC14 second remove idempotent ok=true', r7.ok);
+    falsy('AC14 second remove idempotent removed=false', r7.removed);
+  } finally {
+    try { if (created) unlinkSync(removeTmp); } catch { /* swallow */ }
+  }
+}
+
 
 const pass = checks.filter((c) => c.ok).length;
 for (const c of checks) if (!c.ok) console.log('FAIL', c.name, '=>', JSON.stringify(c.got), 'want', JSON.stringify(c.want));
