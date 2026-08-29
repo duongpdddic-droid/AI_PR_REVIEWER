@@ -4,7 +4,7 @@
   "description": "Khung orchestration d'agent AI PR Reviewer (Cline rules, Memory Bank, verify, Git Handoff).",
   "type": "module",
   "scripts": {
-    "test": "node scripts/test-pure-logic.mjs",
+    "test": "node scripts/test-pure-logic.mjs && node scripts/test-dod.mjs && node scripts/test-circuit-breaker.mjs && node scripts/test-execution-broker.mjs",
     "test:integration": "node scripts/test-integration-orchestrator.mjs && node scripts/test-integration-approval-gate.mjs && node scripts/test-integration-review-runtime.mjs",
     "test:policy": "node scripts/test-effective-policy.mjs && node scripts/test-review-phases.mjs",
     "test:context": "node scripts/test-context-routing.mjs",
