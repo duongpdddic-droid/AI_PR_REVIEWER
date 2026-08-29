@@ -5,7 +5,7 @@ import {
   cacheKey, manifestHash, envFingerprint, cacheDirPath, artifactDirPath,
   checkCache, writeCache, prepareRuntime, createLock, cleanupExpired, verifyCacheIntegrity,
 } from './cache.mjs';
-import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync, realpathSync, openSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, unlinkSync, realpathSync, openSync, readFileSync, readdirSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -80,7 +80,9 @@ assert.deepStrictEqual(validateGate(mf, 'unit', root), { valid: true, errors: []
 assert.strictEqual(validateGate(mf, 'missing', root).valid, false);
 console.log('4. validateGate');
 
-// GPT-REV-105 (Finding 2): canonicalize script path cho command=node.
+// GPT-REV-105 (Finding 2): canonicalize script path cho command=node, SAU cờ Node.
+// Tuyệt đối KHÔNG có nhánh `first.startsWith("-") => return args`. Phải tìm script
+// operand kể cả khi flag đứng trước (vd `node --check <path>`).
 {
   // script relative trong root → resolve + realpath.
   const scriptRel = 'scripts/sample.js';
@@ -97,9 +99,18 @@ console.log('4. validateGate');
   let threwTrav = false;
   try { canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['../escape.js'] }, root); } catch { threwTrav = true; }
   assert.strictEqual(threwTrav, true, 'traversal script path bị cấm');
-  // flag đầu → giữ nguyên (không phải script path).
-  const flagArgs = canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['--check', 'x.js'] }, root);
-  assert.deepStrictEqual(flagArgs, ['--check', 'x.js'], 'flag đầu → không canonicalize');
+  // REGRESSION Finding 2: flag đứng TRƯỚC script path → vẫn canonicalize script operand.
+  // `node --check scripts/sample.js` → ['--check', realpath(scriptAbs)].
+  const flagFirst = canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['--check', scriptRel] }, root);
+  assert.deepStrictEqual(flagFirst, ['--check', realpathSync(scriptAbs)],
+    'flag --check trước script → script operand được canonicalize, KHÔNG giữ nguyên');
+  // Không có script operand (chỉ flag) → trả nguyên args.
+  const noScript = canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['--version'] }, root);
+  assert.deepStrictEqual(noScript, ['--version'], 'không có script operand → trả nguyên args');
+  // Value-taking flag (`--input-type`) kèm value → value KHÔNG bị coi là script operand.
+  const valueFlag = canonicalizeNodeArgs({ id: 'x', command: 'node', args: ['--input-type', 'module', scriptRel] }, root);
+  assert.deepStrictEqual(valueFlag, ['--input-type', 'module', realpathSync(scriptAbs)],
+    'value-taking flag --input-type module trước script → script operand canonicalized');
 }
 console.log('5. canonicalizeNodeArgs (Finding 2)');
 
@@ -158,8 +169,28 @@ process.exit(0);
   await staleLock.acquire(1000);
   assert.strictEqual(staleLock.isLocked(), true, 'stale lock (PID chết) bị break');
   staleLock.release();
+
+  // REGRESSION Finding 4: lockfile ghi identity <pid>:<nonce>. stale PID hoặc corrupted
+  // content → atomic quarantine rename (KHÔNG read-then-unlink), rồi wx open retry.
+  const qKey = 'quarantinelock000000000000000000000000000000000000000000000000000000000000000';
+  const qLock = createLock(lockRoot, qKey);
+  // Pre-seed lockfile với PID 999999 (không alive) + nonce giả.
+  writeFileSync(qLock.lockFile, '999999:fake-nonce-xyz');
+  await qLock.acquire(1000);
+  // Sau acquire: lockfile phải chứa identity mới của qLock (pid:nonce), KHÔNG phải '999999:fake-nonce-xyz'.
+  const owner = readFileSync(qLock.lockFile, 'utf8').trim();
+  assert.ok(/^\d+:[a-f0-9]+$/.test(owner), 'Finding 4: lockfile mới có dạng <pid>:<hex-nonce>');
+  assert.ok(!owner.startsWith('999999'), 'Finding 4: owner cũ (PID 999999) bị quarantine, không còn ở lockfile');
+  qLock.release();
+  // Release: rename tới .released-<nonce>, lockfile gốc không còn ở path cũ.
+  assert.strictEqual(qLock.isLocked(), false, 'Finding 4: release atomic quarantine → lockfile biến mất');
+  // Tìm file quarantine được tạo ra (audit trail).
+  const lockDir = join(lockRoot, 'locks', qKey.slice(0, 2));
+  const leftovers = readdirSync(lockDir).filter(f => f.includes(qKey));
+  assert.ok(leftovers.some(f => /\.stale-|\.released-/.test(f)),
+    'Finding 4: file quarantine (.stale-... hoặc .released-...) tồn tại để audit');
 }
-console.log('6. concurrent lock thực (cross-process) + owner-only release + stale-safe (Finding 3)');
+console.log('6. concurrent lock thực (cross-process) + owner-only release + stale-safe (Finding 3+4)');
 
 console.log('=== Cache tests ===');
 const fakeRoot = join(tmpdir(), 'ai-pr-reviewer-evidence', 'testproj');

@@ -223,11 +223,13 @@ async function run() {
 
     // ── GPT-REV-098: headSha hash manifest RUNTIME (thay headSha), không hash manifest committed stale ─
     // Manifest committed (STALE_HEAD) ≠ FAIL_HEAD. Server phải hash {manifest, headSha: FAIL_HEAD}
-    // (giống reporter full-verify) để test_status({headSha}) đọc đúng artifact canonical dù file stale.
+    // (giống reporter full-verify) để test_status({reportId}) đọc đúng artifact canonical dù file stale.
+    // REGRESSION Finding 3: dùng reportId (deterministic) thay vì headSha-only để tránh
+    // ambiguous sau khi test_run tạo thêm report runtime cho cùng headSha.
     ok(manifest.headSha === STALE_HEAD, "fixture: manifest committed có headSha STALE (khác requested HEAD)");
-    const sStale = await call("test_status", { headSha: FAIL_HEAD });
+    const sStale = await call("test_status", { reportId: FAIL_REPORT });
     ok(sStale.result && !sStale.result.isError && sStale.data.passed === false && sStale.data.blocking === 2,
-      "GPT-REV-098: test_status theo headSha thành công dù manifest committed headSha stale (hash runtime)");
+      "GPT-REV-098: test_status theo reportId thành công dù manifest committed headSha stale (hash runtime)");
     // Artifact built từ manifest NỘI DUNG sai (headSha đúng nhưng phần còn lại lệch) → manifestHash
     // khác canonical hiện tại → findReport theo headSha+manifestHash phải fail-closed.
     const WRONG = "abcdef0123456789abcdef0123456789abcdef01";
@@ -266,25 +268,41 @@ async function run() {
     ok(bad.result?.isError === true && /IDENTITY_MISMATCH/.test(bad.result.content[0].text),
       "REV-105: expectHeadSha sai → fail-closed IDENTITY_MISMATCH");
 
-    // ── GPT-REV-100/105 (Finding 4): test_run tạo CompactReport vào runtime store ──
+    // ── GPT-REV-100/105 (Finding 1 + Finding 3): test_run tạo CompactReport vào runtime store ──
+    // Server tự tính identity từ Project Registry + real Git HEAD (SKIP_REMOTE → manifest.headSha)
+    // + canonical manifestHash + allowlisted envFingerprint. Caller KHÔNG gửi headSha/manifestHash/
+    // envFingerprint nữa; có thể gửi expectXxx để assert.
     // → test_status/failures/detail/log đọc được qua reportId.
     const tr = await call("test_run", {
-      headSha: FAIL_HEAD, gate: "verify",
-      manifestHash: mhFail, envFingerprint: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-      projectId: "fixture-project",
+      gate: "verify", projectId: "fixture-project",
     });
     ok(tr.result && !tr.result.isError && typeof tr.data === "object" && tr.data.cacheKey,
       "REV-100: test_run dispatch await → data có cacheKey thực (không phải {})");
     ok(typeof tr.data.reportId === "string" && /^[0-9a-f]{16}$/.test(tr.data.reportId),
       "REV-105: test_run trả reportId (CompactReport đã ghi runtime store)");
+    ok(tr.data.headSha === STALE_HEAD,
+      "Finding 1: test_run trả headSha từ server-derived (SKIP_REMOTE → manifest.headSha), caller không tự quyết");
     const runReportId = tr.data.reportId;
-    // status qua reportId (report do test_run tạo, nằm runtime store).
+    // REGRESSION Finding 1: caller pass expectHeadSha SAI → fail-closed IDENTITY_MISMATCH.
+    const badRun = await call("test_run", {
+      gate: "verify", projectId: "fixture-project",
+      expectHeadSha: "0000000000000000000000000000000000000000",
+    });
+    ok(badRun.result?.isError === true && /IDENTITY_MISMATCH/.test(badRun.result.content[0].text),
+      "Finding 1 REGRESSION: test_run expectHeadSha sai → IDENTITY_MISMATCH fail-closed");
+    // REGRESSION Finding 3: test_run ghi vào shard KHÔNG PHẢI 'xx' (cacheKey dài hex).
+    // test_status vẫn tìm được qua reportId nhờ enumerate mọi runtime shard.
+    // verify gate: 3 steps (syntax, unit, integration). integration exit 1 → 1 failure,
+    // blocking = max(1, failures.length) = 1. Trước fix: resolveReport luôn đọc shard 'xx'
+    // → miss hoàn toàn; assert cũ `blocking===2` dựa trên pre-seeded FAIL_REPORT khác.
     const st = await call("test_status", { reportId: runReportId, projectId: "fixture-project" });
-    ok(st.result && !st.result.isError && st.data.passed === false && st.data.blocking === 2,
-      "REV-105: test_status đọc được report runtime store (blocking=2)");
+    ok(st.result && !st.result.isError && st.data.passed === false && st.data.blocking === 1,
+      "Finding 3: test_status đọc được report runtime store (mọi shard) (blocking=1, integration fail)");
     // detail + log qua cùng reportId.
+    // Fixture: verify gate có 3 steps (syntax, unit, integration); unit stub PASS,
+    // integration stub exit 1 → failures = [integration], code = STEP_INTEGRATION_FAIL.
     const dt = await call("test_failure_detail", { reportId: runReportId, failureIndex: 0 });
-    ok(dt.result && !dt.result.isError && /STEP_UNIT_FAIL/.test(dt.data.failure || ""),
+    ok(dt.result && !dt.result.isError && /STEP_INTEGRATION_FAIL/.test(dt.data.failure || ""),
       "REV-105: test_failure_detail đọc được failure từ runtime report");
     const lg = await call("test_log_excerpt", { reportId: runReportId, failureIndex: 0, maxLines: 3 });
     ok(lg.result && !lg.result.isError && typeof lg.data.logExcerpt === "string",

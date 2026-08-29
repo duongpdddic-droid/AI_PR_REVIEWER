@@ -41,14 +41,22 @@ export function artifactDirPath(key, root) {
 }
 
 // GPT-REV-105 (hardened): một implementation lock duy nhất — atomic `wx` open
-// (không TOCTOU), chỉ owner (PID ghi trong lockfile) mới được release, stale-safe
-// (PID không còn chạy → break lock). Multi-process an toàn.
+// (không TOCTOU), chỉ owner (PID + nonce ghi trong lockfile) mới được release, stale-safe
+// (PID không còn chạy → atomic quarantine rename rồi retry, KHÔNG read-then-unlink path
+// có thể đã bị thay). Lockfile content = `<pid>:<nonce>` (hex random 16 bytes).
+//
+// Finding 4 (GPT-REV-105): stale-lock takeover phải dùng lock nonce/identity + atomic
+// quarantine rename; cấm read PID rồi unlink path có thể đã bị thay. Rename trong cùng
+// FS là atomic; lockfile sau rename không còn ở vị trí cũ → wx open retry sẽ thắng.
 export function createLock(root, key) {
   const sub = key.slice(0, 2);
   const d = join(root, 'locks', sub);
   mkdirSync(d, { recursive: true });
   const lockFile = join(d, key + '.lock');
+  // Per-instance nonce; kết hợp với PID làm identity. Mỗi process spawn nonce mới.
+  const myNonce = createHash('sha256').update(String(process.pid) + ':' + Math.random() + ':' + Date.now()).digest('hex').slice(0, 16);
   let held = false;
+  let myIdentity = null; // '<pid>:<nonce>' khi đã acquire
 
   function pidAlive(pid) {
     if (!pid || pid <= 0) return false;
@@ -61,6 +69,23 @@ export function createLock(root, key) {
     }
   }
 
+  // Atomic quarantine: rename lockfile ra tên unique → nếu rename thành công, lockfile
+  // cũ đã bị loại bỏ nguyên tử (cùng FS), wx open retry sẽ thắng. Nếu lockfile đã bị
+  // unlink bởi owner trước đó → rename sẽ throw ENOENT → an toàn bỏ qua.
+  // Suffix dùng nonce đọc từ lockfile (nếu có) + timestamp + pid hiện tại để tránh va chạm.
+  function quarantineLockFile(observedNonce) {
+    const suffix = observedNonce
+      ? observedNonce.slice(0, 8) + '-' + Date.now() + '-' + process.pid
+      : 'corrupt-' + Date.now() + '-' + process.pid;
+    const quarantine = lockFile + '.stale-' + suffix;
+    try {
+      renameSync(lockFile, quarantine);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   return {
     async acquire(timeoutMs = 5000) {
       const deadline = Date.now() + timeoutMs;
@@ -69,17 +94,47 @@ export function createLock(root, key) {
         let fd;
         try {
           fd = openSync(lockFile, 'wx', 0o644); // atomic: fail nếu đã tồn tại
-          writeSync(fd, String(process.pid));
+          myIdentity = process.pid + ':' + myNonce;
+          writeSync(fd, myIdentity);
           closeSync(fd);
           held = true;
           return;
         } catch (e) {
           if (e.code !== 'EEXIST') throw e;
-          // Stale-safe: nếu owner cũ không còn chạy → xóa rồi retry.
+          // Stale-safe: đọc identity (pid:nonce), kiểm tra owner có thật sự còn sống
+          // (PID reuse defense) HOẶC lockfile corrupt. KHÔNG đụng vào lock của một instance
+          // KHÁC trong CÙNG process — chúng chia sẻ PID, chỉ phân biệt bằng nonce; nếu
+          // lấy nhầm, hai instance có thể ghi đè cache key lẫn nhau.
+          // KHÔNG dùng read-then-unlink (TOCTOU): dùng atomic quarantine rename.
+          let ownerPid = null;
+          let ownerNonce = null;
+          let corrupt = false;
           try {
-            const owner = Number(readFileSync(lockFile, 'utf8').trim());
-            if (!pidAlive(owner)) { try { unlinkSync(lockFile); } catch {} continue; }
-          } catch { /* lockfile hỏng → coi như stale */ try { unlinkSync(lockFile); } catch {} continue; }
+            const raw = readFileSync(lockFile, 'utf8').trim();
+            const parts = raw.split(':');
+            const pidStr = parts[0];
+            const nonce = parts[1];
+            const pidN = Number(pidStr);
+            if (Number.isFinite(pidN) && pidN > 0) {
+              ownerPid = pidN;
+              ownerNonce = typeof nonce === 'string' && /^[a-f0-9]+$/.test(nonce) ? nonce : null;
+            } else {
+              corrupt = true;
+            }
+          } catch { corrupt = true; }
+          // Stale takeover decision (chỉ quyết định trên PID, KHÔNG trên nonce trong cùng
+          // process). Cùng PID + nonce khác = instance khác của CHÍNH process này vẫn đang
+          // giữ lock → KHÔNG stale (chờ owner release). Khác PID = process khác đang giữ;
+          // chỉ stale khi PID khác đã chết HOẶC lockfile corrupt. PID reuse scenario
+          // (process mới lấy lại PID cũ + nonce cũ) được phát hiện qua pidAlive=false
+          // hoặc corrupt → quarantine an toàn.
+          const isStale = corrupt
+            || ownerPid === null
+            || (ownerPid !== process.pid && !pidAlive(ownerPid));
+          if (isStale) {
+            if (quarantineLockFile(ownerNonce)) continue;
+            // Quarantine fail (lockfile đã bị owner release giữa lúc đọc) → retry wx open.
+          }
           if (Date.now() > deadline) throw new Error('LOCK_TIMEOUT:' + key);
           await new Promise(r => setTimeout(r, 50));
         }
@@ -88,14 +143,21 @@ export function createLock(root, key) {
     release() {
       if (!held) return;
       held = false;
-      // Owner-only: chỉ xóa nếu lockfile ghi PID của chính mình.
+      // Owner-only: chỉ xóa nếu lockfile identity (pid:nonce) khớp chính mình.
+      // Dùng rename tới quarantine (atomic), KHÔNG unlink thẳng: nếu lockfile đã bị
+      // quarantine/remove bởi người khác giữa lúc check, rename fail an toàn.
       try {
-        const owner = Number(readFileSync(lockFile, 'utf8').trim());
-        if (owner === process.pid) unlinkSync(lockFile);
+        const owner = readFileSync(lockFile, 'utf8').trim();
+        if (owner === myIdentity) {
+          // Atomic quarantine để tránh unlink path có thể đã bị thay.
+          try { renameSync(lockFile, lockFile + '.released-' + myNonce); } catch { /* already gone */ }
+        }
       } catch { /* lockfile đã mất → coi như đã release */ }
     },
     isLocked() { return existsSync(lockFile); },
     get lockFile() { return lockFile; },
+    get identity() { return myIdentity; },
+    get nonce() { return myNonce; },
   };
 }
 

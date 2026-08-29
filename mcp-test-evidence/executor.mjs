@@ -74,30 +74,46 @@ export function isExecutableAllowlisted(command) {
   return ALLOWED_EXEC_BASENAMES.has(base);
 }
 
-// GPT-REV-105 (Finding 2): parse node args + containment-check script operand kể cả
-// dạng `node --check <path>` hoặc `node -v <path>` (flag có thể đứng TRƯỚC script path).
-// Also tests: outside absolute/traversal/symlink → throw; containment violation → throw.
-// NOTE: flag đầu → không có script path để canonicalize, trả nguyên args (safety).
+// GPT-REV-105 (Finding 2): parse node args, tìm script operand SAU Node flags, rồi
+// containment-check. TUYỆT ĐỐI KHÔNG giữ nhánh `first.startsWith("-") => return args`.
+// Hỗ trợ cả `node <path>`, `node --check <path>`, `node --input-type=module <path>`.
+// Absolute/traversal/symlink escape → throw fail-closed. Không có script operand → trả nguyên.
 export function canonicalizeNodeArgs(step, root) {
   const args = Array.isArray(step.args) ? step.args.slice() : [];
   if (args.length === 0) return args;
 
-  // Nếu argument đầu tiên là flag (bắt đầu bằng '-') thì không có script path để canonicalize
-  const first = args[0];
-  if (typeof first === "string" && first.startsWith("-")) {
-    // Flag đầu → không có script path, trả nguyên args (không làm gì cả)
-    return args;
+  // Tìm index của script operand = first non-flag positional.
+  // Quy ước: flag bắt đầu bằng '-' (kể cả `--key=value`); ngoài ra, với flag value-taking
+  // (`--input-type=...` đã gộp value), positional tiếp theo là value của flag (cũng bỏ qua).
+  // Cho phép tất cả flag từ ALLOWED_FLAGS_BY_EXE.node; flag không trong allowlist → coi như
+  // positional an toàn (sẽ bị validateStep chặn qua isFlagsAllowed).
+  const valueTakingFlags = new Set(['--input-type']);
+  let scriptIdx = -1;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (typeof a !== 'string') return args; // malformed → bỏ qua, để validator xử lý
+    if (a.startsWith('-')) {
+      // `--key=value` form: nếu value-taking flag gộp value, phần còn lại là value.
+      // Với dạng `--key value` (2 arg), bỏ qua arg kế tiếp nếu value-taking.
+      if (a.includes('=')) continue;
+      if (valueTakingFlags.has(a) && i + 1 < args.length) {
+        i++; // skip value
+      }
+      continue;
+    }
+    scriptIdx = i;
+    break;
   }
+  if (scriptIdx === -1) return args; // không có script operand (vd chỉ có flag)
 
-  // Argument đầu tiên không phải flag → đây là script path operand
-  const scriptPath = first;
-  if (typeof scriptPath !== "string") return args;
+  const scriptPath = args[scriptIdx];
+  if (typeof scriptPath !== 'string') return args;
 
-  // Cấm absolute path script (Win: C:\... hoặc POSIX: /...)
+  // Cấm absolute path script (Win: C:\... hoặc POSIX: /...).
   if (/^[a-zA-Z]:[\\/]/.test(scriptPath) || /^[\\/]/.test(scriptPath)) {
     throw new Error("script path '" + scriptPath + "' là absolute — bị cấm (sandbox escape)");
   }
-  // Cấm traversal (..)
+  // Cấm traversal (..).
   if (scriptPath.includes("..") || scriptPath.includes("\\..") || scriptPath.includes("/..")) {
     throw new Error("script path '" + scriptPath + "' chứa traversal — bị cấm");
   }
@@ -115,9 +131,9 @@ export function canonicalizeNodeArgs(step, root) {
     throw new Error("script path '" + scriptPath + "' nằm ngoài project root — bị cấm");
   }
 
-  // Thay thế script path tại vị trí 0 bằng canonical path
-  const canonical = [...args];
-  canonical[0] = real;
+  // Thay thế script path tại scriptIdx bằng canonical path; giữ nguyên flag trước đó.
+  const canonical = args.slice();
+  canonical[scriptIdx] = real;
   return canonical;
 }
 
