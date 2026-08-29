@@ -162,35 +162,156 @@ process.exit(0);
   assert.strictEqual(ownLock.isLocked(), true, 'owner-only release: child (PID khác) không xóa lockfile của owner');
   ownLock.release();
 
-  // stale-safe: lockfile ghi PID không tồn tại → acquire phá được ngay.
+  // GPT-REV-106 Finding 3 (FAIL-CLOSED): lockfile ghi PID không tồn tại → KHÔNG tự phá.
+  // Thay vào đó escalate STALE_LOCK_REQUIRES_RECOVERY để caller quyết định recovery.
+  // (Trước đây test này kỳ vọng acquire phá được stale; giờ policy mới cấm tự ý
+  // rename/xóa → test phải kỳ vọng throw với code STALE_LOCK_REQUIRES_RECOVERY.)
   const staleKey = 'stalelock0000000000000000000000000000000000000000000000000000000000000000';
   const staleLock = createLock(lockRoot, staleKey);
   writeFileSync(staleLock.lockFile, String(999999));
+  let staleThrown = null;
+  try { await staleLock.acquire(500); } catch (e) { staleThrown = e; }
+  assert.ok(staleThrown && staleThrown.code === 'STALE_LOCK_REQUIRES_RECOVERY',
+    'Finding 3 fail-closed: PID chết → throw STALE_LOCK_REQUIRES_RECOVERY (KHÔNG tự phá)');
+  // Lockfile giữ nguyên, lock vẫn "thuộc" PID 999999 (chết) cho đến khi Bố quyết recovery.
+  assert.strictEqual(readFileSync(staleLock.lockFile, 'utf8').trim(), '999999',
+    'Finding 3: lockfile PID chết KHÔNG bị xóa/rename tự động');
+  // Sau khi Bố "recovery" thủ công (giả lập bằng cách xóa lockfile), acquire mới thắng.
+  rmSync(staleLock.lockFile, { force: true });
   await staleLock.acquire(1000);
-  assert.strictEqual(staleLock.isLocked(), true, 'stale lock (PID chết) bị break');
+  assert.strictEqual(staleLock.isLocked(), true, 'sau manual recovery → acquire thắng');
   staleLock.release();
 
-  // REGRESSION Finding 4: lockfile ghi identity <pid>:<nonce>. stale PID hoặc corrupted
-  // content → atomic quarantine rename (KHÔNG read-then-unlink), rồi wx open retry.
+  // REGRESSION Finding 4 (FAIL-CLOSED): lockfile ghi identity <pid>:<nonce> với
+  // stale PID hoặc corrupted content. Trước đây: atomic quarantine rename + wx retry.
+  // Bây giờ (GPT-REV-106 fail-closed): KHÔNG tự rename/xóa → throw STALE_LOCK_REQUIRES_RECOVERY.
   const qKey = 'quarantinelock000000000000000000000000000000000000000000000000000000000000000';
   const qLock = createLock(lockRoot, qKey);
   // Pre-seed lockfile với PID 999999 (không alive) + nonce giả.
-  writeFileSync(qLock.lockFile, '999999:fake-nonce-xyz');
+  const qStalePath = qLock.lockFile;
+  const qStaleContent = '999999:fake-nonce-xyz';
+  writeFileSync(qStalePath, qStaleContent);
+  let qThrown = null;
+  try { await qLock.acquire(500); } catch (e) { qThrown = e; }
+  assert.ok(qThrown && qThrown.code === 'STALE_LOCK_REQUIRES_RECOVERY',
+    'Finding 4 fail-closed: identity <stale_pid>:<nonce> → throw STALE_LOCK_REQUIRES_RECOVERY');
+  // Lockfile giữ nguyên, KHÔNG bị rename.
+  assert.strictEqual(readFileSync(qStalePath, 'utf8').trim(), qStaleContent,
+    'Finding 4: lockfile <pid>:<nonce> stale KHÔNG bị rename (no self-quarantine)');
+  // Quét: KHÔNG có file .stale-* từ attempt này.
+  const qLockDir = join(lockRoot, 'locks', qKey.slice(0, 2));
+  const qLeftovers = readdirSync(qLockDir).filter(f => f.startsWith(qKey) && /\.stale-/.test(f));
+  assert.strictEqual(qLeftovers.length, 0,
+    'Finding 4: KHÔNG tạo file .stale-* khi fail-closed');
+  // Sau manual recovery → acquire thắng + release atomic rename .released-* (audit trail).
+  rmSync(qStalePath, { force: true });
   await qLock.acquire(1000);
-  // Sau acquire: lockfile phải chứa identity mới của qLock (pid:nonce), KHÔNG phải '999999:fake-nonce-xyz'.
   const owner = readFileSync(qLock.lockFile, 'utf8').trim();
-  assert.ok(/^\d+:[a-f0-9]+$/.test(owner), 'Finding 4: lockfile mới có dạng <pid>:<hex-nonce>');
-  assert.ok(!owner.startsWith('999999'), 'Finding 4: owner cũ (PID 999999) bị quarantine, không còn ở lockfile');
+  assert.ok(/^\d+:[a-f0-9]+$/.test(owner), 'sau recovery: lockfile mới có dạng <pid>:<hex-nonce>');
+  assert.ok(!owner.startsWith('999999'), 'sau recovery: owner cũ (PID 999999) đã bị xóa, không còn');
   qLock.release();
-  // Release: rename tới .released-<nonce>, lockfile gốc không còn ở path cũ.
-  assert.strictEqual(qLock.isLocked(), false, 'Finding 4: release atomic quarantine → lockfile biến mất');
-  // Tìm file quarantine được tạo ra (audit trail).
-  const lockDir = join(lockRoot, 'locks', qKey.slice(0, 2));
-  const leftovers = readdirSync(lockDir).filter(f => f.includes(qKey));
-  assert.ok(leftovers.some(f => /\.stale-|\.released-/.test(f)),
-    'Finding 4: file quarantine (.stale-... hoặc .released-...) tồn tại để audit');
+  assert.strictEqual(qLock.isLocked(), false, 'release atomic quarantine → lockfile biến mất');
+  // Tìm file .released-* từ release (audit trail).
+  const qLeftovers2 = readdirSync(qLockDir).filter(f => f.startsWith(qKey));
+  assert.ok(qLeftovers2.some(f => /\.released-/.test(f)),
+    'Finding 4: file .released-* tồn tại để audit (do chính owner release)');
+
+  // GPT-REV-106 Finding 3 (REGRESSION — fail-closed): khi thấy stale lock KHÔNG tự
+  // rename/xóa. Verify:
+  //   (a) acquire throw STALE_LOCK_REQUIRES_RECOVERY (không silently retry).
+  //   (b) lock B (nếu có) — identity thật — đặt SAU final validation KHÔNG bị mất:
+  //       pre-seed stale lock, ghi đè thành lock B, gọi acquire → B vẫn nguyên,
+  //       acquire throw, KHÔNG có file nào bị rename/xóa.
+  const fcKey = 'failclosedlock000000000000000000000000000000000000000000000000000000000000';
+  const fcLock = createLock(lockRoot, fcKey);
+  // (a) stale PID + identity cũ: acquire throw, lockfile KHÔNG bị xóa/rename.
+  const stalePath = fcLock.lockFile;
+  const staleContent = '999999:fake-nonce-zzz';
+  writeFileSync(stalePath, staleContent);
+  let fcThrown = null;
+  try { await fcLock.acquire(500); } catch (e) { fcThrown = e; }
+  assert.ok(fcThrown && fcThrown.code === 'STALE_LOCK_REQUIRES_RECOVERY',
+    'Finding 3 fail-closed: stale lock → throw STALE_LOCK_REQUIRES_RECOVERY (không retry)');
+  // Lockfile giữ nguyên, KHÔNG bị rename → file gốc còn nguyên content cũ.
+  assert.strictEqual(existsSync(stalePath), true, 'Finding 3: lockfile KHÔNG bị xóa');
+  assert.strictEqual(readFileSync(stalePath, 'utf8').trim(), staleContent,
+    'Finding 3: lockfile KHÔNG bị rename/overwrite');
+  // Quét dir: KHÔNG có file .stale-* được tạo từ attempt này.
+  const fcLockDir = join(lockRoot, 'locks', fcKey.slice(0, 2));
+  const fcLeftovers = readdirSync(fcLockDir).filter(f => f.startsWith(fcKey) && /\.stale-/.test(f));
+  assert.strictEqual(fcLeftovers.length, 0,
+    'Finding 3: KHÔNG tạo file .stale-* khi fail-closed (no self-quarantine)');
+
+  // (b) A → B swap simulation: ghi đè lockfile thành identity B (PID khác, NONCE khác,
+  // hợp lệ) NGAY TRƯỚC khi parent đọc. Parent đọc thấy B identity → KHÔNG stale
+  // (PID khác nhưng giả sử alive) → retry loop. Nhưng nếu B identity KHÔNG parse
+  // được pid (corrupt B), parent phải fail-closed và KHÔNG đụng B.
+  // Test chính: parent quan sát 1 lockfile, ghi đè thành B (PID sống thật) SAU
+  // quan sát, parent gọi acquire → vì B là live lock của process khác → parent
+  // BLOCK (chờ owner release). Lock B nguyên vẹn, parent không làm gì với B.
+  const bKey = 'liveblockB000000000000000000000000000000000000000000000000000000000000000';
+  const bLock = createLock(lockRoot, bKey);
+  // Spawn child thật: child acquire rồi hold 1500ms. Parent (PID khác) gọi acquire
+  // trong cùng khoảng → phải block chờ release (chứ KHÔNG throw).
+  const bHoldScript = join(lockRoot, 'bhold.mjs');
+  writeFileSync(bHoldScript, `
+import { createLock } from ${cacheMod};
+const lock = createLock(${JSON.stringify(lockRoot)}, ${JSON.stringify(bKey)});
+(async () => {
+  await lock.acquire(5000);
+  await new Promise(r => setTimeout(r, 1500));
+  lock.release();
+  process.exit(0);
+})().catch(e => { console.error(e.message); process.exit(3); });
+`);
+  const bChild = spawn(process.execPath, [bHoldScript], { stdio: 'ignore' });
+  // Đợi child thực sự giữ.
+  const bDeadline = Date.now() + 5000;
+  while (Date.now() < bDeadline) {
+    if (existsSync(bLock.lockFile)) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // Snapshot identity của B TRƯỚC khi parent thử.
+  const bIdentityBefore = readFileSync(bLock.lockFile, 'utf8').trim();
+  assert.ok(/^\d+:[a-f0-9]+$/.test(bIdentityBefore), 'lock B identity dạng <pid>:<hex-nonce>');
+  // Parent acquire: phải block (không throw), vì B là live lock của child.
+  const t0 = Date.now();
+  await bLock.acquire(3000);
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed >= 1000, 'parent block chờ child release (~1500ms, ít nhất 1s)');
+  // Sau khi parent acquire xong, lockfile chứa parent identity, KHÔNG phải B.
+  const parentIdentity = readFileSync(bLock.lockFile, 'utf8').trim();
+  assert.notStrictEqual(parentIdentity, bIdentityBefore, 'sau wait, parent ghi đè identity mới');
+  assert.ok(parentIdentity.startsWith(String(process.pid) + ':'),
+    'parent identity = parent PID:<nonce>');
+  bLock.release();
+  // Đợi child exit (poll exitCode thay on('exit') để tránh race khi child đã thoát
+  // trước khi parent attach listener).
+  const bExitDeadline = Date.now() + 5000;
+  while (Date.now() < bExitDeadline) {
+    if (bChild.exitCode !== null) break;
+    if (bChild.signalCode !== null) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(bChild.exitCode === 0 || bChild.signalCode === 'SIGTERM',
+    'child B đã exit (success hoặc killed)');
+  // B child đã exit: lockfile (sau parent release) nên là .released-* hoặc không còn.
+  // QUAN TRỌNG: KHÔNG có file nào từ B bị rename sai bởi parent.
+  const bLockDir = join(lockRoot, 'locks', bKey.slice(0, 2));
+  const bLeftovers = readdirSync(bLockDir).filter(f => f.startsWith(bKey));
+  // Không có file nào tên chứa identity cũ của B (B identity chỉ chứa hex, suffix
+  // .released- hoặc .stale- là do chính B release hoặc stale-check; nếu có thì
+  // đó là file từ CHÍNH B (release) hoặc từ B (stale-check khi PID chết) — KHÔNG
+  // phải từ parent). Ở đây child exit bình thường → chỉ có .released- từ B.
+  for (const f of bLeftovers) {
+    if (f.includes(bIdentityBefore.split(':')[1])) {
+      // File chứa nonce cũ của B → file này phải là B's own release file (.released-*).
+      assert.ok(/\.released-/.test(f),
+        'nếu file chứa B nonce tồn tại → phải là B\'s own release file (KHÔNG bị parent rename)');
+    }
+  }
 }
-console.log('6. concurrent lock thực (cross-process) + owner-only release + stale-safe (Finding 3+4)');
+console.log('6. concurrent lock thực (cross-process) + owner-only release + stale-safe + fail-closed (Finding 3+4)');
 
 console.log('=== Cache tests ===');
 const fakeRoot = join(tmpdir(), 'ai-pr-reviewer-evidence', 'testproj');
@@ -346,41 +467,45 @@ console.log('11c. verifyCacheIntegrity (meta thật)');
   // GPT-REV-106 (Finding 3): stale-lock race — đọc identity A, atomic-swap lockfile
   // thành B giữa observation và quarantine → B KHÔNG bị mất. Test bằng test hook
   // __quarantineForTest: mô phỏng race bằng cách set lockFile = identity A, gọi
-  // __quarantineForTest(A) nhưng ngay trước khi nó re-read, swap lockFile thành B
-  // (thông qua side effect: trong test này, gọi __quarantineForTest với observed=A
-  // nhưng lockFile hiện tại đã là B) → phải trả race_detected, KHÔNG rename.
+  // Test 17: __quarantineForTest với 2 trường hợp — A→B race_detected, và fail-closed
+  // (KHÔNG rename) kể cả khi identity khớp observed. Đây là test 17 cũ nhưng cập nhật
+  // theo policy mới (GPT-REV-106 fail-closed): KHÔNG BAO GIỜ self-quarantine.
   {
     const raceKey = 'racetest' + '0'.repeat(58);
     const raceRoot = join(tmpdir(), 'fake-race-' + Date.now());
     const raceLock = createLock(raceRoot, raceKey);
     const lockPath = raceLock.lockFile;
-    // Identity A: PID chết (giả), nonce A.
+    // Trường hợp 1: identity A (PID chết) đã bị swap thành B giữa quan sát và
+    // re-read → trả race_detected, KHÔNG rename.
     const identA = '99999:aaaaaaaaaaaaaaaa';
     writeFileSync(lockPath, identA);
-    // Atomic swap lockFile thành identity B (mô phỏng process khác đã quarantine A
-    // rồi ghi B với identity khác). Trong test, swap = writeFileSync lại với B
-    // (lockfile path như nhau, content đã đổi).
     const identB = '88888:bbbbbbbbbbbbbbbb';
     writeFileSync(lockPath, identB);
-    // Gọi quarantine với observed=A, nhưng lockfile hiện tại = B → race detected.
     const r = raceLock.__quarantineForTest(identA);
     assert.strictEqual(r.ok, false, 'race: identity đã đổi → ok=false');
     assert.strictEqual(r.reason, 'race_detected', 'race: reason=race_detected');
-    // Verify lockfile vẫn còn identity B (KHÔNG bị rename nhầm).
-    assert.strictEqual(readFileSync(lockPath, 'utf8').trim(), identB, 'race: B vẫn còn identity nguyên vẹn');
-    // Verify không có stale file nào được tạo (vì rename không xảy ra).
+    // Lockfile B nguyên vẹn, KHÔNG có stale file được tạo.
+    assert.strictEqual(readFileSync(lockPath, 'utf8').trim(), identB,
+      'race: B vẫn còn identity nguyên vẹn (KHÔNG bị rename nhầm)');
     const dir = dirname(lockPath);
     const stale = readdirSync(dir).filter(f => f.startsWith(basename(lockPath) + '.stale-'));
-    assert.strictEqual(stale.length, 0, 'race: không tạo stale file (rename đã bị chặn)');
-    // Cleanup: rename thật với observed=B để lockfile B được move ra stale (đúng).
+    assert.strictEqual(stale.length, 0, 'race: không tạo stale file (rename bị chặn)');
+
+    // Trường hợp 2: identity đồng bộ (observed=B, file=B) — vẫn fail-closed theo
+    // policy mới: KHÔNG rename, trả STALE_LOCK_REQUIRES_RECOVERY.
     const r2 = raceLock.__quarantineForTest(identB);
-    assert.strictEqual(r2.ok, true, 'sau khi re-read đồng bộ → rename OK');
+    assert.strictEqual(r2.ok, false, 'fail-closed: identity khớp → vẫn ok=false (no self-quarantine)');
+    assert.strictEqual(r2.reason, 'STALE_LOCK_REQUIRES_RECOVERY',
+      'fail-closed: reason=STALE_LOCK_REQUIRES_RECOVERY');
+    // Lockfile B vẫn nguyên.
+    assert.strictEqual(readFileSync(lockPath, 'utf8').trim(), identB,
+      'fail-closed: lockfile B KHÔNG bị rename');
     const stale2 = readdirSync(dir).filter(f => f.startsWith(basename(lockPath) + '.stale-'));
-    assert.strictEqual(stale2.length, 1, 'sau rename: 1 stale file');
-    assert.ok(stale2[0].includes('bbbbbbbbbbbbbbbb'), 'stale file suffix chứa identity B (KHÔNG chứa A)');
+    assert.strictEqual(stale2.length, 0,
+      'fail-closed: KHÔNG tạo stale file ngay cả khi identity khớp observed (no self-quarantine)');
     try { rmSync(raceRoot, { recursive: true, force: true }); } catch {}
   }
-  console.log('17. stale-lock race (Finding 3)');
+  console.log('17. stale-lock fail-closed (Finding 3 — KHÔNG self-quarantine)');
 
   try { rmSync(fakeRoot, { recursive: true, force: true }); } catch {}
   console.log('ALL TESTS PASSED');

@@ -74,29 +74,34 @@ export function createLock(root, key) {
   // unlink bởi owner trước đó → rename sẽ throw ENOENT → an toàn bỏ qua.
   // Suffix dùng nonce đọc từ lockfile (nếu có) + timestamp + pid hiện tại để tránh va chạm.
   //
-  // GPT-REV-106 (Finding 3): chống race — đọc identity (pid:nonce) trước; re-read
-  // lockfile NGAY TRƯỚC rename. Nếu identity tại lockfile đã đổi (lock A bị quarantine
-  // bởi process khác rồi thay bằng lock B với identity khác giữa 2 lần đọc) →
-  // KHÔNG rename (sẽ move nhầm lock B đi, B mất identity). Trả {ok:false, reason}
-  // để caller retry vòng lặp và wx open lại trên state mới.
+  // GPT-REV-106 (Finding 3) — chuyển sang FAIL-CLOSED:
+  // rename (dù có re-read trước) vẫn TOCTOU: cửa sổ microsecond giữa readFileSync
+  // và renameSync có thể chứa A→B swap. Portable Node không có compare-and-swap
+  // atomic trên Windows (link+unlink trên POSIX cũng có race: nếu A đã bị thay
+  // bằng B, unlink sẽ remove B → silent lock loss). Cách AN TOÀN DUY NHẤT là KHÔNG
+  // tự ý xóa/rename stale lock do process khác giữ; trả STALE_LOCK_REQUIRES_RECOVERY
+  // để caller escalate (Bố quyết định: kill owner PID, hoặc xóa thủ công, hoặc đợi
+  // release). Lockfile giữ nguyên, lock B nếu có cũng nguyên vẹn.
   function quarantineLockFile(observedIdentity) {
+    // Fail-closed: KHÔNG rename. Chỉ verify lockfile vẫn tồn tại + report observed
+    // identity để caller log/audit. Nếu lockfile đã biến mất giữa hai lần đọc
+    // (owner vừa release) → caller retry wx open sẽ tự thắng.
     if (!observedIdentity) return { ok: false, reason: 'no_observed_identity' };
-    // Re-read ngay trước rename; nếu identity lệch với observed → race detected.
     let currentIdentity = null;
-    try { currentIdentity = readFileSync(lockFile, 'utf8').trim(); } catch { return { ok: false, reason: 'lockfile_gone' }; }
+    try { currentIdentity = readFileSync(lockFile, 'utf8').trim(); }
+    catch { return { ok: false, reason: 'lockfile_gone', observed: observedIdentity }; }
     if (currentIdentity !== observedIdentity) {
-      return { ok: false, reason: 'race_detected' };
+      // Identity đã đổi (race: A bị thay bằng B giữa quan sát và verify).
+      // KHÔNG rename — nếu rename sẽ move nhầm B. Trả lý do để caller escalate.
+      return { ok: false, reason: 'race_detected', observed: observedIdentity, current: currentIdentity };
     }
-    // Suffix theo FULL identity đã quan sát (audit trail chứng minh file bị rename
-    // đúng là lock với identity này, không phải nhầm lock B).
-    const ident = observedIdentity.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const quarantine = lockFile + '.stale-' + ident + '-' + process.pid + '-' + Date.now();
-    try {
-      renameSync(lockFile, quarantine);
-      return { ok: true, reason: 'quarantined', quarantinePath: quarantine };
-    } catch {
-      return { ok: false, reason: 'rename_failed' };
-    }
+    // Identity khớp — vẫn fail-closed theo policy mới. KHÔNG rename/xóa.
+    return {
+      ok: false,
+      reason: 'STALE_LOCK_REQUIRES_RECOVERY',
+      observed: observedIdentity,
+      action: 'manual_recovery_required',
+    };
   }
 
   return {
@@ -147,16 +152,45 @@ export function createLock(root, key) {
             || ownerPid === null
             || (ownerPid !== process.pid && !pidAlive(ownerPid));
           if (isStale) {
-            // GPT-REV-106: truyền full identity (pid:nonce) để quarantineLockFile
-            // re-read verify lockfile VẪN có cùng identity trước khi rename
-            // (chống race: nếu lock A đã bị thay bằng lock B → KHÔNG rename nhầm B).
-            // Nếu lockfile đã corrupt (không parse được pid/nonce) → truyền raw nếu
-            // có, ngược lại bỏ qua (coi như 'corrupt' case).
+            // GPT-REV-106 (Finding 3) — FAIL-CLOSED: truyền full identity (pid:nonce)
+            // để quarantineLockFile verify lockfile VẪN còn. KHÔNG tự ý rename/xóa
+            // stale lock (TOCTOU không giải được portable — giữa read và rename có
+            // thể A đã bị thay bằng B → rename nhầm B → silent lock loss). Hành động
+            // duy nhất: nếu lockfile đã biến mất (owner vừa release) → retry wx open;
+            // ngược lại → escalate STALE_LOCK_REQUIRES_RECOVERY.
             const observed = ownerIdentity || (corrupt ? 'corrupt' : null);
             const r = quarantineLockFile(observed);
-            if (r.ok) continue;
-            // Quarantine fail (lockfile đã bị owner release giữa lúc đọc HOẶC race
-            // detected lock đã bị thay) → retry wx open để xử lý state mới.
+            if (r.reason === 'lockfile_gone') {
+              // Owner vừa release giữa lúc đọc → retry wx open sẽ thắng.
+              continue;
+            }
+            if (r.reason === 'STALE_LOCK_REQUIRES_RECOVERY') {
+              // Lockfile còn nguyên, identity khớp, nhưng ta đã xác định stale
+              // (corrupt / owner PID chết / không parse được pid). Theo policy mới
+              // KHÔNG tự rename/xóa. Escalate để caller (Bố) quyết định recovery.
+              // Ném lỗi có cấu trúc: code + observed identity + hint hành động.
+              const e = new Error('STALE_LOCK_REQUIRES_RECOVERY:' + key + ':' + (r.observed || 'unknown'));
+              e.code = 'STALE_LOCK_REQUIRES_RECOVERY';
+              e.observedIdentity = r.observed;
+              e.action = r.action;
+              throw e;
+            }
+            if (r.reason === 'race_detected') {
+              // Identity đã đổi (A bị quarantine/replace bằng B giữa 2 lần đọc).
+              // KHÔNG rename — sẽ nhầm B. Lock B hiện tại giữ nguyên; caller cần
+              // xem lại policy (hoặc Bố quyết định kill owner mới).
+              const e = new Error('STALE_LOCK_REQUIRES_RECOVERY:' + key + ':race_detected');
+              e.code = 'STALE_LOCK_REQUIRES_RECOVERY';
+              e.observedIdentity = r.observed;
+              e.currentIdentity = r.current;
+              e.action = 'manual_recovery_required';
+              throw e;
+            }
+            // Các lỗi khác (no_observed_identity) — KHÔNG xảy ra ở caller này vì
+            // `observed` luôn được set; fail-closed an toàn.
+            const e = new Error('STALE_LOCK_REQUIRES_RECOVERY:' + key + ':' + (r.reason || 'unknown'));
+            e.code = 'STALE_LOCK_REQUIRES_RECOVERY';
+            throw e;
           }
           if (Date.now() > deadline) throw new Error('LOCK_TIMEOUT:' + key);
           await new Promise(r => setTimeout(r, 50));
