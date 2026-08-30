@@ -1,16 +1,7 @@
 // circuit-breaker.mjs — per-tool circuit breaker (Issue #25 / Phase 4A "Model Circuit Breaker").
-// Pure logic, ZERO IO. Pattern 3-state kinh điển:
-//   CLOSED  -> tool chạy bình thường, đếm lỗi liên tiếp.
-//   OPEN    -> tool bị tạm dừng, đợi cooldown xong -> HALF_OPEN eligible.
-//   HALF_OPEN -> cho phép 1 lần probe; nếu success -> CLOSED, fail -> OPEN (reset cooldown).
-//
-// Mục tiêu (Issue #25 AC):
-//   - "Không gọi model khi context > 80% budget" / "Khi 3 lỗi liên tiếp -> pause, hỏi human".
-//   - Mỗi tool name có breaker riêng. Model check shouldPause(tool) trước khi exec.
-//
-// YAGNI:
-//   - KHONG có timer thật (setTimeout); caller tự check elapsed.
-//   - Mỗi recordFailure/recordSuccess trả registry MOI (immutable).
+// Pure logic, ZERO IO. Pattern 3-state: CLOSED (count fail) -> OPEN (cooldown) -> HALF_OPEN (probe).
+// AC: "Không gọi model khi context > 80% budget" / "3 lỗi liên tiếp -> pause, hỏi human".
+// YAGNI: không có timer thật (setTimeout); recordFailure/recordSuccess trả registry MỚI (immutable).
 
 export const BREAKER_STATES = Object.freeze({
   CLOSED: 'CLOSED',

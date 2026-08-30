@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// test-circuit-breaker.mjs — pure-logic test cho circuit breaker (Issue #25 Phase 4A).
-// KHONG framework. Exit 0 = ALL PASS, 1 = co FAIL.
+// test-circuit-breaker.mjs — pure-logic test circuit breaker (Issue #25 Phase 4A). Exit 0=PASS, 1=FAIL.
 import assert from 'node:assert/strict';
 import {
   BREAKER_STATES, BREAKER_REASONS,

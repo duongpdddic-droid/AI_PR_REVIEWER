@@ -1,12 +1,8 @@
 // dod.mjs — Deterministic Definition of Done state machine (Issue #25 / Phase 4A).
-// Pure logic, ZERO IO. Mọi hàm chỉ nhận input + trả output, test được deterministic.
-//
-// State graph (theo Issue #25 body):
-//   WORK_IN_PROGRESS -> IMPLEMENTED_NOT_VERIFIED -> VERIFIED_NOT_PUSHED
-//   -> PUSHED_NOT_HANDED_OFF -> HANDOFF_READY -> TASK_COMPLETE
-//   HANDOFF_READY -> VERIFIED_WITH_WARNINGS (warning) or TASK_COMPLETE
-//   {any non-terminal} -> NEEDS_INPUT | BLOCKED
-// Terminal: TASK_COMPLETE, BLOCKED. Resume: NEEDS_INPUT, VERIFIED_WITH_WARNINGS (RESET -> WIP).
+// Pure logic, ZERO IO. Mỗi hàm chỉ input+output, test deterministic.
+// State graph: WIP -> IMPLEMENTED -> VERIFIED -> PUSHED -> HANDOFF_READY -> COMPLETE.
+// HANDOFF_READY -> VERIFIED_WITH_WARNINGS (warning) hoặc COMPLETE. {non-terminal} -> NEEDS_INPUT | BLOCKED.
+// Terminal: COMPLETE, BLOCKED. Resume: NEEDS_INPUT, VERIFIED_WITH_WARNINGS (RESET -> WIP).
 // Fail-closed: event không hợp lệ trên state hiện tại -> {ok:false, reason:INVALID_TRANSITION}.
 
 export const DOD_STATES = Object.freeze({
@@ -96,7 +92,7 @@ export function isTerminalState(state) {
 }
 
 // Pure: transition(state, event) -> {ok, state, reason?}
-// Fail-closed: input sai / state sai / event sai / không có cạnh -> trả ok:false, KHONG tu y doi.
+// Fail-closed: input/state/event sai hoặc không có cạnh -> {ok:false}, KHÔNG tự ý đổi.
 export function transition(state, event) {
   if (!isValidState(state)) {
     return { ok: false, state, reason: DOD_REASONS.INVALID_STATE };

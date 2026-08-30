@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// test-dod.mjs — pure-logic test cho DoD state machine (Issue #25 Phase 4A).
-// KHONG framework. Exit 0 = ALL PASS, 1 = co FAIL.
+// test-dod.mjs — pure-logic test DoD state machine (Issue #25 Phase 4A). Exit 0=PASS, 1=FAIL.
 import assert from 'node:assert/strict';
 import {
   DOD_STATES, DOD_EVENTS, DOD_REASONS,

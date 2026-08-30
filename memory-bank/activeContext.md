@@ -1,5 +1,37 @@
 # Active Context
-## Vòng review-fix PR #21 — GPT-REV-094..097 (28/08/2026 01:53)
+## Fix PR #28-clean tại HEAD c202c938 (30/08/2026 09:30)
+- HEAD base: `c202c938` trên branch `pr28-clean` (worktree `C:\Users\Admin\AppData\Local\Temp\pr28-worktree`). PR trên GitHub thật là #28 cleanup, Bố gọi "PR #29".
+- Diff hiện tại vs `main`: 7 files, +1581/-1 = churn 1582 (cần ≤1500, giảm ≥83).
+- 1 test FAIL trong baseline: `acquireLock exclusive` do fix fail-closed releaseLock (không truyền owner → trả false → file còn → acquire lại fail). Test sẽ update.
+
+### Mục tiêu (đúng 6 mục Bố giao)
+1. Stale-lock recovery owner-safe + race-aware: re-read identity ngay trước mutation; identity đổi → fail-closed.
+2. PID check 3-state `alive|dead|unknown`; chỉ `dead` mới recover; lỗi ngoài ESRCH → `unknown` không xóa.
+3. `acquireLock` ghi owner record thành công trước khi return ok=true; ghi lỗi → đóng fd + dọn đúng lock vừa tạo; releaseLock fail-closed đã có.
+4. Test race A→B (B còn nguyên) + test owner-write failure + alive-PID không bị xóa.
+5. Giảm ≥83 dòng bằng gom helper (test boilerplate + loadBreaker validate).
+6. PR body đúng full HEAD/churn/evidence.
+
+### Scope giữ nguyên
+- KHÔNG đụng: memory-bank/**, scripts/defer/** (execution-broker/onboard/project-registry/review-contract/mcp-test-evidence), circuit-breaker.mjs, dod.mjs.
+- Chỉ sửa: `scripts/breaker-persist.mjs` + `scripts/test-breaker-persist.mjs`.
+
+### Kế hoạch thực thi
+1. [ ] Sửa `_pidAlive` → trả 'alive'|'dead'|'unknown' theo error code.
+2. [ ] Sửa `_tryRecoverStaleLock` → re-read identity ngay trước khi unlink; identity đổi → fail-closed; quarantine `.recover-<ts>`.
+3. [ ] Sửa `acquireLock` → `writeFileSync` phải throw để return ok=false; cleanup closeSync+unlinkSync đúng lock.
+4. [ ] Thêm test: race A→B, owner-write failure, PID unknown, PID sống (đã có), identity swap.
+5. [ ] Gom helper: `withRoot(fn)` cho test boilerplate; gom `_validateEntry` trong `loadBreaker`.
+6. [ ] Sửa test cũ `acquireLock exclusive` để truyền owner.
+7. [ ] `pnpm test` + `pnpm verify` exit 0.
+8. [ ] Update PR body, commit + push thường.
+
+### Bằng chứng thực thi (placeholder)
+- File đã kiểm tra/thay đổi:
+- Thay đổi chính:
+- Verification:
+
+---
 - GPT verdict CHANGES_REQUESTED (0 Critical, 4 Important):
   - **094** MCP redaction bypass: `opLogExcerpt` đọc `logExcerpt` raw, `collectFindings` trả `detail` raw — test cũ `maxLines:1` bỏ sót (secret ở dòng 2).
   - **095** `findReport`: không ép single-selector; thiếu identity binding (filename↔reportId↔canonical); lookup theo headSha trả entry `readdirSync` thứ tự không xác định.
