@@ -12,4 +12,13 @@ jobs:
         with:
           node-version: '22'
       - name: Run test-breaker-persist only
-        run: node scripts/test-breaker-persist.mjs; echo "exit=$?"
+        run: |
+          node --report-on-fatalerror --report-directory=$RUNNER_TEMP scripts/test-breaker-persist.mjs; echo "exit=$?"
+          ls -la "$RUNNER_TEMP" 2>/dev/null | head -20 || true
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-report
+          path: ${{ runner.temp }}/*.json
+          if-no-files-found: ignore
