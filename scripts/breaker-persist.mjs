@@ -1,7 +1,7 @@
-// breaker-persist.mjs — persist circuit breaker state across CLI invocations (Issue #25 Finding 1).
-// Runtime root ngoài repo (~/.ai-pr-reviewer/), atomic write + file lock. YAGNI: chỉ JSON + rename + exclusive lock.
+// breaker-persist.mjs — persist circuit breaker state across CLI invocations (Issue #25).
+// Runtime root ngoài repo, atomic write + file lock. YAGNI: JSON + rename + exclusive lock.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, writeSync, mkdirSync, existsSync, renameSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
@@ -38,14 +38,14 @@ export function readJsonSafe(filePath) {
 
 // ---------- file lock (exclusive via 'wx' + owner identity) ----------
 
-// Lock file chứa JSON owner: {pid, nonce, createdAt}. release chỉ xóa khi identity
-// còn khớp. Recovery (stale lock) chỉ khi xác minh được PID đã chết VÀ identity
-// trên ổ đĩa vẫn khớp với record đã đọc ngay trước mutation (re-read race-aware).
-// PID 'alive' hoặc 'unknown' → fail-closed.
+// Lock file = JSON owner {pid, nonce, createdAt}. release chỉ xóa khi identity còn
+// khớp. PID check 3-state: 'alive'|'dead'|'unknown' — chỉ 'dead' mới recover.
+// Test seam _setFsOverride cho phép inject mock fs (cover race + write-fail).
+let _fsOverride = null;
+export function _setFsOverride(o) { _fsOverride = o; }
+const _fs = (name) => (_fsOverride && _fsOverride[name]) || { openSync, writeFileSync, writeSync, renameSync, unlinkSync, readFileSync, closeSync }[name];
+
 function _pidAlive(pid) {
-  // 3-state: ESRCH='dead' (chắc chắn chết), EPERM='alive' (sống, thiếu quyền),
-  // mọi lỗi khác (EACCES, EINVAL, network fs) → 'unknown' (không xác minh được,
-  // KHÔNG xóa). Chỉ 'dead' mới được phép recover.
   if (!Number.isInteger(pid) || pid <= 0) return 'unknown';
   try { process.kill(pid, 0); return 'alive'; }
   catch (err) {
@@ -56,51 +56,44 @@ function _pidAlive(pid) {
 }
 function _readLockOwner(lockPath) {
   try {
-    const raw = readFileSync(lockPath, 'utf8');
-    const data = JSON.parse(raw);
+    const data = JSON.parse(_fs('readFileSync')(lockPath, 'utf8'));
     if (data && typeof data === 'object' && Number.isInteger(data.pid) && typeof data.nonce === 'string') return data;
     return null;
   } catch { return null; }
 }
-// Race-aware recovery: đọc owner → check PID → re-read ngay trước mutation.
-// Identity thay đổi → fail-closed (writer khác vừa ghi đè, không được xóa).
-// Quarantine file cũ sang `.recover-<ts>` trước unlink (forensics).
+// Atomic recovery-claim: rename lock → lock.recover-<ts> (atomic trên cùng FS, không
+// TOCTOU). Identity lệch → restore + fail-closed; rename fail → fail-closed.
 function _tryRecoverStaleLock(lockPath) {
   const owner = _readLockOwner(lockPath);
-  if (!owner) return false; // corrupt owner record → KHÔNG tự ý xóa (fail-closed)
-  const state = _pidAlive(owner.pid);
-  if (state !== 'dead') return false; // 'alive'|'unknown' → giữ nguyên
-  // Re-read ngay trước mutation để chặn race: writer khác vừa ghi đè lock.
-  const reread = _readLockOwner(lockPath);
-  if (!reread || reread.pid !== owner.pid || reread.nonce !== owner.nonce) return false;
-  try {
-    renameSync(lockPath, `${lockPath}.recover-${Date.now()}`);
-    return true;
-  } catch { return false; }
+  if (!owner || _pidAlive(owner.pid) !== 'dead') return false;
+  const quarantine = `${lockPath}.recover-${Date.now()}`;
+  try { _fs('renameSync')(lockPath, quarantine); } catch { return false; }
+  const moved = _readLockOwner(quarantine);
+  if (!moved || moved.pid !== owner.pid || moved.nonce !== owner.nonce) {
+    try { _fs('renameSync')(quarantine, lockPath); } catch { /* caller sẽ thấy EEXIST */ }
+    return false;
+  }
+  return true;
 }
 
 // acquireLock(path, timeoutMs=5000) -> {ok, fd, owner, error}
-// Dùng fs.openSync flag 'wx' (tạo file exclusive; fail nếu đã tồn tại). Ghi owner
-// record {pid, nonce, createdAt} NGAY SAU khi tạo — ghi thành công mới return ok=true.
-// Ghi lỗi → đóng fd + unlink lock vừa tạo (đúng lock của mình, an toàn vì 'wx').
+// openSync('wx') tạo lock exclusive; ghi owner QUA FD (writeSync), kiểm tra bytes.
+// Ghi fail (throw hoặc short write) → closeSync+unlinkSync đúng lock của mình, retry.
 export function acquireLock(lockPath, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
   const myNonce = randomUUID();
+  const fs = _fs;
+  const cleanup = (fd) => { try { fs('closeSync')(fd); } catch { /* ignore */ } try { fs('unlinkSync')(lockPath); } catch { /* wx owner */ } };
   while (Date.now() < deadline) {
     try {
-      const fd = openSync(lockPath, 'wx');
-      const owner = { pid: process.pid, nonce: myNonce, createdAt: Date.now() };
-      try {
-        writeFileSync(lockPath, JSON.stringify(owner), 'utf8');
-      } catch (writeErr) {
-        // Ghi owner fail → dọn đúng lock vừa tạo, KHÔNG trả ok=true.
-        try { closeSync(fd); } catch { /* fd close vẫn tiếp tục */ }
-        try { unlinkSync(lockPath); } catch { /* lock vừa mở bằng wx, mình là owner */ }
-        lastErr = writeErr;
-        continue; // retry cho đến khi hết timeout
-      }
-      return { ok: true, fd, owner, error: null };
+      const fd = fs('openSync')(lockPath, 'wx');
+      const buf = Buffer.from(JSON.stringify({ pid: process.pid, nonce: myNonce, createdAt: Date.now() }), 'utf8');
+      let written = 0;
+      try { written = fs('writeSync')(fd, buf, 0, buf.length, 0); }
+      catch (writeErr) { cleanup(fd); lastErr = writeErr; continue; }
+      if (written !== buf.length) { cleanup(fd); lastErr = new Error(`short write: ${written}/${buf.length}`); continue; }
+      return { ok: true, fd, owner: { pid: process.pid, nonce: myNonce, createdAt: Date.now() }, error: null };
     } catch (err) {
       lastErr = err;
       if (err.code === 'EEXIST' || err.code === 'EEXIT') {
@@ -115,18 +108,18 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
 }
 
 // releaseLock: chỉ xóa lock khi expectedOwner được truyền VÀ identity còn khớp.
-// Thiếu owner / mismatch → KHÔNG unlink (fail-closed). Trả boolean.
+// Thiếu owner / mismatch → KHÔNG unlink (fail-closed).
 export function releaseLock(fd, lockPath, expectedOwner) {
-  try { closeSync(fd); } catch { /* fd close vẫn tiếp tục */ }
+  try { closeSync(fd); } catch { /* ignore */ }
   if (!expectedOwner || typeof expectedOwner !== 'object'
       || !Number.isInteger(expectedOwner.pid) || typeof expectedOwner.nonce !== 'string') {
-    return false; // thiếu/sai shape owner → fail-closed, KHÔNG unlink
+    return false;
   }
   const current = _readLockOwner(lockPath);
   if (current && current.pid === expectedOwner.pid && current.nonce === expectedOwner.nonce) {
     try { unlinkSync(lockPath); return true; } catch { return false; }
   }
-  return false; // identity mismatch / file đã mất / record lệch → KHÔNG unlink
+  return false;
 }
 
 // withFileLock(namespace, fn, timeoutMs) -> fn result (luôn unlock trong finally)
@@ -145,9 +138,8 @@ export function withFileLock(namespace, fn, timeoutMs = 5000) {
 
 // ---------- breaker persistence ----------
 
-// Windows-safe + collision-safe: thay thế ký tự nguy hiểm, giới hạn độ dài
-// (Windows MAX_PATH 260), thêm short hash (8 hex) chống collision khi 2 project
-// khác nhau sanitize thành cùng chuỗi (vd: "a/b" và "a_b" đều → "a_b").
+// Windows-safe + collision-safe: thay ký tự nguy hiểm, giới hạn độ dài (MAX_PATH 260),
+// short hash chống collision khi 2 project khác nhau sanitize thành cùng chuỗi.
 const MAX_PART_LEN = 80;
 const HASH_LEN = 8;
 function _shortHash(s) {
@@ -166,21 +158,18 @@ export function breakerFilePath(namespace) {
 }
 
 export function buildBreakerNamespace(project = 'default', task = 'default') {
-  // Sanitize ký tự nguy hiểm + 6-hex hash từ raw input chống collision: "a/b" vs "a_b"
-  // sanitize thành cùng chuỗi nhưng raw hash khác nhau (key namespace, không chỉ filename).
+  // Sanitize + 6-hex raw hash chống collision: "a/b" vs "a_b" sanitize cùng chuỗi nhưng raw hash khác.
   const safe = (s) => String(s || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
   const raw = `${String(project || '')}\u0000${String(task || '')}`;
   const hash = createHash('sha256').update(raw).digest('hex').slice(0, 6);
   return `${safe(project)}::${safe(task)}::${hash}`;
 }
 
-// Load breaker state. Fail-closed (Finding 2): file corrupt / sai shape → ok=false.
-// Caller check ok trước khi ghi. File chưa có → fresh (ok=true).
+// Load breaker state. Fail-closed: file corrupt / sai shape → ok=false. File chưa có → fresh.
 const VALID_STATES = new Set(['CLOSED', 'OPEN', 'HALF_OPEN']);
 function _fail(threshold, cooldownMs, reason) {
   return { ok: false, threshold, cooldownMs, tools: null, reason };
 }
-// Validate 1 entry tools[t] — trả reason nếu sai, null nếu hợp lệ.
 function _validateEntry(t, e) {
   if (!e || typeof e !== 'object' || Array.isArray(e)) return `breaker file tools[${t}] not a plain object`;
   if (!VALID_STATES.has(e.state)) return `breaker file tools[${t}].state invalid: ${e.state}`;
@@ -190,7 +179,7 @@ function _validateEntry(t, e) {
 }
 export function loadBreaker(namespace, { threshold = 3, cooldownMs = 60_000 } = {}) {
   const file = breakerFilePath(namespace);
-  // Phân biệt "file chưa có" (fresh OK) vs "file corrupt" (fail-closed).
+
   const fileExists = existsSync(file);
   const data = readJsonSafe(file);
   if (!fileExists) return { ok: true, threshold, cooldownMs, tools: Object.create(null) };
@@ -216,8 +205,8 @@ export function saveBreaker(namespace, registry) {
 // ---------- HALF_OPEN probe (atomic claim) ----------
 
 // claimHalfOpenProbe(namespace, tool, cooldownMs, now) -> {ok, claimed, registry, reason}
-// Atomic: lock → load → check OPEN + cooldown elapsed → set HALF_OPEN → save → unlock.
-// Fail-closed (Finding 2): reg.ok=false (corrupt shape) → ok=false, KHÔNG ghi.
+// Atomic: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock.
+// Fail-closed: reg.ok=false (corrupt shape) → ok=false, KHÔNG ghi.
 export function claimHalfOpenProbe(namespace, tool, cooldownMs = 60_000, now = Date.now()) {
   return withFileLock(namespace, (ns) => {
     const reg = loadBreaker(ns, { cooldownMs });
@@ -236,9 +225,7 @@ export function claimHalfOpenProbe(namespace, tool, cooldownMs = 60_000, now = D
   }, 5000);
 }
 
-// ---------- convenience wrappers (inject pure functions từ circuit-breaker.mjs) ----------
-
-// createPersistFunctions(pureFailure, pureSuccess) -> { recordFailurePersist, recordSuccessPersist, claimHalfOpenProbe }
+// ---------- convenience wrappers ----------
 export function createPersistFunctions(recordFailurePure, recordSuccessPure) {
   function recordFailurePersist(namespace, tool, reason = 'unspecified', now = Date.now()) {
     return withFileLock(namespace, (ns) => {
