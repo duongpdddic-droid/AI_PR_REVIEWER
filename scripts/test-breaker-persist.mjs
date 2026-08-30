@@ -3,7 +3,7 @@
 // KHÔNG framework. Exit 0 = ALL PASS, 1 = có FAIL.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +11,8 @@ import process from 'node:process';
 
 import {
   atomicWriteJson, readJsonSafe, acquireLock, releaseLock, withFileLock,
-  loadBreaker, saveBreaker, buildBreakerNamespace, claimHalfOpenProbe, createPersistFunctions,
+  loadBreaker, saveBreaker, buildBreakerNamespace, breakerFilePath,
+  claimHalfOpenProbe, createPersistFunctions,
 } from './breaker-persist.mjs';
 import { recordFailure, recordSuccess } from './circuit-breaker.mjs';
 
@@ -52,6 +53,48 @@ test('readJsonSafe file thiếu/corrupt -> null', () => {
     assert.equal(readJsonSafe(join(root, 'missing.json')), null);
     writeFileSync(join(root, 'bad.json'), '{not-json', 'utf8');
     assert.equal(readJsonSafe(join(root, 'bad.json')), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// 1b. corrupt breaker state fail-closed (Finding 2)
+test('loadBreaker file corrupt -> ok=false, KHÔNG reset thành default fresh', () => {
+  const root = makeRoot();
+  try {
+    const f = breakerFilePath('ns-corrupt');
+    // Write malformed JSON trực tiếp vào path breaker (giả lập file bị hỏng).
+    writeFileSync(f, '{not-json', 'utf8');
+    const r = loadBreaker('ns-corrupt');
+    assert.equal(r.ok, false, 'corrupt file phải fail-closed');
+    assert.equal(r.tools, null, 'corrupt file KHÔNG trả tools default');
+    assert.ok(r.reason && typeof r.reason === 'string', 'phải có reason');
+    // claim probe phải fail-closed khi state corrupt.
+    const claim = claimHalfOpenProbe('ns-corrupt', 'tool', 1000, 5000);
+    assert.equal(claim.claimed, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('loadBreaker file missing ok flag -> ok=false', () => {
+  const root = makeRoot();
+  try {
+    const f = breakerFilePath('ns-no-ok');
+    writeFileSync(f, JSON.stringify({ threshold: 3, cooldownMs: 1000, tools: {} }), 'utf8');
+    const r = loadBreaker('ns-no-ok');
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /ok=true/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// 1c. namespace hash chống collision (Finding 1)
+test('breakerFilePath: 2 namespace sanitize giống nhau vẫn khác file (hash collision-safe)', () => {
+  const root = makeRoot();
+  try {
+    // "a/b" và "a_b" đều sanitize thành "a_b" — nếu không có hash, cùng file → bug.
+    const f1 = breakerFilePath('proj::a/b');
+    const f2 = breakerFilePath('proj::a_b');
+    assert.notEqual(f1, f2, 'collision: phải khác file path');
+    // Cả 2 đều Windows-safe (chỉ chứa [A-Za-z0-9_.-]).
+    assert.match(f1, /breaker-[A-Za-z0-9_.-]+\.json$/);
+    assert.match(f2, /breaker-[A-Za-z0-9_.-]+\.json$/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -146,23 +189,28 @@ test('probe fail persist -> OPEN reset openedAt; probe success -> CLOSED', () =>
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-// 5. CROSS-PROCESS: spawn 5 child cùng claim 1 namespace -> chỉ 1 thắng (Finding 1)
-test('cross-process claim HALF_OPEN: 5 child song song -> đúng 1 claimed', () => {
+// 5. CROSS-PROCESS: spawn 5 child đồng thời cùng claim 1 namespace -> chỉ 1 thắng (Finding 1 + Finding 7)
+// Dùng spawn (async) + Promise.all để các process race thật; spawnSync tuần tự sẽ miss race.
+test('cross-process claim HALF_OPEN: 5 child đồng thời -> đúng 1 claimed', async () => {
   const root = makeRoot();
   try {
     const persist = createPersistFunctions(recordFailure, recordSuccess);
     for (let i = 0; i < 3; i++) persist.recordFailurePersist('cp', 'tool', 'e', 1000 + i * 100);
     const now = 5000;
-    const children = [];
+    const tasks = [];
     for (let i = 0; i < 5; i++) {
-      const r = spawnSync(process.execPath, [process.argv[1], '--probe-child', 'cp', 'tool', String(now), '1000'], {
-        encoding: 'utf8',
-        env: { ...process.env, BREAKER_RUNTIME_ROOT: root },
-      });
-      children.push(r.status);
+      tasks.push(new Promise((resolve) => {
+        const child = spawn(process.execPath,
+          [process.argv[1], '--probe-child', 'cp', 'tool', String(now), '1000'],
+          { env: { ...process.env, BREAKER_RUNTIME_ROOT: root } });
+        let out = '';
+        child.stdout.on('data', (d) => { out += d; });
+        child.on('close', (code) => resolve({ code, out }));
+      }));
     }
-    const claimed = children.filter((s) => s === 0).length;
-    assert.equal(claimed, 1, `expected 1 claimed, got ${claimed}`);
+    const results = await Promise.all(tasks);
+    const claimed = results.filter((r) => r.code === 0).length;
+    assert.equal(claimed, 1, `expected 1 claimed, got ${claimed} (codes=${results.map((r) => r.code).join(',')})`);
     const after = loadBreaker('cp');
     assert.equal(after.tools.tool.state, 'HALF_OPEN');
   } finally { rmSync(root, { recursive: true, force: true }); }

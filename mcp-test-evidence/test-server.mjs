@@ -28,6 +28,15 @@ function ok(cond, name) {
 // ---------------------------------------------------------------------------
 // Fixture temporary root
 // ---------------------------------------------------------------------------
+// Xoá runtime store cũ (ngoài Git repo) cho projectId. Idempotent, fail-soft
+// (missing dir OK). Dùng để test chạy deterministic dù session trước đã
+// ghi cache/artifacts.
+function _cleanRuntime(runtimeRootPath) {
+  if (existsSync(runtimeRootPath)) {
+    rmSync(runtimeRootPath, { recursive: true, force: true });
+  }
+}
+
 function buildFixture() {
   const root = mkdtempSync(path.join(tmpdir(), "mcp-evidence-"));
   const agent = path.join(root, ".agent");
@@ -96,6 +105,11 @@ function buildFixture() {
   return { root, artifactDir: artifacts, manifest, mhPass, mhFail, PASS_REPORT, FAIL_REPORT, STALE_HEAD };
 }
 async function run() {
+  // Self-clean runtime store cho fixture-project trước khi test để tránh
+  // state bẩn từ session trước (test_run cache kết quả cũ → fail cacheKey).
+  // Cleanup lại trong finally để không leak giữa các lần chạy CI.
+  const fixtureRuntimeRoot = runtimeRoot("fixture-project");
+  try { _cleanRuntime(fixtureRuntimeRoot); } catch { /* best effort */ }
   const { root, artifactDir, manifest, mhPass, mhFail, PASS_REPORT, FAIL_REPORT, STALE_HEAD } = buildFixture();
   try {
     // ── 1) Pure logic / security / findReport ───────────────────────
@@ -374,6 +388,9 @@ async function run() {
     child.kill();
   } finally {
     rmSync(root, { recursive: true, force: true });
+    // Cleanup runtime store sau test (idempotent, fail-soft) — không leak giữa
+    // các lần chạy CI / local dev.
+    try { _cleanRuntime(fixtureRuntimeRoot); } catch { /* best effort */ }
   }
   console.log(`\nTổng: ${passed} assertions PASS`);
 }

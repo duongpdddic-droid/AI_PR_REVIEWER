@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 // ---------- runtime root ----------
 
@@ -81,9 +81,20 @@ export function withFileLock(namespace, fn, timeoutMs = 5000) {
 
 // ---------- breaker persistence ----------
 
-// Windows-safe: namespace có '::' (không hợp lệ trong filename) -> gạch chân.
+// Windows-safe + collision-safe: thay thế ký tự nguy hiểm, giới hạn độ dài
+// (Windows MAX_PATH 260), thêm short hash (8 hex) chống collision khi 2 project
+// khác nhau sanitize thành cùng chuỗi (vd: "a/b" và "a_b" đều → "a_b").
+const MAX_PART_LEN = 80;
+const HASH_LEN = 8;
+function _shortHash(s) {
+  return createHash('sha256').update(String(s || '')).digest('hex').slice(0, HASH_LEN);
+}
 function safeFilePart(namespace) {
-  return String(namespace || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const raw = String(namespace || '');
+  const cleaned = raw.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const head = cleaned.slice(0, MAX_PART_LEN) || 'default';
+  const hash = _shortHash(raw);
+  return `${head}-${hash}`;
 }
 
 export function breakerFilePath(namespace) {
@@ -91,22 +102,48 @@ export function breakerFilePath(namespace) {
 }
 
 export function buildBreakerNamespace(project = 'default', task = 'default') {
+  // Sanitize ký tự nguy hiểm cho namespace string (dùng làm key trong code,
+  // an toàn cho log). Hash chống collision được safeFilePart áp dụng khi ghi file.
   const safe = (s) => String(s || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
   return `${safe(project)}::${safe(task)}`;
 }
 
-// Load breaker state từ file; nếu chưa có → tạo mới.
+// Load breaker state từ file.
+// Fail-closed (Finding 2): nếu file corrupt hoặc sai shape, KHÔNG reset registry
+// thành default fresh — trả về object với ok=false, kèm reason để caller biết cần
+// khôi phục. Caller (recordFailurePersist/recordSuccessPersist/claimHalfOpenProbe)
+// phải kiểm ok trước khi ghi (sẽ trả fail thay vì ghi đè).
+//   - File chưa có: trả fresh registry (ok=true).
+//   - File hợp lệ: trả {ok:true, threshold, cooldownMs, tools, ...}.
+//   - File corrupt / sai shape: trả {ok:false, threshold, cooldownMs, tools:null, reason}.
 export function loadBreaker(namespace, { threshold = 3, cooldownMs = 60_000 } = {}) {
   const file = breakerFilePath(namespace);
+  // Phân biệt "file chưa có" (fresh registry OK) vs "file corrupt" (fail-closed):
+  // existsSync = false → fresh; existsSync = true nhưng parse fail → fail-closed.
+  const fileExists = existsSync(file);
   const data = readJsonSafe(file);
-  if (data && data.ok && typeof data.threshold === 'number' && typeof data.cooldownMs === 'number') {
-    const tools = data.tools || {};
-    for (const [t, e] of Object.entries(tools)) {
-      if (!e || !['CLOSED', 'OPEN', 'HALF_OPEN'].includes(e.state)) delete tools[t];
+  if (!fileExists || data == null) {
+    if (fileExists && data == null) {
+      // File tồn tại nhưng JSON.parse fail → corrupt.
+      return { ok: false, threshold, cooldownMs, tools: null, reason: `breaker file corrupt at ${file}` };
     }
-    return { ...data, tools };
+    return { ok: true, threshold, cooldownMs, tools: Object.create(null) };
   }
-  return { ok: true, threshold, cooldownMs, tools: Object.create(null) };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, threshold, cooldownMs, tools: null, reason: 'breaker file is not a JSON object' };
+  }
+  if (data.ok !== true) {
+    return { ok: false, threshold, cooldownMs, tools: null, reason: 'breaker file missing ok=true flag' };
+  }
+  if (typeof data.threshold !== 'number' || typeof data.cooldownMs !== 'number') {
+    return { ok: false, threshold, cooldownMs, tools: null, reason: 'breaker file missing/invalid threshold/cooldownMs' };
+  }
+  // Validate tools entries (drop invalid silently vẫn an toàn, không reset registry).
+  const tools = data.tools || {};
+  for (const [t, e] of Object.entries(tools)) {
+    if (!e || !['CLOSED', 'OPEN', 'HALF_OPEN'].includes(e.state)) delete tools[t];
+  }
+  return { ...data, tools, ok: true };
 }
 
 export function saveBreaker(namespace, registry) {

@@ -49,7 +49,7 @@ import {
   buildBreakerNamespace, claimHalfOpenProbe as claimHalfOpenProbePersist,
   createPersistFunctions, resolveRuntimeRoot,
 } from './breaker-persist.mjs';
-import { evaluateChecks, validatePolicy } from './review-contract.mjs';
+import { evaluateChecks, validatePolicy, parseHandoffMarkers, findCanonicalHandoffMarker } from './review-contract.mjs';
 
 // ---------- Constants ----------
 
@@ -185,6 +185,33 @@ function ghExec(ctx, args) {
   return exec('gh', [...args, '--repo', ctx.repo]);
 }
 
+// verifyRemotePrHead(ctx) -> {ok, match, prNumber, prHead, localHead, error}
+// Finding 4: xác nhận remote PR HEAD == local full HEAD trước khi tin CI /
+// handoff. CI chỉ chạy trên remote HEAD; nếu local lệch remote → CI check
+// stale, fail-closed. Trả về match=true khi không có PR open (no remote anchor)
+// hoặc khi remote HEAD khớp local; ngược lại match=false.
+export function verifyRemotePrHead(ctx) {
+  if (!ctx || !ctx.ok || !ctx.repo || !ctx.headSha) {
+    return { ok: false, match: false, prNumber: null, prHead: null, localHead: ctx?.headSha || null, error: 'invalid git context' };
+  }
+  const prNum = getOpenPrNumber(ctx);
+  if (!prNum) {
+    // Không có PR mở → không có anchor remote, bỏ qua check (match=true).
+    return { ok: true, match: true, prNumber: null, prHead: null, localHead: ctx.headSha, error: null };
+  }
+  // `gh pr view <n> --json headRefOid` trả object có headRefOid (full SHA).
+  const r = ghExec(ctx, ['pr', 'view', String(prNum), '--json', 'headRefOid', '--jq', '.headRefOid']);
+  if (!r.ok) {
+    return { ok: false, match: false, prNumber: prNum, prHead: null, localHead: ctx.headSha, error: `gh pr view failed: ${(r.stderr || '').trim().slice(0, 200)}` };
+  }
+  const prHead = (r.stdout || '').trim();
+  if (!/^[0-9a-f]{40}$/i.test(prHead)) {
+    return { ok: false, match: false, prNumber: prNum, prHead, localHead: ctx.headSha, error: `invalid remote PR HEAD: '${prHead}'` };
+  }
+  const match = prHead.toLowerCase() === ctx.headSha.toLowerCase();
+  return { ok: true, match, prNumber: prNum, prHead, localHead: ctx.headSha, error: match ? null : 'remote PR HEAD != local HEAD' };
+}
+
 // ---------- CI check (Finding 2) ----------
 // readCiStatus(ctx, policy) -> {ok, state, detail}
 // Đọc CI THẬT cho đúng repo + full HEAD qua gh pr checks, đánh giá bằng evaluateChecks(policy).
@@ -220,18 +247,28 @@ export function mutationKey({ repository, prNumber, headSha, policyVersion, acti
   return [repository, prNumber, headSha, policyVersion, action].join('::');
 }
 
-// hasCanonicalHandoffMarker(ctx, policyVersion) -> {ok, present}
-// Đọc comments PR cho đúng HEAD; tìm marker mutationKey với action HANDOFF_ACTION.
-// KHÔNG dùng PR OPEN làm marker.
+// hasCanonicalHandoffMarker(ctx, policyVersion) -> {ok, present, marker, error}
+// Finding 6: dùng parser canonical (parseHandoffMarkers) + filter provenance
+// (authorLogin + commentId). Comment legacy body thuần KHÔNG đủ tiêu chuẩn tin
+// cậy — caller phải từ chối. So khớp full mutationKey (repo, pr, headSha,
+// policyVersion, action) — không match chuỗi con.
 export function hasCanonicalHandoffMarker(ctx, policyVersion) {
-  if (!ctx || !ctx.ok || !ctx.repo) return { ok: false, present: false };
+  if (!ctx || !ctx.ok || !ctx.repo) return { ok: false, present: false, marker: null, error: 'invalid git context' };
   const prNum = getOpenPrNumber(ctx);
-  if (!prNum) return { ok: false, present: false };
-  const key = mutationKey({ repository: ctx.repo, prNumber: prNum, headSha: ctx.headSha, policyVersion, action: HANDOFF_ACTION });
-  const needle = `<!-- ai-pr-reviewer:key=${key} -->`;
-  const comments = ghExec(ctx, ['api', `repos/${ctx.repo}/issues/${prNum}/comments`, '--paginate', '--jq', '.[].body']);
-  if (!comments.ok) return { ok: false, present: false };
-  return { ok: true, present: comments.stdout.includes(needle) };
+  if (!prNum) return { ok: false, present: false, marker: null, error: 'no open PR for branch' };
+  const expectedKey = mutationKey({
+    repository: ctx.repo, prNumber: prNum, headSha: ctx.headSha, policyVersion,
+    action: HANDOFF_ACTION,
+  });
+  // Lấy rich comments (id, user.login, created_at, body) — KHÔNG chỉ body.
+  const raw = ghExec(ctx, ['api', `repos/${ctx.repo}/issues/${prNum}/comments`, '--paginate']);
+  if (!raw.ok) return { ok: false, present: false, marker: null, error: `gh api comments failed: ${(raw.stderr || '').trim().slice(0, 200)}` };
+  let comments;
+  try { comments = JSON.parse(raw.stdout || '[]'); }
+  catch { return { ok: false, present: false, marker: null, error: 'gh api comments: invalid JSON' }; }
+  const parsed = parseHandoffMarkers(comments);
+  const found = findCanonicalHandoffMarker(parsed, expectedKey);
+  return { ok: true, present: !!found, marker: found, error: null };
 }
 
 // ---------- DoD persist (Finding 2: DoD state persisted) ----------
@@ -427,14 +464,16 @@ export function toolHandoffStatus({ cwd = process.cwd(), gitLock = null, policyV
   }
   const log = exec('git', ['-C', cwd, 'log', '--oneline', '-5']);
   const ok = log.ok;
-  // Check canonical marker nếu có gh + policyVersion
+  // Check canonical marker nếu có gh + policyVersion (Finding 6: parser canonical).
   let handoffMarkerValid = false;
   let markerDetail = null;
   if (ok && policyVersion && lock.ok) {
     const marker = hasCanonicalHandoffMarker(lock, policyVersion);
     handoffMarkerValid = marker.present;
-    markerDetail = marker.present ? 'canonical marker found' : 'no canonical marker';
+    markerDetail = marker.present ? 'canonical marker found' : `no canonical marker (${marker.error || 'parse fail'})`;
   }
+  // Finding 4: xác nhận remote PR HEAD == local HEAD.
+  const remote = verifyRemotePrHead(lock);
   return {
     ok,
     tool: 'handoff_status',
@@ -445,6 +484,9 @@ export function toolHandoffStatus({ cwd = process.cwd(), gitLock = null, policyV
       remote: lock.repo,
       handoffMarkerValid,
       markerDetail: markerDetail || 'no gh/policyVersion — marker check skipped',
+      remotePrHeadMatch: remote.ok && remote.match,
+      remotePrHead: remote.prHead,
+      remotePrNumber: remote.prNumber,
     },
     error: ok ? null : 'git command failed',
   };
@@ -462,7 +504,7 @@ export function toolHandoffStatus({ cwd = process.cwd(), gitLock = null, policyV
 //        handoff_status  : canonical marker + HEAD hợp lệ (handoffMarkerValid)
 const TOOL_DOD_EVENT = Object.freeze({
   repo_status: null,
-  repo_diff: DOD_EVENTS.EVIDENCE_IMPLEMENTATION,
+  repo_diff: null, // Finding 5: diff KHONG phai evidence implementation (test_run/verify_status PASS moi la)
   test_run: DOD_EVENTS.EVIDENCE_VERIFICATION,
   verify_status: DOD_EVENTS.EVIDENCE_VERIFICATION,
   pre_review_status: DOD_EVENTS.EVIDENCE_VERIFICATION,
@@ -470,20 +512,22 @@ const TOOL_DOD_EVENT = Object.freeze({
   auto_commit_gate: null,
 });
 
-// shouldEmitDodEvent(tool, result) -> boolean (Finding 3: evidence canonical mới emit)
+// shouldEmitDodEvent(tool, result) -> boolean (Finding 3 + Finding 5: evidence canonical mới emit)
 export function shouldEmitDodEvent(tool, result) {
   if (!result || !result.ok) return false;
   if (tool === 'repo_diff') {
-    // Diff tồn tại ≠ implemented: chỉ emit khi có thay đổi thật
-    return Number((result.data && result.data.totalFiles) || 0) > 0;
+    // Finding 5: diff tồn tại KHONG phải evidence implementation.
+    // Implementation = test_run/verify_status PASS. Diff không bao giờ trigger DoD.
+    return false;
   }
   if (tool === 'test_run' || tool === 'verify_status') {
     // Gate bắt buộc phải pass (allPass === true, fail-closed for undefined/null)
     return result.data && result.data.allPass === true;
   }
   if (tool === 'handoff_status') {
-    // Chỉ emit khi canonical marker + HEAD hợp lệ
-    return !!(result.data && result.data.handoffMarkerValid === true);
+    // Chỉ emit khi canonical marker (provenance) + remotePrHeadMatch (Finding 4) đều OK.
+    const d = result.data || {};
+    return d.handoffMarkerValid === true && d.remotePrHeadMatch === true;
   }
   return true;
 }
@@ -662,11 +706,13 @@ function main() {
   console.log(jsonOut ? JSON.stringify(payload, null, 2) : JSON.stringify(payload));
   process.exit(r.ok ? 0 : 1);
 }
-// runAutoCommitGate — auto-commit gate CLI với IO THẬT (Finding 2).
+// runAutoCommitGate — auto-commit gate CLI với IO THẬT (Finding 2 + 3 + 4).
 // - CI: gh pr checks + evaluateChecks(policy) — KHÔNG suy diễn từ rs.ok
 // - handoffMarker: canonical marker comment — KHÔNG dùng PR OPEN
 // - dodState: đọc từ persisted dod-<namespace>.json
 // - worktreeClean: tách dirty-in-scope (dự kiến commit) vs dirty-out-of-scope
+//   dựa trên porcelain hiện tại (git status --porcelain) + diff base..HEAD
+// - remotePrHeadMatch (Finding 4): xác nhận remote PR HEAD == local HEAD
 export function runAutoCommitGate({ cwd = process.cwd(), base = 'main', gitLock = null, jsonOut = false } = {}) {
   const lock = gitLock || createGitContext({ cwd });
   if (!lock.ok) {
@@ -687,33 +733,48 @@ export function runAutoCommitGate({ cwd = process.cwd(), base = 'main', gitLock 
     ciState = ci.state;
     ciDetail = ci.detail;
   }
-  // Canonical handoff marker (Finding 2): không dùng PR OPEN
+  // Canonical handoff marker (Finding 2 + 6): không dùng PR OPEN, dùng parser canonical.
   let handoffMarkerPresent = false;
   let markerDetail = 'no policy version';
   if (policyRes.policy) {
     const m = hasCanonicalHandoffMarker(lock, policyRes.policy.policyVersion);
     handoffMarkerPresent = m.present;
-    markerDetail = m.present ? 'canonical marker found' : 'no canonical marker';
+    markerDetail = m.present ? 'canonical marker found' : `no canonical marker (${m.error || 'parse fail'})`;
   }
   // DoD persisted (Finding 2): đọc từ file dod-<namespace>.json
   const ns = resolveBreakerNamespace(lock);
   const dodState = loadPersistedDod(ns);
-  // Tách dirty-in-scope vs dirty-out-of-scope (Finding 2):
-  //   dirty-in-scope  = file có trong diff base..HEAD (dự kiến commit)
-  //   dirty-out-scope = file dirty KHÔNG nằm trong diff
+  // Phân loại dirty từ porcelain hiện tại (Finding 3):
+  //   git status --porcelain  → list file dirty CHƯA commit
+  //   git diff base...HEAD --name-only  → file đã commit trong nhánh (in-scope)
+  //   dirty-in-scope  = file trong cả porcelain & diff (đã có trong commit chờ push)
+  //   dirty-out-scope = file porcelain KHÔNG có trong diff → file lạ chưa commit → BLOCK
+  // File trong diff (committed) nhưng KHÔNG có trong porcelain = sạch (đã commit).
+  const porcelain = (rs.ok && rs.data && rs.data.worktreeLines) || [];
   const diffFiles = new Set();
-  if (rs.ok && rs.data) {
+  if (rs.ok) {
     const numstat = exec('git', ['-C', cwd, 'diff', `${base}...HEAD`, '--name-only']);
     if (numstat.ok) {
       for (const f of numstat.stdout.split('\n').filter(Boolean)) diffFiles.add(f.trim());
     }
   }
-  const dirtyLines = (rs.ok && rs.data.worktreeLines) || [];
-  const dirtyOutOfScope = dirtyLines.filter((l) => {
-    const f = l.trim().slice(3); // bỏ XY status prefix
-    return f && !diffFiles.has(f);
-  });
+  // Extract path từ porcelain line "XY path" (X=index status, Y=worktree status, space, path).
+  // Bỏ XY (2 char) + space; rename có dạng "R  old -> new" → lấy new (sau ' -> ').
+  const porcelainPaths = porcelain.map((l) => {
+    const s = l.trim();
+    if (s.length < 4) return '';
+    const tail = s.slice(3);
+    const arrow = tail.indexOf(' -> ');
+    return arrow >= 0 ? tail.slice(arrow + 4) : tail;
+  }).filter(Boolean);
+  // 1) dirty-out-scope: porcelain path không có trong diff (file lạ chưa commit) → BLOCK
+  const dirtyOutOfScope = porcelainPaths.filter((f) => !diffFiles.has(f));
+  // 2) dirty-in-scope (count only): porcelain path có trong diff (file đã commit, working tree sạch) → OK
+  const dirtyInScopeCount = porcelainPaths.length - dirtyOutOfScope.length;
   const worktreeClean = rs.ok && dirtyOutOfScope.length === 0;
+  // Remote PR HEAD == local HEAD (Finding 4)
+  const remote = verifyRemotePrHead(lock);
+  const remotePrHeadMatch = remote.ok && remote.match;
   const gate = checkAutoCommitGate({
     branch: rs.ok && rs.data ? rs.data.branch : '',
     headSha: rs.ok && rs.data ? rs.data.headSha : '',
@@ -723,7 +784,7 @@ export function runAutoCommitGate({ cwd = process.cwd(), base = 'main', gitLock 
     preReviewPass: prs.ok,
     dodState: dodState ? dodState.state : null,
     handoffMarker: handoffMarkerPresent,
-    ciRequiredChecksPass: ciState === 'pass',
+    ciRequiredChecksPass: ciState === 'pass' && remotePrHeadMatch,
   });
   const payload = {
     gate,
@@ -732,7 +793,7 @@ export function runAutoCommitGate({ cwd = process.cwd(), base = 'main', gitLock 
       headSha: rs.ok && rs.data ? rs.data.headSha : null,
       worktreeClean,
       dirtyOutOfScope,
-      dirtyInScopeCount: dirtyLines.length - dirtyOutOfScope.length,
+      dirtyInScopeCount,
       testsPass: td.ok,
       verifyPass: vs.ok,
       preReviewPass: prs.ok,
@@ -741,6 +802,9 @@ export function runAutoCommitGate({ cwd = process.cwd(), base = 'main', gitLock 
       ciState,
       ciDetail,
       markerDetail,
+      remotePrHeadMatch,
+      remotePrHead: remote.prHead,
+      remotePrNumber: remote.prNumber,
       policyVersion: policyRes.policy ? policyRes.policy.policyVersion : null,
       breakerNamespace: ns,
     },
@@ -756,6 +820,6 @@ if (isMain) main();
 
 export default { TOOLS, AUTO_COMMIT_REQUIREMENTS, checkAutoCommitGate,
   toolRepoStatus, toolRepoDiff, toolTestRun, toolVerifyStatus, toolPreReviewStatus, toolHandoffStatus,
-  runTool };
+  runTool, verifyRemotePrHead, runAutoCommitGate };
 
 

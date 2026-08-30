@@ -8,11 +8,13 @@ import {
   TOOLS, AUTO_COMMIT_REQUIREMENTS,
   checkAutoCommitGate, runTool, shouldEmitDodEvent,
   originToRepo, mutationKey, HANDOFF_ACTION, MANDATORY_TEST_SUITES,
+  verifyRemotePrHead,
 } from './execution-broker.mjs';
 import { DOD_STATES, DOD_EVENTS, createDod, apply } from './dod.mjs';
 import {
   createBreakerRegistry, recordFailure, shouldPause,
 } from './circuit-breaker.mjs';
+import { parseHandoffMarkers, findCanonicalHandoffMarker } from './review-contract.mjs';
 
 const cases = [];
 const test = (name, fn) => cases.push({ name, fn });
@@ -120,8 +122,9 @@ test('DoD session IMPLEMENTED + verification event -> VERIFIED_NOT_PUSHED', () =
 test('shouldEmitDodEvent repo_diff totalFiles=0 -> false', () => {
   assert.equal(shouldEmitDodEvent('repo_diff', { ok: true, data: { totalFiles: 0 } }), false);
 });
-test('shouldEmitDodEvent repo_diff totalFiles=5 -> true', () => {
-  assert.equal(shouldEmitDodEvent('repo_diff', { ok: true, data: { totalFiles: 5 } }), true);
+// Finding 5: repo_diff KHONG bao gio emit implementation (chi xem file co, khong confirm implemented).
+test('shouldEmitDodEvent repo_diff totalFiles=5 -> false (Finding 5)', () => {
+  assert.equal(shouldEmitDodEvent('repo_diff', { ok: true, data: { totalFiles: 5 } }), false);
 });
 test('shouldEmitDodEvent repo_diff ok=false -> false', () => {
   assert.equal(shouldEmitDodEvent('repo_diff', { ok: false }), false);
@@ -132,8 +135,12 @@ test('shouldEmitDodEvent test_run allPass=true -> true', () => {
 test('shouldEmitDodEvent test_run allPass=false -> false', () => {
   assert.equal(shouldEmitDodEvent('test_run', { ok: true, data: { allPass: false } }), false);
 });
-test('shouldEmitDodEvent handoff_status markerValid=true -> true', () => {
-  assert.equal(shouldEmitDodEvent('handoff_status', { ok: true, data: { handoffMarkerValid: true } }), true);
+// Finding 4+6: handoff_status emit chi khi marker canonical (provenance) + remotePrHeadMatch.
+test('shouldEmitDodEvent handoff_status markerValid=true + remote match -> true', () => {
+  assert.equal(shouldEmitDodEvent('handoff_status', { ok: true, data: { handoffMarkerValid: true, remotePrHeadMatch: true } }), true);
+});
+test('shouldEmitDodEvent handoff_status markerValid=true nhung remote LEch -> false (Finding 4)', () => {
+  assert.equal(shouldEmitDodEvent('handoff_status', { ok: true, data: { handoffMarkerValid: true, remotePrHeadMatch: false } }), false);
 });
 test('shouldEmitDodEvent handoff_status markerValid=false -> false', () => {
   assert.equal(shouldEmitDodEvent('handoff_status', { ok: true, data: { handoffMarkerValid: false } }), false);
@@ -177,6 +184,71 @@ test('MANDATORY_TEST_SUITES co 5 suites', () => {
   assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-circuit-breaker.mjs'));
   assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-execution-broker.mjs'));
   assert.ok(MANDATORY_TEST_SUITES.includes('scripts/test-breaker-persist.mjs'));
+});
+
+// 11. parseHandoffMarkers / findCanonicalHandoffMarker (Finding 6)
+test('parseHandoffMarkers: rich comment + marker hợp lệ -> extract đúng key + provenance', () => {
+  const SHA = 'a'.repeat(40);
+  const key = `o/r::7::${SHA}::v1::handoff:ready`;
+  const comments = [
+    { id: 100, user: { login: 'duongpdddic-droid' }, created_at: '2026-08-30T00:00:00Z', body: `some text\n<!-- ai-pr-reviewer:key=${key} -->\nmore` },
+  ];
+  const parsed = parseHandoffMarkers(comments);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].key, key);
+  assert.equal(parsed[0].commentId, '100');
+  assert.equal(parsed[0].authorLogin, 'duongpdddic-droid');
+});
+test('parseHandoffMarkers: legacy body thuần -> KHONG co provenance (fail-closed)', () => {
+  const SHA = 'a'.repeat(40);
+  const key = `o/r::7::${SHA}::v1::handoff:ready`;
+  const parsed = parseHandoffMarkers([`<!-- ai-pr-reviewer:key=${key} -->`]);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].commentId, '');
+  assert.equal(parsed[0].authorLogin, '');
+});
+test('parseHandoffMarkers: marker sai shape (khong 5 phan) -> skip', () => {
+  const comments = [
+    { id: 1, user: { login: 'u' }, body: '<!-- ai-pr-reviewer:key=o/r::7::not-hex::v1::handoff:ready -->' },
+    { id: 2, user: { login: 'u' }, body: '<!-- ai-pr-reviewer:key=o/r::7::' + 'a'.repeat(40) + '::handoff:ready -->' },
+  ];
+  const parsed = parseHandoffMarkers(comments);
+  assert.equal(parsed.length, 0);
+});
+test('findCanonicalHandoffMarker: provenance fail -> bo qua marker body thuan', () => {
+  const SHA = 'a'.repeat(40);
+  const key = `o/r::7::${SHA}::v1::handoff:ready`;
+  const parsed = parseHandoffMarkers([`<!-- ai-pr-reviewer:key=${key} -->`]);
+  const found = findCanonicalHandoffMarker(parsed, key);
+  assert.equal(found, null, 'legacy body thuan khong du provenance phai reject');
+});
+test('findCanonicalHandoffMarker: rich + key khop -> tra marker', () => {
+  const SHA = 'a'.repeat(40);
+  const key = `o/r::7::${SHA}::v1::handoff:ready`;
+  const parsed = parseHandoffMarkers([
+    { id: 5, user: { login: 'coder' }, body: `<!-- ai-pr-reviewer:key=${key} -->` },
+  ]);
+  const found = findCanonicalHandoffMarker(parsed, key);
+  assert.ok(found, 'phai tim thay marker');
+  assert.equal(found.authorLogin, 'coder');
+  assert.equal(found.commentId, '5');
+});
+test('findCanonicalHandoffMarker: rich nhung key khac -> null', () => {
+  const SHA = 'a'.repeat(40);
+  const key = `o/r::7::${SHA}::v1::handoff:ready`;
+  const parsed = parseHandoffMarkers([
+    { id: 5, user: { login: 'coder' }, body: `<!-- ai-pr-reviewer:key=o/r::7::${SHA}::v9::handoff:ready -->` },
+  ]);
+  assert.equal(findCanonicalHandoffMarker(parsed, key), null);
+});
+
+// 12. verifyRemotePrHead — input validation (Finding 4)
+test('verifyRemotePrHead: ctx invalid -> ok=false, match=false', () => {
+  const r1 = { ok: false, repo: null, branch: null, headSha: null, error: 'no origin' };
+  const r2 = verifyRemotePrHead(r1);
+  assert.equal(r2.ok, false);
+  assert.equal(r2.match, false);
+  assert.equal(r2.error, 'invalid git context');
 });
 
 // Run
