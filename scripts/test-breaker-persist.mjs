@@ -343,7 +343,8 @@ test('cross-process claim HALF_OPEN: 5 child đồng thời -> đúng 1 claimed'
     const tasks = Array.from({ length: 5 }, () => new Promise((resolve) => {
       const child = spawn(process.execPath,
         [process.argv[1], '--probe-child', 'cp', 'tool', '5000', '1000'],
-        { env: { ...process.env, BREAKER_RUNTIME_ROOT: root } });
+        { env: { ...process.env, BREAKER_RUNTIME_ROOT: root }, stdio: 'ignore' });
+      child.on('error', (e) => resolve(-1));
       child.on('close', (code) => resolve(code));
     }));
     const codes = await Promise.all(tasks);
