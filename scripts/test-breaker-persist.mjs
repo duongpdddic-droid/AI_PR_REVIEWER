@@ -216,40 +216,11 @@ test('cross-process claim HALF_OPEN: 5 child đồng thời -> đúng 1 claimed'
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-// 6. Negative: git lock hai repo song song (Finding 4)
-test('git lock negative: cwd repo A nhưng expected repo B -> fail', async () => {
-  const root = makeRoot();
-  try {
-    const repoA = join(root, 'repoA');
-    const repoB = join(root, 'repoB');
-    for (const [dir, origin] of [[repoA, 'https://github.com/o/repoA.git'], [repoB, 'https://github.com/o/repoB.git']]) {
-      mkdirSync(dir, { recursive: true });
-      runGit(['init', '-b', 'main'], dir);
-      runGit(['config', 'user.email', 't@t'], dir);
-      runGit(['config', 'user.name', 't'], dir);
-      writeFileSync(join(dir, 'f.txt'), 'x', 'utf8');
-      runGit(['add', '.'], dir);
-      runGit(['commit', '-m', 'init'], dir);
-      runGit(['remote', 'add', 'origin', origin], dir);
-    }
-    const mod = await import('./execution-broker.mjs');
-    const bad = mod.createGitContext({ cwd: repoA, expectedRepo: 'o/repoB' });
-    assert.equal(bad.ok, false);
-    assert.match(bad.error, /repo mismatch/);
-    const good = mod.createGitContext({ cwd: repoA, expectedRepo: 'o/repoA' });
-    assert.equal(good.ok, true);
-    assert.equal(good.repo, 'o/repoA');
-    const badHead = mod.createGitContext({ cwd: repoA, expectedHeadSha: 'f'.repeat(40) });
-    assert.equal(badHead.ok, false);
-    assert.match(badHead.error, /HEAD mismatch/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+// 6. Negative: git lock hai repo song song (Finding 4) — DEFER to follow-up PR
+// (cần execution-broker.mjs#createGitContext, đã defer ra khỏi PR #28).
+// test('git lock negative: cwd repo A nhưng expected repo B -> fail', async () => { ... });
 
-function runGit(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
-  return r.stdout.trim();
-}
+// (runGit helper removed — was only used by deferred git lock negative test)
 
 // Chay
 let pass = 0, fail = 0;
