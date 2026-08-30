@@ -244,55 +244,6 @@ export function parseApprovalMarkers(comments) {
   return out;
 }
 
-// Parse marker handoff dạng <!-- ai-pr-reviewer:key=<mutationKey> --> từ comment
-// RICH object (kèm metadata id/author/created_at/body). Trả về mảng {key, commentId,
-// authorLogin, createdAt, body} — fail-closed: comment legacy (body thuần) KHONG có
-// provenance → marker KHONG được tin cậy (caller phải filter theo authorLogin/commentId).
-// Dùng cho hasCanonicalHandoffMarker (execution-broker) — Finding 6.
-export function parseHandoffMarkers(comments) {
-  const out = [];
-  for (const c of Array.isArray(comments) ? comments : []) {
-    let body = '';
-    let commentId = '';
-    let authorLogin = '';
-    let createdAt = '';
-    if (c && typeof c === 'object' && c.body !== undefined) {
-      body = String(c.body || '');
-      commentId = String(c.id || '');
-      authorLogin = c.user && c.user.login ? String(c.user.login) : '';
-      createdAt = String(c.created_at || '');
-    } else {
-      body = String(c || '');
-    }
-    // Mutation key format: <repo>::<prNumber>::<headSha>::<policyVersion>::<action>
-    const re = /<!--\s*ai-pr-reviewer:key=([^\s>]+)\s*-->/g;
-    let m;
-    while ((m = re.exec(body)) !== null) {
-      const key = m[1].trim();
-      // Validate key shape: 5 phần :: (repo, pr, headSha 40-hex, policy, action).
-      const parts = key.split('::');
-      const validShape = parts.length === 5
-        && /^[0-9a-f]{40}$/i.test(parts[2] || '')
-        && parts[3]
-        && parts[4];
-      if (!validShape) continue;
-      out.push({ key, commentId, authorLogin, createdAt, body });
-    }
-  }
-  return out;
-}
-
-// Tìm marker handoff hợp lệ trong danh sách parsed markers.
-// Fail-closed (Finding 6): comment legacy (không có commentId/authorLogin) bị bỏ.
-// Marker khớp = key (mutationKey) khớp đầy đủ 5 trường.
-export function findCanonicalHandoffMarker(parsedMarkers, expectedKey) {
-  for (const m of Array.isArray(parsedMarkers) ? parsedMarkers : []) {
-    if (!m.commentId || !m.authorLogin) continue; // fail-closed provenance
-    if (m.key === expectedKey) return m;
-  }
-  return null;
-}
-
 // Approval có còn hiệu lực cho (repo, pr, HEAD hiện tại, policy hiện tại) không?
 // Bất kỳ lệch SHA/policy/repo/pr nào → invalid (không kế thừa approval từ commit trước).
 // [GPT-REV-048] Fail-closed: record PHẢI có provenance (authorLogin + commentId) hợp lệ.
