@@ -1,0 +1,15 @@
+name: Diagnose
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [pr28-clean]
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run test-breaker-persist only
+        run: node scripts/test-breaker-persist.mjs; echo "exit=$?"
