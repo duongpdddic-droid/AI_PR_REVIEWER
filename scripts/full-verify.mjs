@@ -58,10 +58,11 @@ try {
 
   // 2. BOM scan (U+FEFF) trên file text liên quan
   const mdGlob = (dir) => fs.readdirSync(dir).filter((f) => f.endsWith('.md') && !f.startsWith('_archive'));
+  const safeMdGlob = (dir) => fs.existsSync(dir) ? mdGlob(dir).map((f) => path.join(path.basename(dir), f)) : [];
   const textFiles = [
     ...fs.readdirSync(path.join(ROOT, 'scripts')).filter((f) => f.endsWith('.js') || f.endsWith('.mjs')).map((f) => path.join('scripts', f)),
-    ...mdGlob(path.join(ROOT, '.clinerules')).map((f) => path.join('.clinerules', f)),
-    ...mdGlob(path.join(ROOT, 'memory-bank')).map((f) => path.join('memory-bank', f)),
+    ...safeMdGlob(path.join(ROOT, '.clinerules')),
+    ...safeMdGlob(path.join(ROOT, 'memory-bank')),
     ...fs.existsSync(path.join(ROOT, 'docs')) ? mdGlob(path.join(ROOT, 'docs')).map((f) => path.join('docs', f)) : [],
     ...fs.existsSync(path.join(ROOT, '.agent')) ? fs.readdirSync(path.join(ROOT, '.agent')).filter((f) => f.endsWith('.md') || f.endsWith('.json')).map((f) => path.join('.agent', f)) : [],
     ...(fs.existsSync(path.join(ROOT, 'package.json')) ? ['package.json'] : []),
