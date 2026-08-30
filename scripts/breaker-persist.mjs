@@ -109,15 +109,16 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
 
 // releaseLock: chỉ xóa lock khi expectedOwner được truyền VÀ identity còn khớp.
 // Thiếu owner / mismatch → KHÔNG unlink (fail-closed).
+// [test-seam] dùng _fs lookup để honor _setFsOverride (mock fd = 7 không đóng fd thật).
 export function releaseLock(fd, lockPath, expectedOwner) {
-  try { closeSync(fd); } catch { /* ignore */ }
+  try { _fs('closeSync')(fd); } catch { /* ignore */ }
   if (!expectedOwner || typeof expectedOwner !== 'object'
       || !Number.isInteger(expectedOwner.pid) || typeof expectedOwner.nonce !== 'string') {
     return false;
   }
   const current = _readLockOwner(lockPath);
   if (current && current.pid === expectedOwner.pid && current.nonce === expectedOwner.nonce) {
-    try { unlinkSync(lockPath); return true; } catch { return false; }
+    try { _fs('unlinkSync')(lockPath); return true; } catch { return false; }
   }
   return false;
 }

@@ -396,6 +396,29 @@ test('acquireLock ghi owner record fail -> closeSync+unlink+continue, KHÔNG ret
   });
 });
 
+test('releaseLock honor _fs override closeSync (mock fd=7 không đóng fd thật)', async () => {
+  // Regress SIGABRT: releaseLock phải dùng _fs lookup, không gọi closeSync thật với mock fd.
+  await withRoot(async (root) => {
+    const lockPath = join(root, 'rel.lock');
+    let closedMock = 0;
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, nonce: 'real', createdAt: 0 }), 'utf8');
+    _setFsOverride({
+      openSync: () => 7,
+      writeSync: (fd, buf, off, len) => len,
+      closeSync: (fd) => { closedMock++; },
+      unlinkSync: () => {},
+      readFileSync: (p) => p === lockPath ? JSON.stringify({ pid: process.pid, nonce: 'real', createdAt: 0 }) : '',
+      renameSync: () => {},
+    });
+    try {
+      const r = acquireLock(lockPath, 200);
+      assert.equal(r.ok, true, 'mock openSync trả fd=7 + writeSync trả len');
+      releaseLock(r.fd, lockPath, r.owner);
+      assert.equal(closedMock, 1, 'releaseLock đã gọi closeSync qua _fs, không đóng fd thật');
+    } finally { _setFsOverride(null); }
+  });
+});
+
 let pass = 0, fail = 0;
 (async () => {
   for (const c of cases) {
