@@ -1,48 +1,5 @@
 # Task History (AI_PR_REVIEWER)
 
-## 30/08/2026 01:56 — Issue #25 Phase 4A — deterministic DoD + broker + circuit breaker — COMPLETED
-
-### Mục tiêu
-Nâng độ chính xác code bằng gate deterministic không dùng model token: DoD 9-state machine, model circuit breaker, execution broker CLI facade.
-
-### Đã làm
-- `scripts/dod.mjs`: 9-state machine + transition matrix + event/reason constants + summarize/oneLine (pure, ZERO IO).
-- `scripts/circuit-breaker.mjs`: per-tool breaker registry CLOSED/OPEN/HALF_OPEN, threshold=3, cooldown=60s, recordFailure/recordSuccess/shouldPause (pure).
-- `scripts/execution-broker.mjs`: CLI facade 6 tool (repo_status, repo_diff, test_run, verify_status, pre_review_status, handoff_status) + `auto-commit-gate` (8 điều kiện) + DoD emission + breaker integration. `isMain` dùng `basename` equality (L-048).
-- Test: 3 file mới, wire `pnpm test` → 276/276; `pnpm verify` PASS; CI Verify success.
-
-### Quyết định / Deviation
-- **Branch sạch theo chỉ thị Bố**: commit d7b92a8 (Phase B: shared onboarding, ngoài Issue #25) đã nằm trên branch cũ → stash Phase 4A riêng, checkout main@0cf7b18, branch mới `feat/issue-25-phase4a-deterministic-dod-clean`, apply stash, drop. Branch cũ giữ nguyên không push thêm, không force.
-- **Audit policy (lệnh Bố)**: `diffLimits.maxLines` canonical = 1500 (metric additions+deletions), không phải 100. Default 100 tự đặt trong `toolPreReviewStatus` là sai → sửa 1500. PR #28 churn 1291 < 1500 hợp lệ — không cần chia PR/override (L-050).
-- PR #28 mở: base main, head branch clean, CI xanh @ `4d81a33`.
-
-### Verification
-- `pnpm test` 276/276 PASS; `pnpm verify` RESULT PASS; CI Verify success; smoke test CLI (dod WIP→IMPLEMENTED→VERIFIED, repo_status/test_run/pre_review_status/auto-commit-gate, breaker pause → DoD BLOCKED).
-
-### Delay/Blocker
-- Không. Stash AC14 (`stash@{0}`/`stash@{1}`) giữ nguyên, không apply/drop.
-- Deferred: tích hợp broker vào autonomous-run/unified-orchestrator, Phase 4B large-file context.
-
-## 30/08/2026 02:15 — Fix 4 findings GPT review PR #28 — COMPLETED (vòng fix)
-
-### Mục tiêu
-Trả lời CHANGES_REQUESTED PR #28: (1) breaker persist + atomic HALF_OPEN claim, (2) auto-commit gate không suy diễn, (3) DoD emit chỉ khi evidence canonical, (4) git/gh lock cwd/repo/branch/HEAD + negative test.
-
-### Đã làm
-- `breaker-persist.mjs`: persist breaker state ra file JSON atomic (write temp + rename), lock file exclusive `wx` với retry/timeout, namespace sanitize (`safeFilePart` thay `:` `::` → `_` Windows-safe), `claimHalfOpenProbe` persist qua `withFileLock`.
-- `circuit-breaker.mjs`: gắn persist vào `claimHalfOpenProbe` (load → claim → save trong lock).
-- `execution-broker.mjs`: `shouldEmitDodEvent` đổi `if (allPass)` → `allPass === true` (undefined/null fail-closed); `toolVerifyStatus` thêm `allPass: r.ok`; auto-commit gate đọc dữ liệu thật; git/gh exec lock cwd+repo+branch+HEAD.
-- Test: `test-breaker-persist.mjs` (mới) 11 tests; broker 28; breaker 22. Invariant `passed !== cases.length → exit 1` chống duplicate runner loop.
-
-### Root cause `40/28 PASS` (audit theo lệnh Bố)
-- `passed=40` vì runner loop chạy 2 lần (duplicate loop từ lần refactor trước) → mỗi case đếm 2 lần; denominator `cases.length=28` đếm đúng 1 lần. Không phải test thiếu — là đơn vị đếm lệch. Fix: xóa duplicate loop + thêm invariant `passed === cases.length` (fail-fast nếu lệch). Verify: 28/28, invariant pass.
-
-### Verification
-- `pnpm test` 308/308 PASS. `full-verify` 152/153 (1 FAIL pre-existing mcp-test-evidence `test_failure_detail`, không do PR). `test-evidence-e2e` 23/23 (restore `.agent/test-manifest.json` bị corrupt bởi test 60 block EVID_DIR).
-- "pnpm verify treo" chẩn đoán: KHÔNG treo — log đã đủ 154/154 PASS; harness abort do timeout redirect PowerShell `*>`.
-
-### Deviation / Deferred
-- Không. Deferred: mcp-test-evidence FAIL pre-existing — ghi nhận, không fix trong PR #28.
 > Archive từ `activeContext.md` ngày 22/08/2026 09:31 (vượt ngưỡng >5 entry COMPLETED).
 > Entry khởi tạo bộ khung 20/08/2026 xem `progress.md`.
 
