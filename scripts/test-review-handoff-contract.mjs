@@ -165,6 +165,83 @@ test('contractContent chứa đủ 10 section + terminal status', () => {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Cross-repository (Issue #32 mandatory) — fixtures project-registry.
+// ---------------------------------------------------------------------------
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const FX_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'project-registry');
+const fxRepo = (name) => JSON.parse(readFileSync(path.join(FX_DIR, name), 'utf8')).repository;
+
+const REPO_AIPR = fxRepo('ai-pr-reviewer.json');
+const REPO_QLDA = fxRepo('qlda-dtxd.json');
+const REPO_UNKNOWN = 'example-org/not-registered';
+
+test('2 fixtures repo khác nhau nhận cùng pinned canonical contract version', () => {
+  const pa = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_AIPR}@abc scripts/review-handoff-contract.mjs` }) });
+  const pq = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_QLDA}@abc scripts/review-handoff-contract.mjs` }) });
+  assert.equal(pa.mode, 'reference');
+  assert.equal(pq.mode, 'reference');
+  assert.equal(pa.contractVersion, CONTRACT_VERSION);
+  assert.equal(pq.contractVersion, CONTRACT_VERSION);
+  assert.equal(pa.contractVersion, pq.contractVersion, 'cùng pinned version cho mọi repo');
+  assert.ok(pa.ref.includes(REPO_AIPR) && pq.ref.includes(REPO_QLDA));
+});
+
+test('target-repo handoff đủ evidence pass KHÔNG cần contract bản sao trong repo đó', () => {
+  const reg = [REPO_AIPR, REPO_QLDA];
+  const report = sampleReport({ identity: { repository: REPO_QLDA } });
+  const r = validateHandoff(report, { registeredRepos: reg });
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 'READY_FOR_REVIEW');
+  assert.equal(canRequestReview(r), true);
+  // reference-mode packet không mang full content → không cần copy contract vào target repo
+  const p = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_QLDA}@abc scripts/review-handoff-contract.mjs` }) });
+  assert.ok(!p.content);
+});
+
+test('unknown/unregistered repository → fail-closed UNKNOWN_REPOSITORY', () => {
+  const reg = [REPO_AIPR, REPO_QLDA];
+  const report = sampleReport({ identity: { repository: REPO_UNKNOWN } });
+  const r = validateHandoff(report, { registeredRepos: reg });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'UNKNOWN_REPOSITORY'));
+  assert.equal(canRequestReview(r), false);
+});
+
+test('contract-version mismatch trong packet → fail-closed (validate theo expectedVersion)', () => {
+  const report = sampleReport({ contractVersion: '9.9.9' });
+  const r = validateHandoff(report, { registeredRepos: [REPO_AIPR] });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.code === 'CONTRACT_VERSION_MISMATCH'));
+});
+
+test('unresolved contract reference → fallback inline + truncation fail-closed', () => {
+  const unresolved = buildTaskPacket({ resolveRef: () => ({ resolved: false }) });
+  assert.equal(unresolved.ok, true);
+  assert.equal(unresolved.mode, 'inline');
+  const truncated = buildTaskPacket({ resolveRef: () => ({ resolved: false }), maxBytes: 16 });
+  assert.equal(truncated.ok, false);
+  assert.ok(truncated.errors.some((e) => e.code === 'PACKET_TRUNCATED'));
+});
+
+test('updating canonical contract không đổi packet đã cấp (bound pinned version)', () => {
+  // Packet cấp với version hiện tại — contractVersion cố định trong packet.
+  const issued = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_AIPR}@pinned scripts/review-handoff-contract.mjs` }) });
+  assert.equal(issued.contractVersion, CONTRACT_VERSION);
+  // Mô phỏng canonical đã nâng version lên 2.0.0: packet cũ vẫn giữ version 1.0.0 của nó.
+  assert.notEqual(issued.contractVersion, '2.0.0');
+  // Validator dùng expectedVersion 2.0.0 phải reject report cũ (mismatch) — không ngấm ngầm pass.
+  const r = validateHandoff(sampleReport({ contractVersion: issued.contractVersion }), { expectedVersion: '2.0.0' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.code === 'CONTRACT_VERSION_MISMATCH'));
+});
+
+
 // Runner — đếm PASS/FAIL, exit 1 nếu có lỗi.
 let passed = 0;
 const failed = [];

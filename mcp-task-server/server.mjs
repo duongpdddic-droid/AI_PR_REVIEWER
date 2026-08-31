@@ -244,7 +244,7 @@ export const ops = {
     // bắt buộc validate fail-closed TRƯỚC mọi mutation — PARTIAL_EVIDENCE không được
     // transition sang status:review-requested.
     if (handoffReport !== undefined && handoffReport !== null) {
-      const v = validateHandoff(handoffReport);
+      const v = validateHandoff(handoffReport, { registeredRepos: [r] });
       if (!canRequestReview(v)) {
         throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. ${JSON.stringify(v.errors)}`);
       }

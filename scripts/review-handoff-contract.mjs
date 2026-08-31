@@ -144,13 +144,21 @@ function deepMerge(base, overrides) {
 // Validator — trả { ok, status, errors: [{ code, section, field, message }] }.
 // Fail-closed: bất kỳ lỗi nào → status PARTIAL_EVIDENCE (không bao giờ READY_FOR_REVIEW).
 // ---------------------------------------------------------------------------
-export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION } = {}) {
+export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, registeredRepos = null } = {}) {
   const errors = [];
   if (report === null || typeof report !== 'object' || Array.isArray(report)) {
     return { ok: false, status: 'PARTIAL_EVIDENCE', errors: [{ code: 'INVALID_REPORT', section: null, field: null, message: 'Report không phải object' }] };
   }
   if (report.contractVersion !== expectedVersion) {
     errors.push({ code: 'CONTRACT_VERSION_MISMATCH', section: null, field: 'contractVersion', message: `contractVersion phải là ${expectedVersion}` });
+  }
+  // Cross-repository (Issue #32): target repo phải thuộc registry được phép —
+  // repo chưa đăng ký / lạ → fail-closed (unknown/unregistered repository).
+  if (Array.isArray(registeredRepos)) {
+    const repo = report.identity && report.identity.repository;
+    if (typeof repo !== 'string' || !registeredRepos.includes(repo)) {
+      errors.push({ code: 'UNKNOWN_REPOSITORY', section: 'identity', field: 'repository', message: `Repository chưa đăng ký hoặc không được phép: ${String(repo)}` });
+    }
   }
   for (const id of SECTION_IDS) {
     const def = REQUIRED_SECTIONS[id];
