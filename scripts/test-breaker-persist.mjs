@@ -347,57 +347,35 @@ test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXI
 });
 
 
-test('releaseLock: A→B→C interleaving thật — A stale release không xóa/move lock B, C phải chờ', async () => {
-  // Review #5062795882 Finding 3: chèn identity replacement ngay TRONG release trên
-  // filesystem thật. A acquire → (A chết, operator xóa) → B acquire thay thế A → A gọi
-  // releaseLock với owner cũ → stat(lockPath) trỏ inode B (khác inode A) → fail-closed,
-  // KHÔNG unlink B. B release OK → C acquire OK.
+test('releaseLock A→B→C thật: A stale không xóa/move lock B, C chờ', async () => {
   await withRoot(async (root) => {
-    const lockPath = join(root, 'abc.lock');
-    // A acquire (inode thật A)
-    const a = acquireLock(lockPath, 1000);
-    assert.equal(a.ok, true, 'A acquire thành công');
-    const aOwner = a.owner;
-    assert.ok(aOwner.fileId && aOwner.fileId.ino > 0, 'A owner phải có fileId thật');
-    // A mất fd (mô phỏng crash) — đóng fd thật để operator có thể xóa trên Windows.
-    closeSync(a.fd);
-    // Operator xóa lock A (manual recovery) rồi B acquire → inode mới (B) tại cùng pathname.
-    unlinkSync(lockPath);
-    const b = acquireLock(lockPath, 1000);
-    assert.equal(b.ok, true, 'B acquire thay thế A thành công');
-    assert.ok(b.owner.fileId && b.owner.fileId.ino !== aOwner.fileId.ino, 'B phải khác inode A');
-    // A (stale zombie) gọi releaseLock với owner cũ → KHÔNG được unlink lock B.
-    const aRel = releaseLock(a.fd, lockPath, aOwner);
-    assert.equal(aRel.ok, false, 'A stale release phải fail-closed');
-    assert.match(aRel.reason, /RECOVERY_REQUIRED/);
-    assert.ok(existsSync(lockPath), 'lock B vẫn còn nguyên sau A release');
-    // C acquire timeout (B vẫn giữ), sau đó B release → C acquire thành công.
-    const c = acquireLock(lockPath, 300);
-    assert.equal(c.ok, false, 'C timeout vì B giữ lock');
-    assert.ok(existsSync(lockPath), 'lock B còn nguyên sau C timeout');
-    const bRel = releaseLock(b.fd, lockPath, b.owner);
-    assert.equal(bRel.ok, true, 'B release thành công');
-    const c2 = acquireLock(lockPath, 500);
-    assert.equal(c2.ok, true, 'C acquire thành công sau khi B release');
-    releaseLock(c2.fd, lockPath, c2.owner);
+    const p = join(root, 'abc.lock');
+    const a = acquireLock(p, 1000); assert.equal(a.ok, true);
+    const aOwner = a.owner; assert.ok(aOwner.fileId.ino > 0);
+    closeSync(a.fd); unlinkSync(p);
+    const b = acquireLock(p, 1000); assert.equal(b.ok, true);
+    assert.notEqual(b.owner.fileId.ino, aOwner.fileId.ino);
+    const aRel = releaseLock(a.fd, p, aOwner);
+    assert.equal(aRel.ok, false); assert.match(aRel.reason, /RECOVERY_REQUIRED/);
+    assert.ok(existsSync(p), 'B lock còn nguyên');
+    assert.equal(acquireLock(p, 300).ok, false, 'C timeout vì B giữ');
+    const bRel = releaseLock(b.fd, p, b.owner); assert.equal(bRel.ok, true);
+    const c = acquireLock(p, 500); assert.equal(c.ok, true, 'C acquire sau B release');
+    releaseLock(c.fd, p, c.owner);
   });
 });
 
-test('releaseLock: unlink fail → {ok:false, RECOVERY_REQUIRED}, không báo success', async () => {
-  // Review #5062795882 Finding 2: unlink fail KHÔNG được trả true. File còn nguyên → caller
-  // phải biết cleanup thất bại và xử lý recovery.
+test('releaseLock unlink fail → {ok:false, RECOVERY_REQUIRED}', async () => {
   await withRoot(async (root) => {
-    const lockPath = join(root, 'unlinkfail.lock');
-    const r = acquireLock(lockPath, 1000);
-    assert.equal(r.ok, true, 'acquire thành công (file thật)');
-    _setFsOverride({ unlinkSync: () => { throw new Error('EPERM: operation not permitted'); } });
+    const p = join(root, 'ul.lock');
+    const r = acquireLock(p, 1000); assert.equal(r.ok, true);
+    _setFsOverride({ unlinkSync: () => { throw new Error('EPERM'); } });
     try {
-      const rel = releaseLock(r.fd, lockPath, r.owner);
-      assert.equal(rel.ok, false, 'unlink fail phải trả false, không báo success');
-      assert.match(rel.reason, /RECOVERY_REQUIRED/);
-      assert.ok(existsSync(lockPath), 'file phải còn nguyên (unlink không thành công)');
+      const rel = releaseLock(r.fd, p, r.owner);
+      assert.equal(rel.ok, false); assert.match(rel.reason, /RECOVERY_REQUIRED/);
+      assert.ok(existsSync(p));
     } finally { _setFsOverride(null); }
-    releaseLock(r.fd, lockPath, r.owner);
+    releaseLock(r.fd, p, r.owner);
   });
 });
 
