@@ -10,7 +10,6 @@ import { randomUUID, createHash } from 'node:crypto';
 export function resolveRuntimeRoot() {
   return process.env.BREAKER_RUNTIME_ROOT || join(homedir(), '.ai-pr-reviewer');
 }
-
 function ensureDir(dir) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
@@ -56,12 +55,9 @@ function _readLockOwner(lockPath) {
     return null;
   } catch { return null; }
 }
-// MVP: no automatic stale-lock deletion/recovery. Trên owner dead/unknown/corrupt,
-// caller nhận ok=false với reason RECOVERY_REQUIRED và lock file giữ nguyên. Chỉ
-// operator mới có quyền xóa sau khi xác minh thủ công — tránh TOCTOU rename path
-// có thể nuốt mất lock của contender khác.
+// MVP: no automatic stale-lock deletion/recovery. Owner dead/unknown/corrupt → caller
+// nhận ok=false reason RECOVERY_REQUIRED, lock giữ nguyên; chỉ operator xóa sau xác minh.
 function _tryRecoverStaleLock(lockPath) {
-  // Reading-only check: chỉ xác minh owner status, KHÔNG rename/unlink.
   const owner = _readLockOwner(lockPath);
   if (!owner) return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner unreadable' };
   if (_pidAlive(owner.pid) === 'dead') return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner PID is dead' };
@@ -69,19 +65,16 @@ function _tryRecoverStaleLock(lockPath) {
 }
 
 // acquireLock(path, timeoutMs=5000) -> {ok, fd, owner, error}
-// openSync('wx') tạo lock exclusive; ghi owner QUA FD (writeSync), kiểm tra bytes.
-// Ghi fail (throw hoặc short write) → closeSync fd (KHÔNG unlink pathname — tránh
-// TOCTOU nuốt lock của contender khác; file rỗng → caller khác nhìn thấy EEXIST
-// fail-closed). Lock đang giữ bởi PID khác (dead/alive/unknown) → fail-closed với
-// reason RECOVERY_REQUIRED; KHÔNG tự rename/unlink.
+// openSync('wx') tạo lock exclusive; ghi owner QUA FD (writeSync). Ghi fail (throw/short
+// write) → closeSync fd, KHÔNG unlink pathname (file rỗng → contender thấy EEXIST
+// fail-closed). Lock giữ bởi PID khác (dead/alive/unknown) → fail-closed RECOVERY_REQUIRED.
 export function acquireLock(lockPath, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
   let firstReason = null;
   const myNonce = randomUUID();
   const fs = _fs;
-  // Write-fail cleanup: chỉ close fd, KHÔNG unlink pathname (review #5060996893:
-  // pathname có thể đã bị contender khác thay thế; auto-unlink nuốt lock của họ).
+  // Write-fail cleanup: chỉ close fd, KHÔNG unlink pathname (TOCTOU-safe, review #5060996893).
   const cleanup = (fd) => { try { fs('closeSync')(fd); } catch { /* ignore */ } };
   while (Date.now() < deadline) {
     try {
@@ -91,9 +84,8 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
       try { written = fs('writeSync')(fd, buf, 0, buf.length, 0); }
       catch (writeErr) { cleanup(fd); lastErr = writeErr; continue; }
       if (written !== buf.length) { cleanup(fd); lastErr = new Error(`short write: ${written}/${buf.length}`); continue; }
-      // Ownership intrinsic: lưu fileId (dev+ino) của file VỪA TẠO qua fd. Release dùng
-      // để xác nhận pathname vẫn trỏ tới file của mình — không bao giờ move/unlink
-      // pathname không do chính owner tạo (review #5062795882).
+      // Ownership intrinsic: lưu fileId (dev+ino) của file VỪA TẠO qua fd — release xác
+      // nhận pathname vẫn trỏ tới file của mình, không bao giờ move/unlink path người khác.
       let fileId = null;
       try { const st = fstatSync(fd); if (st && st.ino > 0) fileId = { dev: st.dev, ino: st.ino }; } catch { /* fallback: verify bằng nonce */ }
       return { ok: true, fd, owner: { pid: process.pid, nonce: myNonce, createdAt: Date.now(), fileId }, error: null };
@@ -114,13 +106,9 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
 }
 
 // releaseLock: ownership protocol — KHÔNG move/unlink pathname không do owner tạo.
-//   1. close fd.
-//   2. Nếu expectedOwner có fileId (dev+ino từ fstat lúc acquire): stat(lockPath) phải
-//      trỏ tới CÙNG inode — chỉ khi pathname vẫn là file mình đã tạo mới unlink. Khác
-//      inode → lock đã bị thay thế (contender khác) → fail-closed, KHÔNG đụng.
-//   3. Fallback (fileId null, vd test seam mock fd): verify nonce+pid qua nội dung.
-//   4. Unlink pathname đã xác nhận là của mình. Unlink fail → trả false +
-//      RECOVERY_REQUIRED (KHÔNG bao giờ biến cleanup failure thành success).
+//   Có fileId → stat(lockPath) phải trỏ CÙNG inode mới unlink (khác → lock đã bị thay,
+//   fail-closed). Không fileId (test seam) → verify nonce+pid nội dung. Unlink fail →
+//   {ok:false, RECOVERY_REQUIRED} (KHÔNG biến cleanup failure thành success).
 // [test-seam] dùng _fs lookup để honor _setFsOverride (closeSync/unlinkSync).
 export function releaseLock(fd, lockPath, expectedOwner) {
   try { _fs('closeSync')(fd); } catch { /* ignore */ }
