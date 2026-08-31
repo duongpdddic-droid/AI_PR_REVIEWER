@@ -192,6 +192,69 @@ ok(noPr.ok === false && noPr.errors.some((e) => e.code === "IDENTITY_PR_MISMATCH
   "thiếu pr → IDENTITY_PR_MISMATCH fail-closed");
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 2e) GPT-REV-122 — 1 canonical registry; trusted provisioning → consumer pick-up; read-only
+// ---------------------------------------------------------------------------
+console.log("[2e] GPT-REV-122 single canonical registry + provisioning pick-up");
+import { readFileSync } from "node:fs";
+import { registerProject, loadRegistry as registryLoad, saveRegistry } from "../scripts/project-registry.mjs";
+import { buildReportComment } from "./server.mjs";
+import { reportDigest } from "../scripts/review-handoff-contract.mjs";
+
+const provDir = mkdtempSync(path.join(tmpdir(), "mcp-prov-"));
+try {
+  // Registry rỗng, sau đó provisioning thêm Soc_brain (mô phỏng Issue #34).
+  const regPath = path.join(provDir, "registry.json");
+  saveRegistry({ registry: { schemaVersion: "1.0", projects: [] }, registryPath: regPath });
+  const manifest = {
+    schemaVersion: "1.0",
+    projectId: "soc-brain",
+    repository: "duongpdddic-droid/Soc_brain",
+    projectType: "control-plane",
+    workspace: { workspaceId: "soc-brain-main" },
+    policy: { version: "2026-08-23.7" },
+    verify: { adapter: "pnpm-verify" },
+    deploy: { capability: false, humanAuthorization: true },
+    telegram: { route: "dm-boss" },
+    memory: { provider: "claude-mem", namespace: "soc-brain" },
+    allowedOverrides: [],
+  };
+  const rc = registerProject({
+    manifest,
+    registry: registryLoad({ registryPath: regPath }),
+    registryPath: regPath,
+    actualRemote: "https://github.com/duongpdddic-droid/Soc_brain.git",
+  });
+  ok(rc.ok === true, "registerProject (trusted provisioning) ghi Soc_brain vào canonical registry");
+  // Consumer đọc từ CÙNG file registry → nhận repo mới (không cần sửa static targetRepos)
+  const noConfig = path.join(provDir, "no-config.json");
+  const consumed = loadRegisteredRepos({ registryPath: regPath, configPath: noConfig });
+  ok(consumed.ok === true && consumed.repos.includes("duongpdddic-droid/Soc_brain"),
+    "consumer nhận repo mới từ cùng registry, không cần sửa static targetRepos");
+  // Consumer không tự đăng ký repo (read-only).
+  const before = readFileSync(regPath, "utf8");
+  loadRegisteredRepos({ registryPath: regPath, configPath: noConfig });
+  const after = readFileSync(regPath, "utf8");
+  ok(before === after, "consumer loadRegisteredRepos read-only — KHÔNG tự đăng ký repo");
+} finally {
+  rmSync(provDir, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// 2f) GPT-REV-122 — report digest + canonical comment helpers
+// ---------------------------------------------------------------------------
+console.log("[2f] GPT-REV-122 report digest + canonical comment");
+const d1 = reportDigest(sampleReport());
+ok(/^[0-9a-f]{64}$/.test(d1), "reportDigest = sha256 hex 64");
+ok(reportDigest(sampleReport()) === d1, "reportDigest deterministic");
+ok(reportDigest(sampleReport({ identity: { headSha: "0000000000000000000000000000000000000000" } })) !== d1,
+  "reportDigest đổi khi report đổi");
+const body = buildReportComment(sampleReport(), { headSha: "0".repeat(40), digest: d1, contractVersion: "1.0.0" });
+ok(body.startsWith("[REVIEW-HANDOFF-REPORT v1.0.0 @ 0000000000000000000000000000000000000000]"),
+  "comment header: contract version + exact HEAD");
+ok(body.includes("digest: " + d1), "comment chứa digest");
+ok(body.includes('"identity"') && body.includes('"terminalStatus"'),
+  "comment chứa đầy đủ report JSON 10 sections");
 // 3) Protocol e2e — spawn server thật qua stdio
 // ---------------------------------------------------------------------------
 console.log("[3] Protocol e2e (stdio NDJSON)");

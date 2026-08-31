@@ -12,8 +12,8 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { validateHandoff, canRequestReview, verifyHandoffIdentity, CONTRACT_VERSION } from "../scripts/review-handoff-contract.mjs";
-import { loadRegistry, DEFAULT_REGISTRY_PATH } from "../scripts/project-registry.mjs";
+import { validateHandoff, canRequestReview, verifyHandoffIdentity, CONTRACT_VERSION, reportDigest } from "../scripts/review-handoff-contract.mjs";
+import { loadRegistry, DEFAULT_REGISTRY_PATH, scanForSecrets, scanForAbsolutePaths } from "../scripts/project-registry.mjs";
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -74,6 +74,20 @@ export function loadRegisteredRepos({ registryPath = DEFAULT_REGISTRY_PATH, conf
     }
   }
   return { ok: true, repos, errors };
+}
+
+// buildReportComment — report canonical (GPT-REV-122): header bind contract version + exact HEAD
+// + digest, thân chứa đầy đủ report JSON (lossless). Comment này là nguồn canonical để reviewer
+// đối chiếu: stale HEAD / version / digest mismatch → không coi là handoff hiện hành.
+export function buildReportComment(report, { headSha, digest, contractVersion }) {
+  return [
+    `[REVIEW-HANDOFF-REPORT v${contractVersion} @ ${headSha}]`,
+    `digest: ${digest}`,
+    "",
+    "```json",
+    JSON.stringify(report, null, 2),
+    "```",
+  ].join("\n");
 }
 
 export const SERVER_INFO = { name: "mcp-task-server", version: "1.0.0" };
@@ -348,15 +362,47 @@ export const ops = {
     if (hv.ok !== true) {
       throw new Error(`HANDOFF_IDENTITY_MISMATCH: ${JSON.stringify(hv.errors)}`);
     }
+    // GPT-REV-122 — persist report canonical lên PR comment (bind version + exact HEAD + digest).
+    // Scan secret / absolute machine path trong report → fail-closed TRƯỚC mọi mutation.
+    // Persist fail → throw, KHÔNG đổi label (không để review-requested mà thiếu report canonical).
+    const digest = reportDigest(handoffReport);
+    const secHits = scanForSecrets(handoffReport);
+    const absHits = scanForAbsolutePaths(handoffReport);
+    if (secHits.length > 0 || absHits.length > 0) {
+      throw new Error(`HANDOFF_REPORT_LEAK: report chứa ${secHits.length} secret / ${absHits.length} absolute machine path → từ chối persist`);
+    }
+    // Transition hợp lệ phải được xác nhận TRƯỚC khi persist report (tránh comment mồ côi).
     const current = await listLabels(r, number);
     const check = checkTransition("handoff", extractStatus(current));
     if (!check.ok) throw new Error(check.error);
+    const reportBody = buildReportComment(handoffReport, { headSha: prHeadSha, digest, contractVersion: CONTRACT_VERSION });
+    let reportUrl = null;
+    let reportCommentId = null;
+    try {
+      reportUrl = gh(["pr", "comment", String(pr), "--body", reportBody], { repo: r }).trim();
+      const cm = reportUrl.match(/#issuecomment-(\d+)/);
+      reportCommentId = cm ? cm[1] : null;
+    } catch (err) {
+      throw new Error(`HANDOFF_REPORT_PERSIST_FAILED: không persist được report canonical lên PR #${pr} — ${err.message}`);
+    }
     const labels = await setStatus(r, number, check.to, check.agent, TRANSITIONS.handoff.from);
     if (pr) {
       gh(["issue", "comment", String(number), "--body",
         `Bàn giao review: PR #${pr}. Labels: agent:gpt + status:review-requested.`], { repo: r });
     }
-    return { repo: r, number, status: `status:${check.to}`, labels, pr: pr ?? null };
+    return {
+      repo: r,
+      number,
+      pr,
+      headSha: prHeadSha,
+      contractVersion: CONTRACT_VERSION,
+      terminalStatus: v.status,
+      reportCommentId,
+      reportUrl,
+      reportDigest: digest,
+      status: `status:${check.to}`,
+      labels,
+    };
   },
 
   async task_review({ repo, number, verdict, comment }) {

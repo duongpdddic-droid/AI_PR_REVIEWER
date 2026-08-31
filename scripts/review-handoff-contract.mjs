@@ -398,6 +398,26 @@ export function contractContentHash() {
   return createHash('sha256').update(contractContent()).digest('hex');
 }
 
+// stableStringify — JSON deterministic (sort key) cho digest không phụ thuộc thứ tự key.
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+}
+
+// reportDigest — fingerprint bền vững của report đã validate (GPT-REV-122):
+// CHỈ dựa trên contractVersion + 10 sections canonical; extra key / thứ tự key không ảnh hưởng.
+// Dùng để bind report persisted với exact HEAD + contract version (phát hiện stale report).
+export function reportDigest(report) {
+  const canon = {};
+  if (report && report.contractVersion !== undefined) canon.contractVersion = report.contractVersion;
+  for (const id of SECTION_IDS) {
+    if (report && report[id] !== undefined) canon[id] = report[id];
+  }
+  return createHash('sha256').update(stableStringify(canon)).digest('hex');
+}
+
 // ---------------------------------------------------------------------------
 // GPT-REV-121 — canonical reference pin.
 // Ref hợp lệ = structured object: { repo, commitSha, path, contractVersion, contentHash }.

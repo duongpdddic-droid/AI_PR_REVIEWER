@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {
   CONTRACT_VERSION, TERMINAL_STATUSES, SECTION_IDS, REQUIRED_SECTIONS,
   sampleReport, validateHandoff, canRequestReview, contractContent, buildTaskPacket,
-  verifyHandoffIdentity, validateCanonicalRef, contractContentHash,
+  verifyHandoffIdentity, validateCanonicalRef, contractContentHash, reportDigest,
   CANONICAL_CONTRACT_PATH, CANONICAL_CONTRACT_REPO,
 } from './review-handoff-contract.mjs';
 
@@ -382,6 +382,37 @@ test('verifyHandoffIdentity: PR head không đọc được → PR_HEAD_UNREADAB
 test('verifyHandoffIdentity: thiếu identity section → IDENTITY_MISSING', () => {
   const rep = { ...sampleReport(), identity: undefined };
   const v = verifyHandoffIdentity(rep, IDENTITY_CTX);
+test('reportDigest deterministic + sha256 hex 64', () => {
+  const r = sampleReport();
+  const d1 = reportDigest(r);
+  const d2 = reportDigest(sampleReport());
+  assert.equal(d1, d2);
+  assert.match(d1, /^[0-9a-f]{64}$/);
+});
+
+test('reportDigest thay đổi khi report thay đổi', () => {
+  const d1 = reportDigest(sampleReport());
+  const changed = reportDigest(sampleReport({ identity: { headSha: '0'.repeat(40) } }));
+  assert.notEqual(changed, d1);
+});
+
+test('reportDigest chỉ dựa trên contractVersion + 10 sections canonical (extra key không ảnh hưởng)', () => {
+  const r = sampleReport();
+  r.extraJunk = 'should-not-change-digest';
+  assert.equal(reportDigest(r), reportDigest(sampleReport()));
+});
+
+test('reportDigest ignore thứ tự key (stableStringify)', () => {
+  const r1 = sampleReport();
+  const r2 = sampleReport();
+  // Đảo thứ tự key trong section scope (delete + re-add, GIỮ NGUYÊN giá trị).
+  const s = r2.scope;
+  delete s.acceptanceCriteria;
+  delete s.changedFiles;
+  s.acceptanceCriteria = ['canonical contract', 'validator', 'gate'];
+  s.changedFiles = ['scripts/review-handoff-contract.mjs'];
+  assert.equal(reportDigest(r1), reportDigest(r2));
+});
   assert.equal(v.ok, false);
   assert.ok(v.errors.some((e) => e.code === 'IDENTITY_MISSING'));
 });
