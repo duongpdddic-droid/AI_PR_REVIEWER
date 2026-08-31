@@ -307,3 +307,23 @@ Thiếu một điều kiện phải báo `IN PROGRESS`, `CHANGES REQUESTED` ho�
   bằng chứng đã thông báo**.
 - Không sửa logic/secret của `notify-telegram.mjs`/`telegram-bridge.mjs`
   (`watchdog-hibernate.mjs` đã xóa khỏi repo này — Issue #15: gateway quản lý lock/heartbeat/supervisor thay thế) trừ khi có yêu cầu riêng.
+
+## 12. Canonical REVIEW HANDOFF CONTRACT (Issue #32)
+
+- **Canonical duy nhất**: `scripts/review-handoff-contract.mjs` trong repo `AI_PR_REVIEWER`,
+  versioned (`CONTRACT_VERSION`). Bản diễn giải cho người: `docs/REVIEW_HANDOFF_CONTRACT.md`.
+- **KHÔNG copy** contract vào repo dự án. Task packet/handoff prompt tham chiếu pin version khi
+  runtime resolve được (`buildTaskPacket`); nếu không resolve được → inline toàn bộ content,
+  vượt `maxBytes` → fail-closed `PACKET_TRUNCATED`.
+- **Validator**: `validateHandoff(report)` → `{ ok, status, errors }` (structured errors). Thiếu
+  required section / exact HEAD / commands+exit code / safety / unverified-risks / terminal status,
+  hoặc "all green" mâu thuẫn failure → `PARTIAL_EVIDENCE` (fail-closed).
+- **Gate**: chỉ report `READY_FOR_REVIEW` mới qua `canRequestReview`. `task_handoff` (MCP) chặn
+  `HANDOFF_PARTIAL_EVIDENCE` trước mọi mutation nếu `handoffReport` không hợp lệ.
+- **Short operator command**:
+
+  > "Thực hiện tiếp và bàn giao theo canonical REVIEW HANDOFF CONTRACT."
+
+  Agent tự khám phá trạng thái (Issue/PR/branch/HEAD), hoàn thành phần còn lại, lập báo cáo 10
+  section theo contract, chạy `validateHandoff` → `READY_FOR_REVIEW`, rồi `task_handoff` kèm
+  `handoffReport` hợp lệ. KHÔNG tự merge/deploy/approve.

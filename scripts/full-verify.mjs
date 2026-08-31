@@ -109,6 +109,7 @@ try {
     'test-project-registry.mjs',
     'test-test-evidence.mjs',
     'test-temp-hygiene.mjs',
+    'scripts/test-review-handoff-contract.mjs',
   ];
   // GPT-REV-104: đăng ký test suite của MCP Test Evidence (Issue #19 Phase 3) nằm
   // ngoài scripts/ để full-verify tự chạy như 1 gate tổng hợp.

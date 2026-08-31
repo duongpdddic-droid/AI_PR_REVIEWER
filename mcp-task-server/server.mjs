@@ -10,6 +10,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { validateHandoff, canRequestReview, CONTRACT_VERSION } from "../scripts/review-handoff-contract.mjs";
 
 export const SERVER_INFO = { name: "mcp-task-server", version: "1.0.0" };
 
@@ -236,9 +237,18 @@ export const ops = {
     return { repo: r, number, status: `status:${check.to}`, labels };
   },
 
-  async task_handoff({ repo, number, pr }) {
+  async task_handoff({ repo, number, pr, handoffReport }) {
     const r = repo ?? defaultRepos()[0];
     if (!r) throw new Error("Chưa xác định repo");
+    // Issue #32: canonical REVIEW HANDOFF CONTRACT gate. Nếu coder cung cấp report,
+    // bắt buộc validate fail-closed TRƯỚC mọi mutation — PARTIAL_EVIDENCE không được
+    // transition sang status:review-requested.
+    if (handoffReport !== undefined && handoffReport !== null) {
+      const v = validateHandoff(handoffReport);
+      if (!canRequestReview(v)) {
+        throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. ${JSON.stringify(v.errors)}`);
+      }
+    }
     const current = await listLabels(r, number);
     const check = checkTransition("handoff", extractStatus(current));
     if (!check.ok) throw new Error(check.error);
@@ -327,9 +337,10 @@ export const TOOLS = [
       required: ["title"] } },
   { name: "task_claim", description: "Coder nhận task: ready-for-cline/queued → in-progress",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp }, required: ["number"] } },
-  { name: "task_handoff", description: "Coder bàn giao: in-progress/changes-requested → review-requested + agent:gpt",
+  { name: "task_handoff", description: "Coder bàn giao: in-progress/changes-requested → review-requested + agent:gpt. Nếu truyền handoffReport phải đạt READY_FOR_REVIEW theo canonical REVIEW HANDOFF CONTRACT (Issue #32), nếu không → chặn fail-closed.",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
-      pr: { type: "number", description: "Số PR bàn giao (tùy chọn, sẽ comment lên Issue)" } }, required: ["number"] } },
+      pr: { type: "number", description: "Số PR bàn giao (tùy chọn, sẽ comment lên Issue)" },
+      handoffReport: { type: "object", description: "Handoff report theo REVIEW HANDOFF CONTRACT v1.0.0 (tùy chọn; nếu có phải READY_FOR_REVIEW)" } }, required: ["number"] } },
   { name: "task_review", description: "Reviewer chấm: review-requested → approved | changes-requested (+agent:cline)",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       verdict: { type: "string", enum: ["approve", "request-changes"] },

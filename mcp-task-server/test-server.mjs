@@ -154,6 +154,18 @@ try {
   ok(after.status === issue35.status && after.agent === issue35.agent,
     "label #35 KHÔNG đổi sau claim bị chặn (không mutation rò rỉ)");
 
+  // Issue #32: canonical REVIEW HANDOFF CONTRACT gate — handoffReport PARTIAL_EVIDENCE
+  // phải bị chặn fail-closed TRƯỚC mọi mutation (kể cả khi transition lẽ ra hợp lệ).
+  const badReport = { contractVersion: "9.9.9", identity: {}, terminalStatus: { status: "DONE" } };
+  const badHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: badReport } });
+  ok(badHandoff.result?.isError === true, "task_handoff với report PARTIAL_EVIDENCE → isError (fail-closed)");
+  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(badHandoff.result.content[0].text),
+    "lỗi bàn giao nêu rõ HANDOFF_PARTIAL_EVIDENCE");
+  const afterBadHandoff = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(afterBadHandoff.status === issue35.status && afterBadHandoff.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau handoff bị chặn (không mutation rò rỉ)");
+
   // Repo bẩn bị chặn bởi validateRepo
   const badRepo = await rpc("tools/call", { name: "task_get", arguments: { repo: "../evil", number: 1 } });
   ok(badRepo.result?.isError === true, "repo dạng bẩn → isError (chống injection)");
