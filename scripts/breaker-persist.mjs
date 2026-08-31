@@ -214,9 +214,7 @@ export function saveBreaker(namespace, registry) {
 
 
 // ---------- HALF_OPEN probe (atomic claim) ----------
-
-// claimHalfOpenProbe(namespace, tool, cooldownMs, now) -> {ok, claimed, registry, reason}
-// Atomic: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock.
+// claimHalfOpenProbe: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock.
 // Fail-closed: reg.ok=false (corrupt shape) → ok=false, KHÔNG ghi.
 export function claimHalfOpenProbe(namespace, tool, cooldownMs = 60_000, now = Date.now()) {
   return withFileLock(namespace, (ns) => {

@@ -161,13 +161,12 @@ test('acquireLock: exclusive (lần 2 timeout), ghi owner record {pid, nonce}', 
 
 test('releaseLock: identity match xóa file, mismatch/thiếu/sai shape giữ nguyên', async () => {
   await withRoot(async (root) => {
-    // happy: identity khớp → xóa.
-  {
-    const r = acquireLock(join(root, 'good.lock'), 1000);
-    assert.equal(r.ok, true);
-    assert.equal(releaseLock(r.fd, join(root, 'good.lock'), r.owner).ok, true);
-    assert.ok(!existsSync(join(root, 'good.lock')));
-  }
+    { // happy: identity khớp → xóa.
+      const r = acquireLock(join(root, 'good.lock'), 1000);
+      assert.equal(r.ok, true);
+      assert.equal(releaseLock(r.fd, join(root, 'good.lock'), r.owner).ok, true);
+      assert.ok(!existsSync(join(root, 'good.lock')));
+    }
     // fail-closed: identity mismatch / thiếu owner / shape invalid.
     const r = acquireLock(join(root, 'fail.lock'), 1000);
     assert.equal(r.ok, true);
@@ -329,9 +328,8 @@ test('race A->B: A giữ lock, B acquire timeout; file của A còn nguyên iden
 });
 
 test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXIST → fail-closed RECOVERY_REQUIRED', async () => {
-  // Review #5062795882 Finding 4: mock openSync thành công giả là sai. Với `wx` thật,
-  // sau khi writeSync fail, file rỗng còn tại pathname → retry openSync('wx') phải EEXIST
-  // → probe đọc rỗng → RECOVERY_REQUIRED. KHÔNG được báo retry success.
+  // Finding 4: mock openSync thành công giả là sai — `wx` thật, write fail → file rỗng còn,
+  // retry openSync EEXIST → probe đọc rỗng → RECOVERY_REQUIRED. KHÔNG báo retry success.
   await withRoot(async (root) => {
     const lockPath = join(root, 'writefail.lock');
     _setFsOverride({ writeSync: () => { throw new Error('ENOSPC: disk full'); } });
@@ -340,8 +338,7 @@ test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXI
       assert.equal(r.ok, false, 'write-fail thật phải fail-closed, không báo success');
       assert.match(r.error, /RECOVERY_REQUIRED/, 'fail-closed reason phải RECOVERY_REQUIRED');
       assert.ok(existsSync(lockPath), 'pathname phải được giữ (không unlink)');
-      const onDisk = readFileSync(lockPath, 'utf8');
-      assert.equal(onDisk, '', 'file rỗng còn nguyên (write fail, không ghi được owner)');
+      assert.equal(readFileSync(lockPath, 'utf8'), '', 'file rỗng còn nguyên');
     } finally { _setFsOverride(null); }
   });
 });
