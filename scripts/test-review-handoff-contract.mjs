@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import {
   CONTRACT_VERSION, TERMINAL_STATUSES, SECTION_IDS, REQUIRED_SECTIONS,
   sampleReport, validateHandoff, canRequestReview, contractContent, buildTaskPacket,
+  verifyHandoffIdentity, validateCanonicalRef, contractContentHash,
+  CANONICAL_CONTRACT_PATH, CANONICAL_CONTRACT_REPO,
 } from './review-handoff-contract.mjs';
 
 const cases = [];
@@ -134,11 +136,14 @@ test('mọi error đều có structured { code, section, field, message }', () =
 });
 
 test('buildTaskPacket resolve được reference → mode=reference, bounded, không copy nội dung', () => {
-  const p = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: 'duongpdddic-droid/AI_PR_REVIEWER@0123456789abcdef scripts/review-handoff-contract.mjs' }) });
+  const p = buildTaskPacket({
+    resolveRef: () => ({ resolved: true, ref: canonRef(CANONICAL_CONTRACT_REPO) }),
+    registryRepos: [CANONICAL_CONTRACT_REPO],
+  });
   assert.equal(p.ok, true);
   assert.equal(p.mode, 'reference');
   assert.equal(p.contractVersion, CONTRACT_VERSION);
-  assert.ok(p.ref.startsWith('duongpdddic-droid/AI_PR_REVIEWER@'));
+  assert.equal(p.ref.repo, CANONICAL_CONTRACT_REPO);
   assert.ok(!p.content, 'reference mode không mang full content (bounded payload)');
 });
 
@@ -180,15 +185,28 @@ const REPO_AIPR = fxRepo('ai-pr-reviewer.json');
 const REPO_QLDA = fxRepo('qlda-dtxd.json');
 const REPO_UNKNOWN = 'example-org/not-registered';
 
+const HASH = contractContentHash();
+const canonRef = (repo, overrides = {}) => ({
+  repo,
+  commitSha: '0123456789abcdef0123456789abcdef01234567',
+  path: CANONICAL_CONTRACT_PATH,
+  contractVersion: CONTRACT_VERSION,
+  contentHash: HASH,
+  ...overrides,
+});
+const resolveCanon = (repo) => () => ({ resolved: true, ref: canonRef(repo) });
+
 test('2 fixtures repo khác nhau nhận cùng pinned canonical contract version', () => {
-  const pa = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_AIPR}@abc scripts/review-handoff-contract.mjs` }) });
-  const pq = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_QLDA}@abc scripts/review-handoff-contract.mjs` }) });
+  const reg = [REPO_AIPR, REPO_QLDA];
+  const pa = buildTaskPacket({ resolveRef: resolveCanon(REPO_AIPR), registryRepos: reg });
+  const pq = buildTaskPacket({ resolveRef: resolveCanon(REPO_QLDA), registryRepos: reg });
   assert.equal(pa.mode, 'reference');
   assert.equal(pq.mode, 'reference');
   assert.equal(pa.contractVersion, CONTRACT_VERSION);
   assert.equal(pq.contractVersion, CONTRACT_VERSION);
   assert.equal(pa.contractVersion, pq.contractVersion, 'cùng pinned version cho mọi repo');
-  assert.ok(pa.ref.includes(REPO_AIPR) && pq.ref.includes(REPO_QLDA));
+  assert.equal(pa.ref.repo, REPO_AIPR);
+  assert.equal(pq.ref.repo, REPO_QLDA);
 });
 
 test('target-repo handoff đủ evidence pass KHÔNG cần contract bản sao trong repo đó', () => {
@@ -199,7 +217,7 @@ test('target-repo handoff đủ evidence pass KHÔNG cần contract bản sao tr
   assert.equal(r.status, 'READY_FOR_REVIEW');
   assert.equal(canRequestReview(r), true);
   // reference-mode packet không mang full content → không cần copy contract vào target repo
-  const p = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_QLDA}@abc scripts/review-handoff-contract.mjs` }) });
+  const p = buildTaskPacket({ resolveRef: resolveCanon(REPO_QLDA), registryRepos: reg });
   assert.ok(!p.content);
 });
 
@@ -231,7 +249,7 @@ test('unresolved contract reference → fallback inline + truncation fail-closed
 
 test('updating canonical contract không đổi packet đã cấp (bound pinned version)', () => {
   // Packet cấp với version hiện tại — contractVersion cố định trong packet.
-  const issued = buildTaskPacket({ resolveRef: () => ({ resolved: true, ref: `${REPO_AIPR}@pinned scripts/review-handoff-contract.mjs` }) });
+  const issued = buildTaskPacket({ resolveRef: resolveCanon(REPO_AIPR), registryRepos: [REPO_AIPR] });
   assert.equal(issued.contractVersion, CONTRACT_VERSION);
   // Mô phỏng canonical đã nâng version lên 2.0.0: packet cũ vẫn giữ version 1.0.0 của nó.
   assert.notEqual(issued.contractVersion, '2.0.0');
@@ -240,6 +258,135 @@ test('updating canonical contract không đổi packet đã cấp (bound pinned 
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => e.code === 'CONTRACT_VERSION_MISMATCH'));
 });
+
+
+// ---------------------------------------------------------------------------
+// GPT-REV-121 — canonical reference pin (KHÔNG chấp nhận arbitrary ref).
+// ---------------------------------------------------------------------------
+const FULL_SHA = '0123456789abcdef0123456789abcdef01234567';
+
+test('validateCanonicalRef: ref hợp lệ (full pin) → ok', () => {
+  const v = validateCanonicalRef(canonRef(CANONICAL_CONTRACT_REPO), { registryRepos: [CANONICAL_CONTRACT_REPO] });
+  assert.equal(v.ok, true);
+  assert.deepEqual(v.errors, []);
+});
+
+test('validateCanonicalRef: ref KHÔNG structured (string/@abc/@pinned/@0123) → REF_NOT_STRUCTURED', () => {
+  for (const bad of ['duongpdddic-droid/AI_PR_REVIEWER@0123 scripts/review-handoff-contract.mjs', '@abc', '@pinned', '@0123', null, undefined, 42]) {
+    const v = validateCanonicalRef(bad, { registryRepos: [CANONICAL_CONTRACT_REPO] });
+    assert.equal(v.ok, false, `ref lạ '${String(bad)}' phải bị chặn`);
+    assert.ok(v.errors.some((e) => e.code === 'REF_NOT_STRUCTURED'));
+  }
+});
+
+test('validateCanonicalRef: short SHA / mutable branch-tag → REF_SHA_INVALID', () => {
+  for (const sha of ['abc123', '0123', 'main', 'feat/issue-32-review-handoff-contract', 'HEAD']) {
+    const v = validateCanonicalRef(canonRef(CANONICAL_CONTRACT_REPO, { commitSha: sha }), { registryRepos: [CANONICAL_CONTRACT_REPO] });
+    assert.equal(v.ok, false, `commitSha '${sha}' phải bị chặn (không phải 40-hex)`);
+    assert.ok(v.errors.some((e) => e.code === 'REF_SHA_INVALID'));
+  }
+});
+
+test('validateCanonicalRef: path sai, repo sai, version sai, hash sai → REF_*_INVALID/MISMATCH', () => {
+  const R = [CANONICAL_CONTRACT_REPO];
+  const vPath = validateCanonicalRef(canonRef(CANONICAL_CONTRACT_REPO, { path: 'other/path.mjs' }), { registryRepos: R });
+  assert.equal(vPath.ok, false); assert.ok(vPath.errors.some((e) => e.code === 'REF_PATH_INVALID'));
+  const vRepo = validateCanonicalRef(canonRef('example-org/other'), { registryRepos: R });
+  assert.equal(vRepo.ok, false); assert.ok(vRepo.errors.some((e) => e.code === 'REF_REPO_NOT_REGISTERED'));
+  const vVer = validateCanonicalRef(canonRef(CANONICAL_CONTRACT_REPO, { contractVersion: '2.0.0' }), { registryRepos: R });
+  assert.equal(vVer.ok, false); assert.ok(vVer.errors.some((e) => e.code === 'REF_VERSION_MISMATCH'));
+  const vHash = validateCanonicalRef(canonRef(CANONICAL_CONTRACT_REPO, { contentHash: 'f'.repeat(64) }), { registryRepos: R });
+  assert.equal(vHash.ok, false); assert.ok(vHash.errors.some((e) => e.code === 'REF_CONTENT_HASH_MISMATCH'));
+});
+
+test('buildTaskPacket: ref không verify được → fallback inline lossless (không reference)', () => {
+  const cases = [
+    () => ({ resolved: true, ref: 'duongpdddic-droid/AI_PR_REVIEWER@0123 scripts/review-handoff-contract.mjs' }),
+    () => ({ resolved: true, ref: { repo: CANONICAL_CONTRACT_REPO, commitSha: 'abc123', path: CANONICAL_CONTRACT_PATH, contractVersion: CONTRACT_VERSION, contentHash: HASH } }),
+    () => { throw new Error('resolver boom'); },
+  ];
+  for (const r of cases) {
+    const p = buildTaskPacket({ resolveRef: r, registryRepos: [CANONICAL_CONTRACT_REPO] });
+    assert.equal(p.mode, 'inline', `ref lạ phải fallback inline`);
+    assert.ok(p.content && p.content.includes(`v${CONTRACT_VERSION}`), 'inline content đầy đủ');
+  }
+});
+// ---------------------------------------------------------------------------
+// GPT-REV-120 — inline contract lossless (SEMANTIC_RULES source duy nhất).
+// ---------------------------------------------------------------------------
+test('contractContent lossless: inline chứa đủ semantic constraints', () => {
+  const content = contractContent();
+  for (const keyword of ['exact HEAD', 'failure', 'static tracing', 'finding resolution', 'assertions', 'mutation analysis', 'noApprovalClaim', 'Terminal status']) {
+    assert.ok(content.includes(keyword), `inline content thiếu semantic '${keyword}'`);
+  }
+});
+
+test('validateHandoff: thiếu semantic rule (codeEvidence items) → PARTIAL_EVIDENCE', () => {
+  const r = validateHandoff(sampleReport({ codeEvidence: { items: [{ file: 'x.js' }] } }));
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'CODE_EVIDENCE_ITEMS_REQUIRED'));
+});
+
+// ---------------------------------------------------------------------------
+// GPT-REV-118 — identity binding (chống replay/substitution).
+// ---------------------------------------------------------------------------
+const IDENTITY_CTX = { repo: REPO_AIPR, number: 32, pr: 33, prHeadSha: FULL_SHA };
+const identityReport = () => sampleReport({
+  identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: FULL_SHA },
+});
+
+test('verifyHandoffIdentity: exact identity + HEAD → ok (positive)', () => {
+  const v = verifyHandoffIdentity(identityReport(), IDENTITY_CTX);
+  assert.equal(v.ok, true);
+  assert.deepEqual(v.errors, []);
+});
+
+test('verifyHandoffIdentity: report repo A phát lại cho repo B → IDENTITY_REPOSITORY_MISMATCH', () => {
+  const rep = sampleReport({ identity: { repository: REPO_QLDA, issue: 32, pullRequest: 33, headSha: FULL_SHA } });
+  const v = verifyHandoffIdentity(rep, IDENTITY_CTX);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.code === 'IDENTITY_REPOSITORY_MISMATCH'));
+});
+
+test('verifyHandoffIdentity: issue khác → IDENTITY_ISSUE_MISMATCH', () => {
+  const rep = sampleReport({ identity: { repository: REPO_AIPR, issue: 99, pullRequest: 33, headSha: FULL_SHA } });
+  const v = verifyHandoffIdentity(rep, IDENTITY_CTX);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.code === 'IDENTITY_ISSUE_MISMATCH'));
+});
+
+test('verifyHandoffIdentity: PR khác → IDENTITY_PR_MISMATCH', () => {
+  const rep = sampleReport({ identity: { repository: REPO_AIPR, issue: 32, pullRequest: 77, headSha: FULL_SHA } });
+  const v = verifyHandoffIdentity(rep, IDENTITY_CTX);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.code === 'IDENTITY_PR_MISMATCH'));
+});
+
+test('verifyHandoffIdentity: stale HEAD / random 40-hex → IDENTITY_HEAD_SHA_MISMATCH', () => {
+  const rep = sampleReport({ identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: 'abcdefabcdefabcdefabcdefabcdefabcdefabcd' } });
+  const v = verifyHandoffIdentity(rep, IDENTITY_CTX);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.code === 'IDENTITY_HEAD_SHA_MISMATCH'));
+  const rep2 = sampleReport({ identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: '1111111111111111111111111111111111111111' } });
+  const v2 = verifyHandoffIdentity(rep2, IDENTITY_CTX);
+  assert.equal(v2.ok, false);
+  assert.ok(v2.errors.some((e) => e.code === 'IDENTITY_HEAD_SHA_MISMATCH'));
+});
+
+test('verifyHandoffIdentity: PR head không đọc được → PR_HEAD_UNREADABLE', () => {
+  const v = verifyHandoffIdentity(identityReport(), { ...IDENTITY_CTX, prHeadSha: undefined });
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.code === 'PR_HEAD_UNREADABLE'));
+});
+
+test('verifyHandoffIdentity: thiếu identity section → IDENTITY_MISSING', () => {
+  const rep = { ...sampleReport(), identity: undefined };
+  const v = verifyHandoffIdentity(rep, IDENTITY_CTX);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.code === 'IDENTITY_MISSING'));
+});
+
+
 
 
 // Runner — đếm PASS/FAIL, exit 1 nếu có lỗi.

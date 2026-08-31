@@ -12,30 +12,68 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { validateHandoff, canRequestReview, CONTRACT_VERSION } from "../scripts/review-handoff-contract.mjs";
+import { validateHandoff, canRequestReview, verifyHandoffIdentity, CONTRACT_VERSION } from "../scripts/review-handoff-contract.mjs";
+import { loadRegistry, DEFAULT_REGISTRY_PATH } from "../scripts/project-registry.mjs";
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 
 /**
- * GPT-REV-116: danh sách repo registered lấy từ nguồn canonical độc lập
- * (.agent/config.json tại root repo này: `repo` + `targetRepos`), KHÔNG dùng
- * `repo` do caller tự khai báo trong request (self-declared). Fail-closed:
- * không đọc được config → trả [] → mọi report UNKNOWN_REPOSITORY.
+ * GPT-REV-119: danh sách repo registered lấy từ Project Registry canonical
+ * (machine-local `~/.ai-pr-reviewer/registry.json` — registry.projects[].repository),
+ * KHÔNG dùng `.agent/config.json` như allowlist canonical độc lập.
+ *
+ * Bootstrap config (`.agent/config.json` `repo` + `targetRepos`) nếu còn tồn tại chỉ là
+ * nguồn bootstrap: mọi repo khai trong config PHẢI có mặt trong registry — repo config
+ * không nằm trong registry → config/registry MISMATCH → fail-closed (trả []).
+ * Registry missing/unreadable/malformed → fail-closed ([]).
+ *
+ * Trả { ok, repos, errors }. Server dùng `ok===false` → HANDOFF_REGISTRY_UNAVAILABLE
+ * TRƯỚC mọi mutation.
  */
-export function loadRegisteredRepos() {
+export function loadRegisteredRepos({ registryPath = DEFAULT_REGISTRY_PATH, configPath = null } = {}) {
+  const errors = [];
+  let registry;
   try {
-    const cfgPath = join(SERVER_DIR, "..", ".agent", "config.json");
-    if (!existsSync(cfgPath)) return [];
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    const list = [];
-    if (typeof cfg.repo === "string" && cfg.repo.trim()) list.push(cfg.repo.trim());
-    for (const r of Array.isArray(cfg.targetRepos) ? cfg.targetRepos : []) {
-      if (typeof r === "string" && r.trim() && !list.includes(r.trim())) list.push(r.trim());
-    }
-    return list;
-  } catch {
-    return []; // fail-closed
+    registry = loadRegistry({ registryPath });
+  } catch (err) {
+    return { ok: false, repos: [], errors: [`REGISTRY_UNREADABLE: ${err.message}`] };
   }
+  if (!registry || typeof registry !== "object" || !Array.isArray(registry.projects)) {
+    return { ok: false, repos: [], errors: ["REGISTRY_MALFORMED: registry.projects phải là mảng"] };
+  }
+  const repos = [];
+  for (const p of registry.projects) {
+    if (p && typeof p.repository === "string" && p.repository.trim() && !repos.includes(p.repository.trim())) {
+      repos.push(p.repository.trim());
+    }
+  }
+  if (repos.length === 0) {
+    return { ok: false, repos: [], errors: ["REGISTRY_EMPTY: không có project nào đăng ký"] };
+  }
+  // Bootstrap config đối chiếu với registry: repo config không có trong registry → mismatch fail-closed.
+  const cfgPath = configPath ?? join(SERVER_DIR, "..", ".agent", "config.json");
+  if (existsSync(cfgPath)) {
+    let cfg = null;
+    try {
+      cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    } catch (err) {
+      return { ok: false, repos: [], errors: [`CONFIG_UNREADABLE: ${err.message}`] };
+    }
+    const cfgRepos = [];
+    if (typeof cfg?.repo === "string" && cfg.repo.trim()) cfgRepos.push(cfg.repo.trim());
+    for (const r of Array.isArray(cfg?.targetRepos) ? cfg.targetRepos : []) {
+      if (typeof r === "string" && r.trim() && !cfgRepos.includes(r.trim())) cfgRepos.push(r.trim());
+    }
+    const missing = cfgRepos.filter((r) => !repos.includes(r));
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        repos: [],
+        errors: [`CONFIG_REGISTRY_MISMATCH: config khai ${missing.join(", ")} nhưng không có trong Project Registry → fail-closed`],
+      };
+    }
+  }
+  return { ok: true, repos, errors };
 }
 
 export const SERVER_INFO = { name: "mcp-task-server", version: "1.0.0" };
@@ -270,18 +308,45 @@ export const ops = {
     if (handoffReport === undefined || handoffReport === null) {
       throw new Error("HANDOFF_REPORT_REQUIRED: task_handoff sang review-requested bắt buộc kèm handoffReport theo canonical REVIEW HANDOFF CONTRACT (Issue #32)");
     }
-    // GPT-REV-116: registered repos từ nguồn canonical (.agent/config.json),
-    // không phụ thuộc `repo` caller khai báo trong request.
+    // GPT-REV-119: registered repos từ Project Registry canonical (machine-local).
+    // Registry missing/unreadable/malformed/mismatch-config → fail-closed TRƯỚC mọi mutation.
+    const reg = loadRegisteredRepos();
+    if (reg.ok !== true) {
+      throw new Error(`HANDOFF_REGISTRY_UNAVAILABLE: ${reg.errors.join("; ")}`);
+    }
     // GPT-REV-117: gate — chỉ report canRequestReview===true mới được transition;
     // BLOCKED / PARTIAL_EVIDENCE / invalid / exception đều chặn fail-closed.
     let v;
     try {
-      v = validateHandoff(handoffReport, { registeredRepos: loadRegisteredRepos() });
+      v = validateHandoff(handoffReport, { registeredRepos: reg.repos });
     } catch (err) {
       throw new Error(`HANDOFF_PARTIAL_EVIDENCE: report không hợp lệ (exception khi validate) — ${err.message}`);
     }
     if (canRequestReview(v) !== true) {
       throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. status=${v.status}, errors=${JSON.stringify(v.errors)}`);
+    }
+    // GPT-REV-118: identity binding với dữ liệu SERVER kiểm soát, fail-closed TRƯỚC mutation.
+    // PR bắt buộc (thiếu → không thể bind PR HEAD).
+    if (pr === undefined || pr === null) {
+      throw new Error("HANDOFF_PR_REQUIRED: task_handoff sang review-requested bắt buộc kèm pr để bind identity (repository/issue/pullRequest/headSha)");
+    }
+    // So khớp repo/issue/pullRequest với args server nhận (không phải caller tự khai).
+    const idv = verifyHandoffIdentity(handoffReport, { repo: r, number, pr, checkHead: false });
+    if (idv.ok !== true) {
+      throw new Error(`HANDOFF_IDENTITY_MISMATCH: ${JSON.stringify(idv.errors)}`);
+    }
+    // Đọc exact PR HEAD từ nguồn tin cậy (gh pr view) — fail-closed nếu không đọc được.
+    let prHeadSha = null;
+    try {
+      const prJson = JSON.parse(gh(["pr", "view", String(pr), "--json", "headRefOid"], { repo: r }));
+      prHeadSha = prJson?.headRefOid ?? null;
+    } catch (err) {
+      throw new Error(`HANDOFF_PR_HEAD_READ_FAILED: không đọc được exact PR HEAD #${pr} — ${err.message}`);
+    }
+    // So khớp headSha với exact PR HEAD (chống stale HEAD / random 40-hex / replay).
+    const hv = verifyHandoffIdentity(handoffReport, { repo: r, number, pr, prHeadSha });
+    if (hv.ok !== true) {
+      throw new Error(`HANDOFF_IDENTITY_MISMATCH: ${JSON.stringify(hv.errors)}`);
     }
     const current = await listLabels(r, number);
     const check = checkTransition("handoff", extractStatus(current));

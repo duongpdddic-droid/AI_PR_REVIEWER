@@ -107,15 +107,36 @@ Report phải kết thúc bằng ĐÚNG 1 trong:
 ## Tích hợp
 
 - **Validator**: `validateHandoff(report)` → `{ ok, status, errors: [{ code, section, field, message }] }`.
+  Semantic constraints render từ `SEMANTIC_RULES` (cùng source với `contractContent()` — GPT-REV-120):
+  thiếu required field / thiếu exact HEAD / "all green" mâu thuẫn / thiếu terminal status /
+  item code-evidence, finding-resolution, tests thiếu field bắt buộc → `PARTIAL_EVIDENCE`.
 - **Gate handoff**: `mcp-task-server` `task_handoff` BẮT BUỘC kèm `handoffReport`; thiếu report
   → `HANDOFF_REPORT_REQUIRED`, report không phải `READY_FOR_REVIEW` (kể cả `BLOCKED` /
   `PARTIAL_EVIDENCE` / invalid / exception) → `HANDOFF_PARTIAL_EVIDENCE`. Chặn fail-closed
-  trước mọi mutation. Registered repositories lấy từ nguồn canonical (`.agent/config.json`
-  `repo` + `targetRepos`), KHÔNG dùng repo caller tự khai báo trong request — report khai báo
-  repository chưa đăng ký → `UNKNOWN_REPOSITORY` fail-closed.
-- **Task packet**: `buildTaskPacket({ resolveRef, maxBytes })` — reference pin version khi resolve
-  được; ngược lại inline toàn bộ content; vượt `maxBytes` → `PACKET_TRUNCATED` fail-closed.
-  Payload bounded: static contract không nhân bản vào từng packet nếu runtime resolve được reference.
+  trước mọi mutation.
+- **Canonical registry (GPT-REV-119)**: registered repositories lấy từ **Project Registry
+  canonical** (`~/.ai-pr-reviewer/registry.json` — `registry.projects[].repository`), KHÔNG dùng
+  `.agent/config.json` như allowlist độc lập. `.agent/config.json` chỉ là bootstrap và phải đối
+  chiếu với registry — config khai repo không có trong registry → `CONFIG_REGISTRY_MISMATCH`
+  fail-closed. Registry missing/unreadable/malformed → fail-closed trước mọi mutation. Report
+  khai repository chưa đăng ký → `UNKNOWN_REPOSITORY` fail-closed.
+- **Identity binding (GPT-REV-118)**: `task_handoff` ràng buộc `handoffReport.identity` với dữ
+  liệu **server kiểm soát** — `repository===repo`, `issue===number`, `pullRequest===pr`,
+  `headSha===exact PR HEAD` đọc từ `gh pr view`. Mọi mismatch / PR không đọc được HEAD →
+  `HANDOFF_IDENTITY_MISMATCH` / `HANDOFF_PR_HEAD_READ_FAILED` fail-closed TRƯỚC list-label
+  mutation, setStatus, comment, notification. Không chỉ check HEAD là 40-hex (chống replay/
+  substitution: report repo A phát lại cho repo B, issue/PR khác, stale HEAD, random 40-hex).
+- **Task packet (GPT-REV-121)**: `buildTaskPacket({ resolveRef, maxBytes, registryRepos })` —
+  reference pin là **structured canonical ref** `{ repo, commitSha, path, contractVersion,
+  contentHash }`; chặn short SHA, branch/tag mutable, path/repo sai, version/hash mismatch,
+  resolver exception. Ref không verify được → fallback **inline lossless** (chứa đủ semantic
+  từ `SEMANTIC_RULES`); vượt `maxBytes` → `PACKET_TRUNCATED` fail-closed.
+- **Equivalence hash gate (GPT-REV-120)**: fingerprint của inline content là
+  `contractContentHash()` (sha256 của `contractContent()`). Docs (file này), validator và
+  inline packet đều xuất phát từ cùng source `SEMANTIC_RULES`; hash dùng làm reference pin
+  binding. Khi contract đổi → hash đổi → ref cũ tự fallback inline, không ngấm ngầm pass.
+  Fingerprint hiện hành:
+  `contractSha256=2627b3c5d72df5e918d94dfabc4420645760ea6cc01e493089512a3bfecb223a`
 
 ## Lệnh vận hành ngắn
 

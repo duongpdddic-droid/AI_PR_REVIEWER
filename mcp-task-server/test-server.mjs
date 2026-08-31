@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs, loadRegisteredRepos } from "./server.mjs";
-import { sampleReport } from "../scripts/review-handoff-contract.mjs";
+import { sampleReport, verifyHandoffIdentity } from "../scripts/review-handoff-contract.mjs";
 
 const REPO = "duongpdddic-droid/QLDA_DTXD";
 let passed = 0;
@@ -74,11 +74,122 @@ for (const bad of [{ state: "weird" }, { limit: 0 }, { limit: 2000 }, { limit: 1
   ok(threw, `buildListArgs chặn input sai ${JSON.stringify(bad)}`);
 }
 
-// GPT-REV-116: registered repos phải từ nguồn canonical (.agent/config.json), độc lập request
-const canonicalRepos = loadRegisteredRepos();
-ok(Array.isArray(canonicalRepos) && canonicalRepos.length >= 2, "loadRegisteredRepos trả list từ .agent/config.json");
-ok(canonicalRepos.includes("duongpdddic-droid/AI_PR_REVIEWER"), "canonical registry chứa repo chính AI_PR_REVIEWER");
-ok(canonicalRepos.includes("duongpdddic-droid/QLDA_DTXD"), "canonical registry chứa targetRepos QLDA_DTXD");
+// GPT-REV-119: registered repos phải từ Project Registry canonical (machine-local registry),
+// độc lập request; đối chiếu .agent/config.json → mismatch fail-closed.
+const canonical = loadRegisteredRepos();
+ok(canonical.ok === true, "loadRegisteredRepos trả ok=true từ Project Registry canonical");
+ok(Array.isArray(canonical.repos) && canonical.repos.length >= 3, "registry chứa đủ các project đăng ký");
+ok(canonical.repos.includes("duongpdddic-droid/AI_PR_REVIEWER"), "registry chứa AI_PR_REVIEWER");
+ok(canonical.repos.includes("duongpdddic-droid/QLDA_DTXD"), "registry chứa QLDA_DTXD");
+ok(canonical.repos.includes("duongpdddic-droid/Soc_brain"), "registry chứa Soc_brain");
+
+// ---------------------------------------------------------------------------
+// 2c) GPT-REV-119 — canonical registry fail-closed (fixture registry)
+// ---------------------------------------------------------------------------
+console.log("[2c] GPT-REV-119 registry fail-closed tests");
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+const fxDir = mkdtempSync(path.join(tmpdir(), "mcp-reg-"));
+
+function fxRegistryPath(projects) {
+  const p = path.join(fxDir, `reg-${Math.random().toString(36).slice(2)}.json`);
+  writeFileSync(p, JSON.stringify({ schemaVersion: "1.0", projects }), "utf8");
+  return p;
+}
+
+try {
+  // Registry đầy đủ 3 repo → ok
+  const full = fxRegistryPath([
+    { repository: "duongpdddic-droid/AI_PR_REVIEWER" },
+    { repository: "duongpdddic-droid/QLDA_DTXD" },
+    { repository: "duongpdddic-droid/Soc_brain" },
+  ]);
+  const rFull = loadRegisteredRepos({ registryPath: full });
+  ok(rFull.ok === true && rFull.repos.length === 3, "registry đầy đủ 3 repo → ok");
+
+  // Registry missing (file không tồn tại) → fail-closed REGISTRY_EMPTY (loadRegistry trả projects rỗng)
+  const rMissing = loadRegisteredRepos({ registryPath: path.join(fxDir, "missing.json") });
+  ok(rMissing.ok === false && rMissing.errors.some((e) => e.startsWith("REGISTRY_EMPTY")),
+    "registry missing → fail-closed REGISTRY_EMPTY");
+
+  // Registry malformed → fail-closed REGISTRY_UNREADABLE
+  const badPath = path.join(fxDir, "malformed.json");
+  writeFileSync(badPath, "{ not valid json", "utf8");
+  const rBad = loadRegisteredRepos({ registryPath: badPath });
+  ok(rBad.ok === false && rBad.errors.some((e) => e.startsWith("REGISTRY_UNREADABLE")),
+    "registry malformed → fail-closed REGISTRY_UNREADABLE");
+
+  // Registry rỗng → REGISTRY_EMPTY fail-closed
+  const empty = fxRegistryPath([]);
+  const rEmpty = loadRegisteredRepos({ registryPath: empty });
+  ok(rEmpty.ok === false && rEmpty.errors.some((e) => e.startsWith("REGISTRY_EMPTY")),
+    "registry rỗng → fail-closed REGISTRY_EMPTY");
+
+  // Config khai repo không có trong registry → CONFIG_REGISTRY_MISMATCH fail-closed
+  const cfgPath = path.join(fxDir, "config.json");
+  writeFileSync(cfgPath, JSON.stringify({ repo: "evil/repo" }), "utf8");
+  const rMismatch = loadRegisteredRepos({ registryPath: full, configPath: cfgPath });
+  ok(rMismatch.ok === false && rMismatch.errors.some((e) => e.startsWith("CONFIG_REGISTRY_MISMATCH")),
+    "config khai repo không có trong registry → fail-closed CONFIG_REGISTRY_MISMATCH");
+} finally {
+  rmSync(fxDir, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// 2d) GPT-REV-118 — identity binding (chống replay/substitution)
+// ---------------------------------------------------------------------------
+console.log("[2d] GPT-REV-118 identity binding");
+const PR_SHA = "0123456789abcdef0123456789abcdef01234567";
+const IDENTITY = { repository: "duongpdddic-droid/AI_PR_REVIEWER", issue: 32, pullRequest: 33, branch: "feat/x", headSha: PR_SHA, baseSha: PR_SHA.replace("0", "1"), prState: "Open", noForcePushMergeDeploy: true };
+
+// Positive: exact identity + exact PR HEAD → ok
+const okId = verifyHandoffIdentity(sampleReport({ identity: IDENTITY }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(okId.ok === true, "identity exact + exact PR HEAD → ok (positive)");
+
+// Negative: report repo A phát lại cho repo B
+const replayRepo = verifyHandoffIdentity(sampleReport({ identity: { ...IDENTITY, repository: "duongpdddic-droid/QLDA_DTXD" } }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(replayRepo.ok === false && replayRepo.errors.some((e) => e.code === "IDENTITY_REPOSITORY_MISMATCH"),
+  "report repo A phát lại cho repo B → IDENTITY_REPOSITORY_MISMATCH");
+
+// Negative: issue khác
+const replayIssue = verifyHandoffIdentity(sampleReport({ identity: { ...IDENTITY, issue: 99 } }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(replayIssue.ok === false && replayIssue.errors.some((e) => e.code === "IDENTITY_ISSUE_MISMATCH"),
+  "issue khác → IDENTITY_ISSUE_MISMATCH");
+
+// Negative: PR khác
+const replayPr = verifyHandoffIdentity(sampleReport({ identity: { ...IDENTITY, pullRequest: 77 } }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(replayPr.ok === false && replayPr.errors.some((e) => e.code === "IDENTITY_PR_MISMATCH"),
+  "PR khác → IDENTITY_PR_MISMATCH");
+
+// Negative: stale HEAD (headSha ≠ exact PR HEAD) — không chỉ check 40-hex
+const staleHead = verifyHandoffIdentity(sampleReport({ identity: { ...IDENTITY, headSha: "abcdefabcdefabcdefabcdefabcdefabcdefabcd" } }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(staleHead.ok === false && staleHead.errors.some((e) => e.code === "IDENTITY_HEAD_SHA_MISMATCH"),
+  "stale HEAD → IDENTITY_HEAD_SHA_MISMATCH");
+
+// Negative: random 40-hex ≠ PR HEAD
+const randomHex = verifyHandoffIdentity(sampleReport({ identity: { ...IDENTITY, headSha: "1111111111111111111111111111111111111111" } }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(randomHex.ok === false && randomHex.errors.some((e) => e.code === "IDENTITY_HEAD_SHA_MISMATCH"),
+  "random 40-hex ≠ PR HEAD → IDENTITY_HEAD_SHA_MISMATCH");
+
+// Negative: PR lookup failure (prHeadSha không đọc được)
+const prLookup = verifyHandoffIdentity(sampleReport({ identity: IDENTITY }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: undefined });
+ok(prLookup.ok === false && prLookup.errors.some((e) => e.code === "PR_HEAD_UNREADABLE"),
+  "PR lookup failure → PR_HEAD_UNREADABLE fail-closed");
+
+// Negative: thiếu pr
+const noPr = verifyHandoffIdentity(sampleReport({ identity: { ...IDENTITY, pullRequest: undefined } }),
+  { repo: "duongpdddic-droid/AI_PR_REVIEWER", number: 32, pr: 33, prHeadSha: PR_SHA });
+ok(noPr.ok === false && noPr.errors.some((e) => e.code === "IDENTITY_PR_MISMATCH"),
+  "thiếu pr → IDENTITY_PR_MISMATCH fail-closed");
 
 // ---------------------------------------------------------------------------
 // 3) Protocol e2e — spawn server thật qua stdio
@@ -202,6 +313,55 @@ try {
     (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
   ok(afterBlocked.status === issue35.status && afterBlocked.agent === issue35.agent,
     "label #35 KHÔNG đổi sau handoff BLOCKED (không mutation rò rỉ)");
+
+  // GPT-REV-118: identity binding — report hợp lệ nhưng identity mismatch → fail-closed TRƯỚC mutation.
+  // Report READY_FOR_REVIEW hợp lệ (đủ semantic) với identity QLDA_DTXD #35 → qua validateHandoff,
+  // nhưng các trường identity không khớp args server → HANDOFF_IDENTITY_MISMATCH, no mutation.
+  const qldaIdentity = { repository: REPO, issue: 35, pullRequest: 999, branch: "feat/e2e", headSha: "0123456789abcdef0123456789abcdef01234567", baseSha: "0123456789abcdef0123456789abcdef01234566", prState: "Open", noForcePushMergeDeploy: true };
+  const validQlda = () => sampleReport({ identity: qldaIdentity });
+
+  // (a) thiếu pr → HANDOFF_PR_REQUIRED
+  const noPrHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, handoffReport: validQlda() } });
+  ok(noPrHandoff.result?.isError === true, "task_handoff thiếu pr → isError (fail-closed)");
+  ok(/HANDOFF_PR_REQUIRED/.test(noPrHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PR_REQUIRED");
+
+  // (b) repo A phát lại cho repo B (report khai AI_PR_REVIEWER, gọi trên QLDA_DTXD) → IDENTITY_REPOSITORY_MISMATCH
+  const replayRepo = sampleReport({ identity: { ...qldaIdentity, repository: "duongpdddic-droid/AI_PR_REVIEWER" } });
+  const replayRepoHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: replayRepo } });
+  ok(replayRepoHandoff.result?.isError === true, "task_handoff report repo A trên repo B → isError");
+  ok(/HANDOFF_IDENTITY_MISMATCH/.test(replayRepoHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_IDENTITY_MISMATCH");
+  ok(/IDENTITY_REPOSITORY_MISMATCH/.test(replayRepoHandoff.result.content[0].text), "lỗi nêu rõ IDENTITY_REPOSITORY_MISMATCH");
+
+  // (c) issue khác → IDENTITY_ISSUE_MISMATCH
+  const wrongIssue = sampleReport({ identity: { ...qldaIdentity, issue: 36 } });
+  const wrongIssueHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: wrongIssue } });
+  ok(wrongIssueHandoff.result?.isError === true, "task_handoff issue khác → isError");
+  ok(/IDENTITY_ISSUE_MISMATCH/.test(wrongIssueHandoff.result.content[0].text), "lỗi nêu rõ IDENTITY_ISSUE_MISMATCH");
+
+  // (d) PR khác → IDENTITY_PR_MISMATCH
+  const wrongPr = sampleReport({ identity: { ...qldaIdentity, pullRequest: 48 } });
+  const wrongPrHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: wrongPr } });
+  ok(wrongPrHandoff.result?.isError === true, "task_handoff PR khác → isError");
+  ok(/IDENTITY_PR_MISMATCH/.test(wrongPrHandoff.result.content[0].text), "lỗi nêu rõ IDENTITY_PR_MISMATCH");
+
+  // (e) PR lookup failure (PR #999 không tồn tại) → HANDOFF_PR_HEAD_READ_FAILED
+  const pr999Handoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: validQlda() } });
+  ok(pr999Handoff.result?.isError === true, "task_handoff PR không tồn tại → isError");
+  ok(/HANDOFF_PR_HEAD_READ_FAILED/.test(pr999Handoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PR_HEAD_READ_FAILED");
+
+  // (f) stale HEAD / random 40-hex → IDENTITY_HEAD_SHA_MISMATCH (dùng PR #47 thật của QLDA_DTXD)
+  //     report khai PR 47 nhưng headSha không phải exact PR HEAD → fail-closed.
+  const staleReport = sampleReport({ identity: { ...qldaIdentity, pullRequest: 47, headSha: "ffffffffffffffffffffffffffffffffffffffff" } });
+  const staleHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 47, handoffReport: staleReport } });
+  ok(staleHandoff.result?.isError === true, "task_handoff stale HEAD → isError");
+  ok(/HANDOFF_IDENTITY_MISMATCH/.test(staleHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_IDENTITY_MISMATCH");
+  ok(/IDENTITY_HEAD_SHA_MISMATCH/.test(staleHandoff.result.content[0].text), "lỗi nêu rõ IDENTITY_HEAD_SHA_MISMATCH");
+
+  // Mọi case (a)-(f) đều KHÔNG đổi label #35 (không mutation rò rỉ)
+  const after118 = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(after118.status === issue35.status && after118.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau mọi handoff identity-mismatch (không mutation rò rỉ)");
 
   // Repo bẩn bị chặn bởi validateRepo
   const badRepo = await rpc("tools/call", { name: "task_get", arguments: { repo: "../evil", number: 1 } });
