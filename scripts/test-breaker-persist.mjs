@@ -327,9 +327,7 @@ test('race A->B: A giữ lock, B acquire timeout; file của A còn nguyên iden
   });
 });
 
-test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXIST → fail-closed RECOVERY_REQUIRED', async () => {
-  // Finding 4: mock openSync thành công giả là sai — `wx` thật, write fail → file rỗng còn,
-  // retry openSync EEXIST → probe đọc rỗng → RECOVERY_REQUIRED. KHÔNG báo retry success.
+test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXIST → fail-closed', async () => {
   await withRoot(async (root) => {
     const lockPath = join(root, 'writefail.lock');
     _setFsOverride({ writeSync: () => { throw new Error('ENOSPC: disk full'); } });
@@ -388,7 +386,6 @@ test('releaseLock honor _fs override closeSync (mock fd=7 không đóng fd thậ
       closeSync: (fd) => { closedMock++; },
       unlinkSync: () => {},
       readFileSync: (p) => p === lockPath ? JSON.stringify({ pid: process.pid, nonce: 'real', createdAt: 0 }) : '',
-      renameSync: () => {},
     });
     try {
       const r = acquireLock(lockPath, 200);

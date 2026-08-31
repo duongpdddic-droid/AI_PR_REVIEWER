@@ -5,8 +5,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 
-// ---------- runtime root ----------
-// Env override cho test: BREAKER_RUNTIME_ROOT
+// ---------- runtime root (env override: BREAKER_RUNTIME_ROOT) ----------
 export function resolveRuntimeRoot() {
   return process.env.BREAKER_RUNTIME_ROOT || join(homedir(), '.ai-pr-reviewer');
 }
@@ -55,8 +54,8 @@ function _readLockOwner(lockPath) {
     return null;
   } catch { return null; }
 }
-// MVP: no automatic stale-lock deletion/recovery. Owner dead/unknown/corrupt → caller
-// nhận ok=false reason RECOVERY_REQUIRED, lock giữ nguyên; chỉ operator xóa sau xác minh.
+// MVP: no automatic stale-lock deletion/recovery. Owner dead/unknown/corrupt → ok=false
+// reason RECOVERY_REQUIRED, lock giữ nguyên; chỉ operator xóa sau xác minh thủ công.
 function _tryRecoverStaleLock(lockPath) {
   const owner = _readLockOwner(lockPath);
   if (!owner) return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner unreadable' };
@@ -66,8 +65,8 @@ function _tryRecoverStaleLock(lockPath) {
 
 // acquireLock(path, timeoutMs=5000) -> {ok, fd, owner, error}
 // openSync('wx') tạo lock exclusive; ghi owner QUA FD (writeSync). Ghi fail (throw/short
-// write) → closeSync fd, KHÔNG unlink pathname (file rỗng → contender thấy EEXIST
-// fail-closed). Lock giữ bởi PID khác (dead/alive/unknown) → fail-closed RECOVERY_REQUIRED.
+// write) → closeSync fd, KHÔNG unlink (file rỗng → contender thấy EEXIST fail-closed).
+// Lock giữ bởi PID khác (dead/alive/unknown) → fail-closed RECOVERY_REQUIRED.
 export function acquireLock(lockPath, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
@@ -92,7 +91,6 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
     } catch (err) {
       lastErr = err;
       if (err.code === 'EEXIST' || err.code === 'EEXIT') {
-        // No auto-recovery: chỉ inspect owner, không rename/unlink.
         const probe = _tryRecoverStaleLock(lockPath);
         if (probe.reason) { if (!firstReason) firstReason = probe.reason; }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
