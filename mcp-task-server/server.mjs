@@ -9,71 +9,23 @@
  * Chạy: node mcp-task-server/server.mjs
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateHandoff, canRequestReview, verifyHandoffIdentity, CONTRACT_VERSION, reportDigest } from "../scripts/review-handoff-contract.mjs";
-import { loadRegistry, DEFAULT_REGISTRY_PATH, scanForSecrets, scanForAbsolutePaths } from "../scripts/project-registry.mjs";
-
-const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+import { scanForSecrets, scanForAbsolutePaths } from "../scripts/project-registry.mjs";
+import { loadRegistryRepos, resolveCanonicalRegistryPath } from "./soc-registry-consumer.mjs";
 
 /**
- * GPT-REV-119: danh sách repo registered lấy từ Project Registry canonical
- * (machine-local `~/.ai-pr-reviewer/registry.json` — registry.projects[].repository),
- * KHÔNG dùng `.agent/config.json` như allowlist canonical độc lập.
+ * GPT-REV-123: danh sách repo registered đọc từ canonical Soc_brain #17 Project Registry
+ * (`~/.soc-brain/registry/projects.json` theo schema v1.0.0 hoặc env SOC_PROJECT_REGISTRY_PATH).
+ * Read-only consumer — KHÔNG writer/migration/project-creation.
  *
- * Bootstrap config (`.agent/config.json` `repo` + `targetRepos`) nếu còn tồn tại chỉ là
- * nguồn bootstrap: mọi repo khai trong config PHẢI có mặt trong registry — repo config
- * không nằm trong registry → config/registry MISMATCH → fail-closed (trả []).
- * Registry missing/unreadable/malformed → fail-closed ([]).
- *
- * Trả { ok, repos, errors }. Server dùng `ok===false` → HANDOFF_REGISTRY_UNAVAILABLE
- * TRƯỚC mọi mutation.
+ * Fail-closed: missing/malformed/unreadable/unsupported/split-brain → ok:false.
+ * Server dùng `ok===false` → HANDOFF_REGISTRY_UNAVAILABLE TRƯỚC mọi mutation.
+ * KHÔNG dùng `.agent/config.json` hoặc `~/.ai-pr-reviewer/registry.json` như canonical allowlist.
  */
-export function loadRegisteredRepos({ registryPath = DEFAULT_REGISTRY_PATH, configPath = null } = {}) {
-  const errors = [];
-  let registry;
-  try {
-    registry = loadRegistry({ registryPath });
-  } catch (err) {
-    return { ok: false, repos: [], errors: [`REGISTRY_UNREADABLE: ${err.message}`] };
-  }
-  if (!registry || typeof registry !== "object" || !Array.isArray(registry.projects)) {
-    return { ok: false, repos: [], errors: ["REGISTRY_MALFORMED: registry.projects phải là mảng"] };
-  }
-  const repos = [];
-  for (const p of registry.projects) {
-    if (p && typeof p.repository === "string" && p.repository.trim() && !repos.includes(p.repository.trim())) {
-      repos.push(p.repository.trim());
-    }
-  }
-  if (repos.length === 0) {
-    return { ok: false, repos: [], errors: ["REGISTRY_EMPTY: không có project nào đăng ký"] };
-  }
-  // Bootstrap config đối chiếu với registry: repo config không có trong registry → mismatch fail-closed.
-  const cfgPath = configPath ?? join(SERVER_DIR, "..", ".agent", "config.json");
-  if (existsSync(cfgPath)) {
-    let cfg = null;
-    try {
-      cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    } catch (err) {
-      return { ok: false, repos: [], errors: [`CONFIG_UNREADABLE: ${err.message}`] };
-    }
-    const cfgRepos = [];
-    if (typeof cfg?.repo === "string" && cfg.repo.trim()) cfgRepos.push(cfg.repo.trim());
-    for (const r of Array.isArray(cfg?.targetRepos) ? cfg.targetRepos : []) {
-      if (typeof r === "string" && r.trim() && !cfgRepos.includes(r.trim())) cfgRepos.push(r.trim());
-    }
-    const missing = cfgRepos.filter((r) => !repos.includes(r));
-    if (missing.length > 0) {
-      return {
-        ok: false,
-        repos: [],
-        errors: [`CONFIG_REGISTRY_MISMATCH: config khai ${missing.join(", ")} nhưng không có trong Project Registry → fail-closed`],
-      };
-    }
-  }
-  return { ok: true, repos, errors };
+export function loadRegisteredRepos({ registryPath = null, legacyPath = null } = {}) {
+  const resolved = registryPath ?? resolveCanonicalRegistryPath();
+  return loadRegistryRepos({ registryPath: resolved, legacyPath });
 }
 
 // buildReportComment — report canonical (GPT-REV-122): header bind contract version + exact HEAD

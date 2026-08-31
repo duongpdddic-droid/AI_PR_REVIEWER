@@ -321,8 +321,11 @@ Thiếu một điều kiện phải báo `IN PROGRESS`, `CHANGES REQUESTED` ho�
 - **Gate**: chỉ report `READY_FOR_REVIEW` mới qua `canRequestReview`. `task_handoff` (MCP) bắt buộc
   kèm `handoffReport`; thiếu → `HANDOFF_REPORT_REQUIRED`, không `READY_FOR_REVIEW` (kể cả
   `BLOCKED`/`PARTIAL_EVIDENCE`/invalid/exception) → `HANDOFF_PARTIAL_EVIDENCE`. Chặn fail-closed
-  trước mọi mutation. Registered repos lấy từ nguồn canonical (`.agent/config.json`
-  `repo`+`targetRepos`), KHÔNG dùng repo caller tự khai báo trong request.
+  trước mọi mutation. Registered repos đọc từ canonical Soc_brain #17 Project Registry
+  (`~/.soc-brain/registry/projects.json` theo schema v1.0.0, hoặc env `SOC_PROJECT_REGISTRY_PATH`).
+  Read-only consumer — không dùng `.agent/config.json` làm allowlist, không dùng legacy
+  `~/.ai-pr-reviewer/registry.json` làm canonical source. Fail-closed: missing/malformed/
+  unreadable/unsupported/split-brain → `HANDOFF_REGISTRY_UNAVAILABLE` trước mọi mutation.
 - **Short operator command**:
 
   > "Thực hiện tiếp và bàn giao theo canonical REVIEW HANDOFF CONTRACT."

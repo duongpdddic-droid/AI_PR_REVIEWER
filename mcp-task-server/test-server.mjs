@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs, loadRegisteredRepos } from "./server.mjs";
 import { sampleReport, verifyHandoffIdentity } from "../scripts/review-handoff-contract.mjs";
+import { computeRegistryDigest, SUPPORTED_REGISTRY_SCHEMA } from "./soc-registry-consumer.mjs";
 
 const REPO = "duongpdddic-droid/QLDA_DTXD";
 let passed = 0;
@@ -74,67 +75,118 @@ for (const bad of [{ state: "weird" }, { limit: 0 }, { limit: 2000 }, { limit: 1
   ok(threw, `buildListArgs chặn input sai ${JSON.stringify(bad)}`);
 }
 
-// GPT-REV-119: registered repos phải từ Project Registry canonical (machine-local registry),
-// độc lập request; đối chiếu .agent/config.json → mismatch fail-closed.
-const canonical = loadRegisteredRepos();
-ok(canonical.ok === true, "loadRegisteredRepos trả ok=true từ Project Registry canonical");
-ok(Array.isArray(canonical.repos) && canonical.repos.length >= 3, "registry chứa đủ các project đăng ký");
-ok(canonical.repos.includes("duongpdddic-droid/AI_PR_REVIEWER"), "registry chứa AI_PR_REVIEWER");
-ok(canonical.repos.includes("duongpdddic-droid/QLDA_DTXD"), "registry chứa QLDA_DTXD");
-ok(canonical.repos.includes("duongpdddic-droid/Soc_brain"), "registry chứa Soc_brain");
-
-// ---------------------------------------------------------------------------
-// 2c) GPT-REV-119 — canonical registry fail-closed (fixture registry)
-// ---------------------------------------------------------------------------
-console.log("[2c] GPT-REV-119 registry fail-closed tests");
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+// GPT-REV-123: registered repos phải đọc từ canonical Soc_brain #17 Project Registry
+// (schema v1.0.0) — consumer-only; KHÔNG dùng .agent/config.json hay legacy registry làm allowlist.
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const fxDir = mkdtempSync(path.join(tmpdir(), "mcp-reg-"));
 
-function fxRegistryPath(projects) {
+/** Tạo fixture canonical registry v1.0.0 (projects object keyed by projectId) + contentDigest đúng. */
+function fxRegistryPath(projectsObj, { digest = true, schema = SUPPORTED_REGISTRY_SCHEMA } = {}) {
   const p = path.join(fxDir, `reg-${Math.random().toString(36).slice(2)}.json`);
-  writeFileSync(p, JSON.stringify({ schemaVersion: "1.0", projects }), "utf8");
+  const data = {
+    $schemaVersion: schema,
+    revision: 1,
+    updatedAt: new Date().toISOString(),
+    projects: projectsObj,
+  };
+  if (digest) data.contentDigest = computeRegistryDigest(data);
+  writeFileSync(p, JSON.stringify(data, null, 2), "utf8");
   return p;
 }
 
+function fxProject(pid, repo, root) {
+  return {
+    projectId: pid,
+    canonicalRepository: repo,
+    canonicalRoot: root ?? path.join(tmpdir(), pid),
+    status: "active",
+    registeredAt: new Date().toISOString(),
+    capabilities: ["verify-adapter"],
+    worktreeRoots: [path.join(tmpdir(), pid, "worktree")],
+    workspaceId: `${pid}-main`,
+  };
+}
+
+try {
+  // Registry đầy đủ 3 repo → ok (consumer đọc canonical, legacyPath không tồn tại để bypass split-brain)
+  const full = fxRegistryPath({
+    "ai-pr-reviewer": fxProject("ai-pr-reviewer", "duongpdddic-droid/AI_PR_REVIEWER"),
+    "qlda-dtxd": fxProject("qlda-dtxd", "duongpdddic-droid/QLDA_DTXD"),
+    "soc-brain": fxProject("soc-brain", "duongpdddic-droid/Soc_brain"),
+  });
+  const rFull = loadRegisteredRepos({ registryPath: full, legacyPath: path.join(fxDir, "no-legacy.json") });
+  ok(rFull.ok === true && rFull.repos.length === 3, "canonical registry đầy đủ 3 repo → ok");
+  ok(rFull.repos.includes("duongpdddic-droid/AI_PR_REVIEWER"), "registry chứa AI_PR_REVIEWER");
+  ok(rFull.repos.includes("duongpdddic-droid/QLDA_DTXD"), "registry chứa QLDA_DTXD");
+  ok(rFull.repos.includes("duongpdddic-droid/Soc_brain"), "registry chứa Soc_brain");
+} finally {
+  // fxDir giữ tới cuối file — fxRegistryPath còn được [2c]/[2e]/[3] dùng.
+}
+
+// ---------------------------------------------------------------------------
+// 2c) GPT-REV-123 — canonical registry fail-closed (fixture canonical v1.0.0)
+// ---------------------------------------------------------------------------
+console.log("[2c] GPT-REV-123 registry fail-closed tests (canonical v1.0.0)");
+
+const negDir = mkdtempSync(path.join(tmpdir(), "mcp-reg-neg-"));
+
+function noLegacy() { return path.join(negDir, "no-legacy.json"); }
+
 try {
   // Registry đầy đủ 3 repo → ok
-  const full = fxRegistryPath([
-    { repository: "duongpdddic-droid/AI_PR_REVIEWER" },
-    { repository: "duongpdddic-droid/QLDA_DTXD" },
-    { repository: "duongpdddic-droid/Soc_brain" },
-  ]);
-  const rFull = loadRegisteredRepos({ registryPath: full });
+  const full = fxRegistryPath({
+    "ai-pr-reviewer": fxProject("ai-pr-reviewer", "duongpdddic-droid/AI_PR_REVIEWER"),
+    "qlda-dtxd": fxProject("qlda-dtxd", "duongpdddic-droid/QLDA_DTXD"),
+    "soc-brain": fxProject("soc-brain", "duongpdddic-droid/Soc_brain"),
+  });
+  const rFull = loadRegisteredRepos({ registryPath: full, legacyPath: noLegacy() });
   ok(rFull.ok === true && rFull.repos.length === 3, "registry đầy đủ 3 repo → ok");
 
-  // Registry missing (file không tồn tại) → fail-closed REGISTRY_EMPTY (loadRegistry trả projects rỗng)
-  const rMissing = loadRegisteredRepos({ registryPath: path.join(fxDir, "missing.json") });
-  ok(rMissing.ok === false && rMissing.errors.some((e) => e.startsWith("REGISTRY_EMPTY")),
-    "registry missing → fail-closed REGISTRY_EMPTY");
+  // Registry missing → REGISTRY_MISSING fail-closed
+  const rMissing = loadRegisteredRepos({ registryPath: path.join(negDir, "missing.json"), legacyPath: noLegacy() });
+  ok(rMissing.ok === false && rMissing.errors.some((e) => e.startsWith("REGISTRY_MISSING")),
+    "registry missing → fail-closed REGISTRY_MISSING");
 
-  // Registry malformed → fail-closed REGISTRY_UNREADABLE
-  const badPath = path.join(fxDir, "malformed.json");
-  writeFileSync(badPath, "{ not valid json", "utf8");
-  const rBad = loadRegisteredRepos({ registryPath: badPath });
-  ok(rBad.ok === false && rBad.errors.some((e) => e.startsWith("REGISTRY_UNREADABLE")),
-    "registry malformed → fail-closed REGISTRY_UNREADABLE");
+  // Registry malformed JSON → REGISTRY_MALFORMED fail-closed
+  const badP = path.join(negDir, "malformed.json");
+  writeFileSync(badP, "{ not valid json", "utf8");
+  const rBad = loadRegisteredRepos({ registryPath: badP, legacyPath: noLegacy() });
+  ok(rBad.ok === false && rBad.errors.some((e) => e.startsWith("REGISTRY_MALFORMED")),
+    "registry malformed → fail-closed REGISTRY_MALFORMED");
 
-  // Registry rỗng → REGISTRY_EMPTY fail-closed
-  const empty = fxRegistryPath([]);
-  const rEmpty = loadRegisteredRepos({ registryPath: empty });
+  // Registry rỗng (projects object rỗng) → REGISTRY_EMPTY fail-closed
+  const empty = fxRegistryPath({}, { digest: true });
+  const rEmpty = loadRegisteredRepos({ registryPath: empty, legacyPath: noLegacy() });
   ok(rEmpty.ok === false && rEmpty.errors.some((e) => e.startsWith("REGISTRY_EMPTY")),
     "registry rỗng → fail-closed REGISTRY_EMPTY");
 
-  // Config khai repo không có trong registry → CONFIG_REGISTRY_MISMATCH fail-closed
-  const cfgPath = path.join(fxDir, "config.json");
-  writeFileSync(cfgPath, JSON.stringify({ repo: "evil/repo" }), "utf8");
-  const rMismatch = loadRegisteredRepos({ registryPath: full, configPath: cfgPath });
-  ok(rMismatch.ok === false && rMismatch.errors.some((e) => e.startsWith("CONFIG_REGISTRY_MISMATCH")),
-    "config khai repo không có trong registry → fail-closed CONFIG_REGISTRY_MISMATCH");
+  // Unsupported schema version → REGISTRY_UNSUPPORTED_SCHEMA fail-closed
+  const badSchema = fxRegistryPath({}, { schema: "0.9", digest: false });
+  const rSchema = loadRegisteredRepos({ registryPath: badSchema, legacyPath: noLegacy() });
+  ok(rSchema.ok === false && rSchema.errors.some((e) => e.startsWith("REGISTRY_UNSUPPORTED_SCHEMA")),
+    "unsupported schema version → fail-closed REGISTRY_UNSUPPORTED_SCHEMA");
+
+  // Digest mismatch → REGISTRY_DIGEST_MISMATCH fail-closed
+  const badDigest = fxRegistryPath({}, { digest: true });
+  const raw = JSON.parse(readFileSync(badDigest, "utf8"));
+  raw.contentDigest = "0000000000000000000000000000000000000000000000000000000000000000";
+  writeFileSync(badDigest, JSON.stringify(raw), "utf8");
+  const rDigest = loadRegisteredRepos({ registryPath: badDigest, legacyPath: noLegacy() });
+  ok(rDigest.ok === false && rDigest.errors.some((e) => e.startsWith("REGISTRY_DIGEST_MISMATCH")),
+    "digest mismatch → fail-closed REGISTRY_DIGEST_MISMATCH");
+
+  // Split-brain: legacy active + canonical missing → REGISTRY_SPLIT_BRAIN
+  // Tạo legacy file active (có projects) cùng thư mục với canonical missing
+  const legacyActiveP = path.join(negDir, "legacy-active.json");
+  writeFileSync(legacyActiveP, JSON.stringify({ schemaVersion: "1.0", projects: [{ repository: "old/repo" }] }), "utf8");
+  const rSplit1 = loadRegisteredRepos({ registryPath: path.join(negDir, "no-canonical.json"), legacyPath: legacyActiveP });
+  ok(rSplit1.ok === false && rSplit1.errors.some((e) => e.startsWith("REGISTRY_SPLIT_BRAIN")),
+    "legacy active + canonical missing → REGISTRY_SPLIT_BRAIN");
 } finally {
-  rmSync(fxDir, { recursive: true, force: true });
+  rmSync(negDir, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -192,52 +244,56 @@ ok(noPr.ok === false && noPr.errors.some((e) => e.code === "IDENTITY_PR_MISMATCH
   "thiếu pr → IDENTITY_PR_MISMATCH fail-closed");
 
 // ---------------------------------------------------------------------------
+// 2e) GPT-REV-123 — canonical v1.0.0: consumer pick-up (fixture, không registerProject)
 // ---------------------------------------------------------------------------
-// 2e) GPT-REV-122 — 1 canonical registry; trusted provisioning → consumer pick-up; read-only
-// ---------------------------------------------------------------------------
-console.log("[2e] GPT-REV-122 single canonical registry + provisioning pick-up");
-import { readFileSync } from "node:fs";
-import { registerProject, loadRegistry as registryLoad, saveRegistry } from "../scripts/project-registry.mjs";
+console.log("[2e] GPT-REV-123 canonical registry consumer pick-up (fixture v1.0.0)");
 import { buildReportComment } from "./server.mjs";
 import { reportDigest } from "../scripts/review-handoff-contract.mjs";
 
-const provDir = mkdtempSync(path.join(tmpdir(), "mcp-prov-"));
+const pickDir = mkdtempSync(path.join(tmpdir(), "mcp-pick-"));
 try {
-  // Registry rỗng, sau đó provisioning thêm Soc_brain (mô phỏng Issue #34).
-  const regPath = path.join(provDir, "registry.json");
-  saveRegistry({ registry: { schemaVersion: "1.0", projects: [] }, registryPath: regPath });
-  const manifest = {
-    schemaVersion: "1.0",
-    projectId: "soc-brain",
-    repository: "duongpdddic-droid/Soc_brain",
-    projectType: "control-plane",
-    workspace: { workspaceId: "soc-brain-main" },
-    policy: { version: "2026-08-23.7" },
-    verify: { adapter: "pnpm-verify" },
-    deploy: { capability: false, humanAuthorization: true },
-    telegram: { route: "dm-boss" },
-    memory: { provider: "claude-mem", namespace: "soc-brain" },
-    allowedOverrides: [],
+  // Tạo fixture canonical registry v1.0.0 với Soc_brain repository
+  const pickPath = path.join(pickDir, "projects.json");
+  const pickData = {
+    $schemaVersion: SUPPORTED_REGISTRY_SCHEMA,
+    revision: 1,
+    updatedAt: new Date().toISOString(),
+    projects: {
+      "soc-brain": fxProject("soc-brain", "duongpdddic-droid/Soc_brain"),
+    },
   };
-  const rc = registerProject({
-    manifest,
-    registry: registryLoad({ registryPath: regPath }),
-    registryPath: regPath,
-    actualRemote: "https://github.com/duongpdddic-droid/Soc_brain.git",
-  });
-  ok(rc.ok === true, "registerProject (trusted provisioning) ghi Soc_brain vào canonical registry");
-  // Consumer đọc từ CÙNG file registry → nhận repo mới (không cần sửa static targetRepos)
-  const noConfig = path.join(provDir, "no-config.json");
-  const consumed = loadRegisteredRepos({ registryPath: regPath, configPath: noConfig });
+  pickData.contentDigest = computeRegistryDigest(pickData);
+  writeFileSync(pickPath, JSON.stringify(pickData, null, 2), "utf8");
+
+  // Consumer đọc canonical registry → nhận Soc_brain repo
+  const consumed = loadRegisteredRepos({ registryPath: pickPath, legacyPath: path.join(pickDir, "no-legacy.json") });
   ok(consumed.ok === true && consumed.repos.includes("duongpdddic-droid/Soc_brain"),
-    "consumer nhận repo mới từ cùng registry, không cần sửa static targetRepos");
+    "consumer nhận Soc_brain từ fixture canonical v1.0.0");
+
+  // Mô phỏng provisioning pick-up: tạo fixture mới với QLDA_DTXD thêm vào
+  const pickData2 = {
+    $schemaVersion: SUPPORTED_REGISTRY_SCHEMA,
+    revision: 2,
+    updatedAt: new Date().toISOString(),
+    projects: {
+      "soc-brain": fxProject("soc-brain", "duongpdddic-droid/Soc_brain"),
+      "qlda-dtxd": fxProject("qlda-dtxd", "duongpdddic-droid/QLDA_DTXD"),
+    },
+  };
+  pickData2.contentDigest = computeRegistryDigest(pickData2);
+  writeFileSync(pickPath, JSON.stringify(pickData2, null, 2), "utf8");
+
+  const consumed2 = loadRegisteredRepos({ registryPath: pickPath, legacyPath: path.join(pickDir, "no-legacy.json") });
+  ok(consumed2.ok === true && consumed2.repos.includes("duongpdddic-droid/QLDA_DTXD"),
+    "consumer pick-up QLDA_DTXD từ fixture cập nhật (không cần registerProject)");
+
   // Consumer không tự đăng ký repo (read-only).
-  const before = readFileSync(regPath, "utf8");
-  loadRegisteredRepos({ registryPath: regPath, configPath: noConfig });
-  const after = readFileSync(regPath, "utf8");
+  const before = readFileSync(pickPath, "utf8");
+  loadRegisteredRepos({ registryPath: pickPath, legacyPath: path.join(pickDir, "no-legacy.json") });
+  const after = readFileSync(pickPath, "utf8");
   ok(before === after, "consumer loadRegisteredRepos read-only — KHÔNG tự đăng ký repo");
 } finally {
-  rmSync(provDir, { recursive: true, force: true });
+  rmSync(pickDir, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -258,8 +314,25 @@ ok(body.includes('"identity"') && body.includes('"terminalStatus"'),
 // 3) Protocol e2e — spawn server thật qua stdio
 // ---------------------------------------------------------------------------
 console.log("[3] Protocol e2e (stdio NDJSON)");
+
+// Tạo fixture canonical registry cho server (task_handoff gọi loadRegisteredRepos default → env SOC_PROJECT_REGISTRY_PATH)
+const e2eDir = mkdtempSync(path.join(tmpdir(), "mcp-e2e-"));
+const e2eRegPath = path.join(e2eDir, "projects.json");
+const e2eRegData = {
+  $schemaVersion: SUPPORTED_REGISTRY_SCHEMA,
+  revision: 1,
+  updatedAt: new Date().toISOString(),
+  projects: {
+    "qlda-dtxd": fxProject("qlda-dtxd", REPO),
+    "ai-pr-reviewer": fxProject("ai-pr-reviewer", "duongpdddic-droid/AI_PR_REVIEWER"),
+    "soc-brain": fxProject("soc-brain", "duongpdddic-droid/Soc_brain"),
+  },
+};
+e2eRegData.contentDigest = computeRegistryDigest(e2eRegData);
+writeFileSync(e2eRegPath, JSON.stringify(e2eRegData, null, 2), "utf8");
+
 const child = spawn(process.execPath, [fileURLToPath(new URL("./server.mjs", import.meta.url))], {
-  env: { ...process.env, MCP_TASK_REPOS: REPO },
+  env: { ...process.env, MCP_TASK_REPOS: REPO, SOC_PROJECT_REGISTRY_PATH: e2eRegPath },
   stdio: ["pipe", "pipe", "pipe"],
 });
 let lineBuf = "";
@@ -436,6 +509,8 @@ try {
 } finally {
   child.stdin.end();
   child.kill();
+  rmSync(e2eDir, { recursive: true, force: true });
+  rmSync(fxDir, { recursive: true, force: true });
 }
 
 console.log(`\nTổng: ${passed} assertions PASS`);
