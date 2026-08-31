@@ -1,5 +1,4 @@
-// breaker-persist.mjs — persist circuit breaker state across CLI invocations (Issue #25).
-// Runtime root ngoài repo, atomic write + file lock. YAGNI: JSON + rename + exclusive lock.
+// breaker-persist.mjs — persist circuit breaker state (Issue #25). YAGNI: JSON + rename + exclusive lock.
 
 import { readFileSync, writeFileSync, writeSync, mkdirSync, existsSync, renameSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -7,7 +6,6 @@ import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 
 // ---------- runtime root ----------
-
 // Env override cho test: BREAKER_RUNTIME_ROOT
 export function resolveRuntimeRoot() {
   return process.env.BREAKER_RUNTIME_ROOT || join(homedir(), '.ai-pr-reviewer');
@@ -36,11 +34,8 @@ export function readJsonSafe(filePath) {
 }
 
 
-// ---------- file lock (exclusive via 'wx' + owner identity) ----------
-
-// Lock file = JSON owner {pid, nonce, createdAt}. release chỉ xóa khi identity còn
-// khớp. PID check 3-state: 'alive'|'dead'|'unknown' — chỉ 'dead' mới recover.
-// Test seam _setFsOverride cho phép inject mock fs (cover race + write-fail).
+// ---------- file lock ----------
+// Lock file = JSON {pid, nonce, createdAt}. Test seam via _setFsOverride.
 let _fsOverride = null;
 export function _setFsOverride(o) { _fsOverride = o; }
 const _fs = (name) => (_fsOverride && _fsOverride[name]) || { openSync, writeFileSync, writeSync, renameSync, unlinkSync, readFileSync, closeSync }[name];
@@ -61,30 +56,33 @@ function _readLockOwner(lockPath) {
     return null;
   } catch { return null; }
 }
-// Atomic recovery-claim: rename lock → lock.recover-<ts> (atomic trên cùng FS, không
-// TOCTOU). Identity lệch → restore + fail-closed; rename fail → fail-closed.
+// MVP: no automatic stale-lock deletion/recovery. Trên owner dead/unknown/corrupt,
+// caller nhận ok=false với reason RECOVERY_REQUIRED và lock file giữ nguyên. Chỉ
+// operator mới có quyền xóa sau khi xác minh thủ công — tránh TOCTOU rename path
+// có thể nuốt mất lock của contender khác.
 function _tryRecoverStaleLock(lockPath) {
+  // Reading-only check: chỉ xác minh owner status, KHÔNG rename/unlink.
   const owner = _readLockOwner(lockPath);
-  if (!owner || _pidAlive(owner.pid) !== 'dead') return false;
-  const quarantine = `${lockPath}.recover-${Date.now()}`;
-  try { _fs('renameSync')(lockPath, quarantine); } catch { return false; }
-  const moved = _readLockOwner(quarantine);
-  if (!moved || moved.pid !== owner.pid || moved.nonce !== owner.nonce) {
-    try { _fs('renameSync')(quarantine, lockPath); } catch { /* caller sẽ thấy EEXIST */ }
-    return false;
-  }
-  return true;
+  if (!owner) return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner unreadable' };
+  if (_pidAlive(owner.pid) === 'dead') return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner PID is dead' };
+  return { recovered: false, reason: 'RECOVERY_REQUIRED: lock held by another owner' };
 }
 
 // acquireLock(path, timeoutMs=5000) -> {ok, fd, owner, error}
 // openSync('wx') tạo lock exclusive; ghi owner QUA FD (writeSync), kiểm tra bytes.
-// Ghi fail (throw hoặc short write) → closeSync+unlinkSync đúng lock của mình, retry.
+// Ghi fail (throw hoặc short write) → closeSync fd (KHÔNG unlink pathname — tránh
+// TOCTOU nuốt lock của contender khác; file rỗng → caller khác nhìn thấy EEXIST
+// fail-closed). Lock đang giữ bởi PID khác (dead/alive/unknown) → fail-closed với
+// reason RECOVERY_REQUIRED; KHÔNG tự rename/unlink.
 export function acquireLock(lockPath, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
+  let firstReason = null;
   const myNonce = randomUUID();
   const fs = _fs;
-  const cleanup = (fd) => { try { fs('closeSync')(fd); } catch { /* ignore */ } try { fs('unlinkSync')(lockPath); } catch { /* wx owner */ } };
+  // Write-fail cleanup: chỉ close fd, KHÔNG unlink pathname (review #5060996893:
+  // pathname có thể đã bị contender khác thay thế; auto-unlink nuốt lock của họ).
+  const cleanup = (fd) => { try { fs('closeSync')(fd); } catch { /* ignore */ } };
   while (Date.now() < deadline) {
     try {
       const fd = fs('openSync')(lockPath, 'wx');
@@ -97,29 +95,43 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
     } catch (err) {
       lastErr = err;
       if (err.code === 'EEXIST' || err.code === 'EEXIT') {
-        if (_tryRecoverStaleLock(lockPath)) continue;
+        // No auto-recovery: chỉ inspect owner, không rename/unlink.
+        const probe = _tryRecoverStaleLock(lockPath);
+        if (probe.reason) { if (!firstReason) firstReason = probe.reason; }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
         continue;
       }
       return { ok: false, fd: null, owner: null, error: `lock acquire error: ${err.message}` };
     }
   }
-  return { ok: false, fd: null, owner: null, error: `lock timeout after ${timeoutMs}ms: ${lastErr ? lastErr.message : 'unknown'}` };
+  const reason = firstReason || (lastErr ? lastErr.message : 'unknown');
+  return { ok: false, fd: null, owner: null, error: `lock timeout after ${timeoutMs}ms: ${reason}` };
 }
 
-// releaseLock: chỉ xóa lock khi expectedOwner được truyền VÀ identity còn khớp.
-// Thiếu owner / mismatch → KHÔNG unlink (fail-closed).
-// [test-seam] dùng _fs lookup để honor _setFsOverride (mock fd = 7 không đóng fd thật).
+// releaseLock: TOCTOU-safe unlink. Pattern rename→verify→decide:
+//   1. close fd (đã ghi xong).
+//   2. rename lockPath → tmp (atomic move trên cùng FS; lockPath trống → không
+//      contender nào "match pathname đã thay").
+//   3. read tmp; nếu identity == expectedOwner → unlink tmp + return true.
+//   4. nếu identity lệch/null (corrupt/replacement) → rename tmp về lockPath
+//      + return false (giữ lock nguyên vẹn cho owner thật).
+// [test-seam] dùng _fs lookup để honor _setFsOverride.
 export function releaseLock(fd, lockPath, expectedOwner) {
   try { _fs('closeSync')(fd); } catch { /* ignore */ }
   if (!expectedOwner || typeof expectedOwner !== 'object'
       || !Number.isInteger(expectedOwner.pid) || typeof expectedOwner.nonce !== 'string') {
     return false;
   }
-  const current = _readLockOwner(lockPath);
+  const tmp = `${lockPath}.release-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try { _fs('renameSync')(lockPath, tmp); }
+  catch { return false; } // lock đã biến mất / không rename được → fail-closed.
+  const current = _readLockOwner(tmp);
   if (current && current.pid === expectedOwner.pid && current.nonce === expectedOwner.nonce) {
-    try { _fs('unlinkSync')(lockPath); return true; } catch { return false; }
+    try { _fs('unlinkSync')(tmp); return true; }
+    catch { /* unlink fail: file rỗng/đã move đi chỗ khác; lockPath đã trống, return true */ return true; }
   }
+  // Identity lệch / corrupt / replacement: restore lockPath cho owner thật.
+  try { _fs('renameSync')(tmp, lockPath); } catch { /* mất file — caller biết */ }
   return false;
 }
 

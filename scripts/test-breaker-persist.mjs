@@ -2,8 +2,8 @@
 // test-breaker-persist.mjs — persist circuit breaker (Finding 1+2+3). Exit 0=PASS.
 
 import assert from 'node:assert/strict';
-import { spawnSync, spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -27,6 +27,14 @@ if (process.argv[2] === '--probe-child') {
   const out = claimHalfOpenProbe(ns, tool, cooldown, now);
   process.exit(out.claimed ? 0 : 1);
 }
+// --acquire-child <lockPath>: acquire + hold 500ms + release, stdout JSON result
+if (process.argv[2] === '--acquire-child') {
+  const lockPath = process.argv[3];
+  const r = acquireLock(lockPath, 250);
+  process.stdout.write(JSON.stringify({ ok: r.ok, nonce: r.owner && r.owner.nonce, error: r.error || null }) + '\n');
+  if (r.ok) { await new Promise((res) => setTimeout(res, 500)); releaseLock(r.fd, lockPath, r.owner); }
+  process.exit(0);
+}
 
 function makeRoot(prefix = 'breaker-persist-') {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -39,25 +47,20 @@ async function withRoot(fn, prefix) {
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-test('atomicWriteJson + readJsonSafe round-trip', async () => {
+test('atomicWriteJson + readJsonSafe round-trip; file thiếu/corrupt -> null', async () => {
   await withRoot(async (root) => {
     const f = join(root, 'x.json');
     atomicWriteJson(f, { ok: true, tools: { t: { state: 'OPEN' } } });
     const d = readJsonSafe(f);
     assert.equal(d.ok, true);
     assert.equal(d.tools.t.state, 'OPEN');
-  });
-});
-
-test('readJsonSafe file thiếu/corrupt -> null', async () => {
-  await withRoot(async (root) => {
     assert.equal(readJsonSafe(join(root, 'missing.json')), null);
     writeFileSync(join(root, 'bad.json'), '{not-json', 'utf8');
     assert.equal(readJsonSafe(join(root, 'bad.json')), null);
   });
 });
 
-test('loadBreaker file corrupt -> ok=false, KHÔNG reset thành default fresh', async () => {
+test('loadBreaker corrupt / missing ok flag -> ok=false fail-closed', async () => {
   await withRoot(async (root) => {
     const f = breakerFilePath('ns-corrupt');
     writeFileSync(f, '{not-json', 'utf8');
@@ -67,16 +70,11 @@ test('loadBreaker file corrupt -> ok=false, KHÔNG reset thành default fresh', 
     assert.ok(r.reason && typeof r.reason === 'string', 'phải có reason');
     const claim = claimHalfOpenProbe('ns-corrupt', 'tool', 1000, 5000);
     assert.equal(claim.claimed, false);
-  });
-});
-
-test('loadBreaker file missing ok flag -> ok=false', async () => {
-  await withRoot(async (root) => {
-    const f = breakerFilePath('ns-no-ok');
-    writeFileSync(f, JSON.stringify({ threshold: 3, cooldownMs: 1000, tools: {} }), 'utf8');
-    const r = loadBreaker('ns-no-ok');
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /ok=true/);
+    const f2 = breakerFilePath('ns-no-ok');
+    writeFileSync(f2, JSON.stringify({ threshold: 3, cooldownMs: 1000, tools: {} }), 'utf8');
+    const r2 = loadBreaker('ns-no-ok');
+    assert.equal(r2.ok, false);
+    assert.match(r2.reason, /ok=true/);
   });
 });
 
@@ -91,6 +89,7 @@ test('buildBreakerNamespace -> breakerFilePath: a/b vs a_b khác file (raw hash 
     assert.match(f1, /breaker-[A-Za-z0-9_.-]+\.json$/);
     assert.match(f2, /breaker-[A-Za-z0-9_.-]+\.json$/);
     assert.equal(buildBreakerNamespace('a/b', 'x'), buildBreakerNamespace('a/b', 'x'), 'deterministic');
+    assert.match(buildBreakerNamespace('o/r', 'feat/x:y'), /^o_r::feat_x_y::[0-9a-f]{6}$/);
   });
 });
 
@@ -141,33 +140,22 @@ test('claimHalfOpenProbe: gặp corrupt state (shape invalid) -> ok=false', asyn
   });
 });
 
-test('acquireLock exclusive: lần 2 khi đang giữ -> timeout/fail', async () => {
+test('acquireLock: exclusive (lần 2 timeout), ghi owner record {pid, nonce}', async () => {
   await withRoot(async (root) => {
     const lockPath = join(root, 'a.lock');
     const first = acquireLock(lockPath, 2000);
     assert.equal(first.ok, true);
+    assert.equal(first.owner.pid, process.pid);
+    assert.ok(typeof first.owner.nonce === 'string' && first.owner.nonce.length > 0);
+    const onDisk = JSON.parse(readFileSync(lockPath, 'utf8'));
+    assert.equal(onDisk.pid, process.pid);
+    assert.equal(onDisk.nonce, first.owner.nonce);
     const second = acquireLock(lockPath, 300);
     assert.equal(second.ok, false);
-
     releaseLock(first.fd, lockPath, first.owner);
     const third = acquireLock(lockPath, 500);
     assert.equal(third.ok, true);
     releaseLock(third.fd, lockPath, third.owner);
-  });
-});
-
-test('acquireLock ghi owner record {pid, nonce} vào lock file', async () => {
-  await withRoot(async (root) => {
-    const lockPath = join(root, 'owner.lock');
-    const r = acquireLock(lockPath, 1000);
-    assert.equal(r.ok, true);
-    assert.ok(r.owner, 'phải trả owner');
-    assert.equal(r.owner.pid, process.pid);
-    assert.ok(typeof r.owner.nonce === 'string' && r.owner.nonce.length > 0);
-    const onDisk = JSON.parse(readFileSync(lockPath, 'utf8'));
-    assert.equal(onDisk.pid, process.pid);
-    assert.equal(onDisk.nonce, r.owner.nonce);
-    releaseLock(r.fd, lockPath, r.owner);
   });
 });
 
@@ -192,64 +180,43 @@ test('releaseLock: identity match xóa file, mismatch/thiếu/sai shape giữ ng
   });
 });
 
-test('recovery: lock orphan (PID chết) -> acquireLock tự recover và thành công', async () => {
+test('recovery fail-closed: orphan (RECOVERY_REQUIRED), alive/corrupt (timeout) — KHÔNG tự xóa', async () => {
   await withRoot(async (root) => {
-    const lockPath = join(root, 'orphan.lock');
-
-    const fakeDeadPid = 999_999_999;
-    writeFileSync(lockPath, JSON.stringify({ pid: fakeDeadPid, nonce: 'old', createdAt: 0 }), 'utf8');
-    const r = acquireLock(lockPath, 2000);
-    assert.equal(r.ok, true, 'acquireLock phải recover orphan lock');
-    assert.equal(r.owner.pid, process.pid);
-
+    const specs = [
+      { name: 'orphan.lock', payload: JSON.stringify({ pid: 999_999_999, nonce: 'old', createdAt: 0 }), match: /RECOVERY_REQUIRED/ },
+      { name: 'alive.lock', payload: JSON.stringify({ pid: process.pid, nonce: 'stale-self', createdAt: 0 }), match: /timeout/ },
+      { name: 'corrupt.lock', payload: 'not-json-at-all', match: /timeout/ },
+    ];
+    for (const s of specs) {
+      const lockPath = join(root, s.name);
+      writeFileSync(lockPath, s.payload, 'utf8');
+      const r = acquireLock(lockPath, 200);
+      assert.equal(r.ok, false, `${s.name} → fail-closed`);
+      assert.match(r.error, s.match);
+      assert.ok(existsSync(lockPath), `${s.name} không bị xóa`);
+    }
     const list = readdirSync(root);
-    const hasQuarantine = list.some((f) => f.startsWith('orphan.lock.recover-'));
-    assert.ok(hasQuarantine, 'recovery phải quarantine lock cũ sang .recover-<ts>');
-    releaseLock(r.fd, lockPath, r.owner);
+    assert.ok(!list.some((f) => f.startsWith('orphan.lock.recover-')), 'no auto-delete quarantine');
   });
 });
 
-test('recovery: lock còn owner PID sống -> acquireLock timeout, KHÔNG xóa nhầm', async () => {
+test('interleaving thật: 2 child process claim đồng thời → đúng 1 thắng', async () => {
   await withRoot(async (root) => {
-    const lockPath = join(root, 'alive.lock');
-
-    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, nonce: 'stale-self', createdAt: 0 }), 'utf8');
-    const r = acquireLock(lockPath, 300);
-    assert.equal(r.ok, false, 'PID còn sống → fail-closed (timeout)');
-    assert.match(r.error, /timeout/);
-    
-    const onDisk = JSON.parse(readFileSync(lockPath, 'utf8'));
-    assert.equal(onDisk.nonce, 'stale-self', 'file không bị xóa nhầm');
-  });
-});
-
-test('recovery: lock file corrupt (không parse được) -> fail-closed, KHÔNG xóa', async () => {
-  await withRoot(async (root) => {
-    const lockPath = join(root, 'corrupt.lock');
-    writeFileSync(lockPath, 'not-json-at-all', 'utf8');
-    const r = acquireLock(lockPath, 300);
-    assert.equal(r.ok, false, 'corrupt owner → không được tự xóa → timeout');
-    assert.ok(existsSync(lockPath), 'file corrupt vẫn còn');
-  });
-});
-
-test('recovery: re-read race (identity swap) -> fail-closed, lock B còn nguyên', async () => {
-  // Simulate writer khác ghi đè identity B giữa read+rename: read A stale, rename quarantine, verify B → identity lệch → restore + fail-closed. File gốc = B.
-  await withRoot(async (root) => {
-    const lockPath = join(root, 'race.lock');
-    const pid = 999_999_998;
-    writeFileSync(lockPath, JSON.stringify({ pid, nonce: 'B', createdAt: 0 }), 'utf8');
-    _setFsOverride({
-      openSync: (p, flag) => { if (flag === 'wx') { const e = new Error('exists'); e.code = 'EEXIST'; throw e; } return 7; },
-      readFileSync: (p) => p === lockPath ? JSON.stringify({ pid, nonce: 'A', createdAt: 0 }) : p.startsWith(lockPath + '.recover-') ? JSON.stringify({ pid, nonce: 'B', createdAt: 0 }) : '',
-      renameSync: () => {}, unlinkSync: () => {}, closeSync: () => {}, writeSync: () => 0,
+    const lockPath = join(root, 'inter.lock');
+    const child = (env) => new Promise((resolve) => {
+      const c = spawn(process.execPath, [process.argv[1], '--acquire-child', lockPath],
+        { env: { ...process.env, BREAKER_RUNTIME_ROOT: root, ...(env || {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      c.stdout.on('data', (d) => { out += d.toString(); });
+      c.on('close', () => resolve(JSON.parse(out.trim())));
+      c.on('error', () => resolve({ ok: false, error: 'spawn_fail' }));
     });
-    try {
-      const r = acquireLock(lockPath, 250);
-      assert.equal(r.ok, false, 'recovery fail-closed khi identity đổi');
-      assert.ok(existsSync(lockPath), 'lock gốc còn nguyên');
-      assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).nonce, 'B', 'identity B giữ nguyên');
-    } finally { _setFsOverride(null); }
+    const [a, b] = await Promise.all([child(), child()]);
+    const winners = [a, b].filter((o) => o.ok);
+    assert.equal(winners.length, 1, 'đúng 1 child acquire được');
+    const loser = [a, b].find((o) => !o.ok);
+    assert.ok(loser, '1 child thua');
+    assert.match(loser.error || '', /timeout|RECOVERY_REQUIRED/);
   });
 });
 
@@ -276,17 +243,12 @@ test('recovery: PID không xác minh được (unknown) -> KHÔNG xóa lock', as
   });
 });
 
-test('withFileLock chạy fn + tự unlock (gọi lại được)', async () => {
+test('withFileLock tự unlock; loadBreaker default + saveBreaker round-trip', async () => {
   await withRoot(async (root) => {
     let ran = 0;
     withFileLock('ns-lock', () => { ran += 1; return { ok: true }; });
     withFileLock('ns-lock', () => { ran += 1; return { ok: true }; });
     assert.equal(ran, 2);
-  });
-});
-
-test('loadBreaker mới -> default; saveBreaker + loadBreaker round-trip', async () => {
-  await withRoot(async (root) => {
     const reg0 = loadBreaker('proj::task');
     assert.equal(reg0.ok, true);
     assert.equal(reg0.threshold, 3);
@@ -295,13 +257,6 @@ test('loadBreaker mới -> default; saveBreaker + loadBreaker round-trip', async
     saveBreaker('proj::task', reg0);
     assert.equal(loadBreaker('proj::task').tools.t.state, 'OPEN');
   });
-});
-
-test('buildBreakerNamespace sanitize + raw hash, deterministic', () => {
-  assert.match(buildBreakerNamespace('o/r', 'feat/x:y'), /^o_r::feat_x_y::[0-9a-f]{6}$/);
-  const ns = buildBreakerNamespace('a', 'b');
-  assert.match(ns, /^a::b::[0-9a-f]{6}$/);
-  assert.equal(buildBreakerNamespace('a', 'b'), ns, 'deterministic');
 });
 
 test('claimHalfOpenProbe persist: OPEN + cooldown elapsed -> claimed HALF_OPEN; còn cooldown -> false', async () => {
@@ -371,13 +326,17 @@ test('race A->B: A giữ lock, B acquire timeout; file của A còn nguyên iden
   });
 });
 
-test('acquireLock ghi owner record fail -> closeSync+unlink+continue, KHÔNG return ok=true', async () => {
+test('acquireLock ghi owner record fail -> chỉ close fd, KHÔNG unlink pathname', async () => {
+  // Review #5060996893: write-fail cleanup KHÔNG unlink pathname (TOCTOU nuốt lock khác).
   await withRoot(async (root) => {
     const lockPath = join(root, 'writefail.lock');
-    let unlinked = 0, closed = 0, writes = 0;
+    let unlinked = 0, closed = 0, writes = 0, opens = 0;
     _setFsOverride({
-      openSync: () => 7, readFileSync: () => '', renameSync: () => {},
-      closeSync: () => { closed++; }, unlinkSync: () => { unlinked++; },
+      openSync: (p, flag) => { opens++; return 7; },
+      readFileSync: () => '',
+      renameSync: () => {},
+      closeSync: () => { closed++; },
+      unlinkSync: () => { unlinked++; },
       writeSync: (fd, buf, off, len) => {
         writes++;
         if (writes === 1) throw new Error('disk full');
@@ -385,12 +344,13 @@ test('acquireLock ghi owner record fail -> closeSync+unlink+continue, KHÔNG ret
       },
     });
     try {
-      // writeSync throw 1 lần → cleanup → retry → OK. Verify cleanup đúng 1 lần.
+      // writeSync throw 1 lần → cleanup (close) → retry → OK. Verify KHÔNG unlink.
       const r = acquireLock(lockPath, 200);
       assert.equal(r.ok, true, 'sau cleanup write-fail, retry thành công');
       assert.equal(closed, 1, 'fd write-fail phải được close');
-      assert.equal(unlinked, 1, 'lock write-fail phải được unlink');
+      assert.equal(unlinked, 0, 'KHÔNG được unlink pathname (TOCTOU-safe)');
       assert.equal(writes, 2, 'writeSync gọi 2 lần (1 throw, 1 success)');
+      assert.equal(opens, 2, 'openSync 2 lần (1 fail, 1 success)');
       releaseLock(r.fd, lockPath, r.owner);
     } finally { _setFsOverride(null); }
   });
