@@ -1,27 +1,20 @@
 // breaker-persist.mjs — persist circuit breaker state (Issue #25). YAGNI: JSON + rename + exclusive lock.
-
 import { readFileSync, writeFileSync, writeSync, mkdirSync, existsSync, renameSync, unlinkSync, openSync, closeSync, fstatSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
-
-// ---------- runtime root (env override: BREAKER_RUNTIME_ROOT) ----------
 export function resolveRuntimeRoot() {
   return process.env.BREAKER_RUNTIME_ROOT || join(homedir(), '.ai-pr-reviewer');
 }
 function ensureDir(dir) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
-
-// ---------- atomic write ----------
-
 export function atomicWriteJson(filePath, data) {
   ensureDir(filePath.replace(/[/\\][^/\\]*$/, ''));
   const tmp = filePath + '.tmp.' + (randomUUID() || Date.now().toString(36));
   writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
   renameSync(tmp, filePath);
 }
-
 export function readJsonSafe(filePath) {
   try {
     const raw = readFileSync(filePath, 'utf8');
@@ -31,12 +24,9 @@ export function readJsonSafe(filePath) {
   }
 }
 
-// ---------- file lock ----------
-// Lock file = JSON {pid, nonce, createdAt}. Test seam via _setFsOverride.
 let _fsOverride = null;
 export function _setFsOverride(o) { _fsOverride = o; }
-const _fs = (name) => (_fsOverride && _fsOverride[name]) || { openSync, writeFileSync, writeSync, renameSync, unlinkSync, readFileSync, closeSync }[name];
-
+const _fs = (name) => (_fsOverride && _fsOverride[name]) || { openSync, writeFileSync, writeSync, renameSync, unlinkSync, readFileSync, closeSync, existsSync }[name];
 function _pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return 'unknown';
   try { process.kill(pid, 0); return 'alive'; }
@@ -61,10 +51,7 @@ function _tryRecoverStaleLock(lockPath) {
   return { recovered: false, reason: 'RECOVERY_REQUIRED: lock held by another owner' };
 }
 
-// acquireLock(path, timeoutMs=5000) -> {ok, fd, owner, error}
-// openSync('wx') tạo lock exclusive; ghi owner QUA FD (writeSync). Ghi fail (throw/short
-// write) → closeSync fd, KHÔNG unlink (file rỗng → contender thấy EEXIST fail-closed).
-// Lock giữ bởi PID khác (dead/alive/unknown) → fail-closed RECOVERY_REQUIRED.
+// acquireLock: openSync('wx') exclusive; write fail (throw/short) → close fd, KHÔNG unlink (EEXIST fail-closed); lock khác PID → RECOVERY_REQUIRED.
 export function acquireLock(lockPath, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
@@ -100,49 +87,57 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
   return { ok: false, fd: null, owner: null, error: `lock timeout after ${timeoutMs}ms: ${reason}` };
 }
 
-// releaseLock: ownership protocol — KHÔNG move/unlink pathname không do owner tạo.
-// fileId (dev+ino) là fail-fast: stat khác → chắc chắn không phải file của mình. Nhưng
-// inode có thể REUSE sau unlink → fileId không đủ an toàn, luôn verify nonce+pid nội dung.
-// Unlink fail → {ok:false, RECOVERY_REQUIRED}. [test-seam] dùng _fs lookup.
+// releaseLock: atomic rename → quarantine (unique nonce), verify nội dung, chỉ unlink quarantine — pathname chung không bao giờ bị unlink trực tiếp. [test-seam] _fs lookup.
 export function releaseLock(fd, lockPath, expectedOwner) {
   try { _fs('closeSync')(fd); } catch { /* ignore */ }
   if (!expectedOwner || typeof expectedOwner !== 'object'
       || !Number.isInteger(expectedOwner.pid) || typeof expectedOwner.nonce !== 'string') {
     return { ok: false, reason: 'RECOVERY_REQUIRED: invalid owner metadata' };
   }
-  if (expectedOwner.fileId && expectedOwner.fileId.ino > 0) {
-    let st;
-    try { st = statSync(lockPath); }
-    catch { return { ok: false, reason: 'RECOVERY_REQUIRED: lock file missing' }; }
-    if (st.ino !== expectedOwner.fileId.ino || st.dev !== expectedOwner.fileId.dev) {
-      return { ok: false, reason: 'RECOVERY_REQUIRED: lock replaced by another owner' };
-    }
-  }
+  // Guard 1: owner content match
   const current = _readLockOwner(lockPath);
   if (!current || current.pid !== expectedOwner.pid || current.nonce !== expectedOwner.nonce) {
     return { ok: false, reason: 'RECOVERY_REQUIRED: lock not owned by caller' };
   }
-  try { _fs('unlinkSync')(lockPath); return { ok: true, reason: null }; }
-  catch (e) { return { ok: false, reason: `RECOVERY_REQUIRED: unlink failed: ${e.message}` }; }
+  // Atomic rename sang quarantine — intrinsic ownership via unique nonce path
+  const qp = lockPath + '.release-' + expectedOwner.nonce;
+  try { renameSync(lockPath, qp); }
+  catch (e) {
+    if (e.code === 'ENOENT') return { ok: false, reason: 'RECOVERY_REQUIRED: lock file missing' };
+    return { ok: false, reason: `RECOVERY_REQUIRED: rename failed: ${e.message}` };
+  }
+  // Guard 2: verify quarantined content is ours
+  const moved = _readLockOwner(qp);
+  if (!moved || moved.pid !== expectedOwner.pid || moved.nonce !== expectedOwner.nonce) {
+    try { if (!_fs('existsSync')(lockPath)) renameSync(qp, lockPath); } catch {}
+    return { ok: false, reason: 'RECOVERY_REQUIRED: lock replaced by another owner' };
+  }
+  // Unlink quarantine (tên riêng, không bao giờ đụng shared pathname)
+  try { _fs('unlinkSync')(qp); return { ok: true, reason: null }; }
+  catch (e) {
+    try { if (!_fs('existsSync')(lockPath)) renameSync(qp, lockPath); } catch {}
+    return { ok: false, reason: `RECOVERY_REQUIRED: unlink failed: ${e.message}` };
+  }
 }
 
-// withFileLock(namespace, fn, timeoutMs) -> fn result (luôn unlock trong finally)
+// withFileLock: surface release failure, preserve callback exception.
 export function withFileLock(namespace, fn, timeoutMs = 5000) {
   const root = resolveRuntimeRoot();
   ensureDir(root);
   const lockPath = join(root, `breaker-${safeFilePart(namespace)}.lock`);
   const { ok, fd, owner, error } = acquireLock(lockPath, timeoutMs);
   if (!ok) return { ok: false, error };
-  try {
-    return fn(namespace);
-  } finally {
-    releaseLock(fd, lockPath, owner);
-  }
+  let result;
+  let fnErr = null;
+  try { result = fn(namespace); }
+  catch (e) { fnErr = e; }
+  const release = releaseLock(fd, lockPath, owner);
+  if (fnErr) throw fnErr;
+  if (!release.ok) return { ok: false, error: release.reason, lockHeld: true, result };
+  return result;
 }
 
-// ---------- breaker persistence ----------
-
-// Windows-safe + collision-safe: thay ký tự nguy hiểm, giới hạn độ dài, short hash chống collision.
+// Windows-safe + collision-safe: sanitize ký tự nguy hiểm, giới hạn độ dài, short hash chống collision.
 const MAX_PART_LEN = 80;
 const HASH_LEN = 8;
 function _shortHash(s) {
@@ -155,11 +150,9 @@ function safeFilePart(namespace) {
   const hash = _shortHash(raw);
   return `${head}-${hash}`;
 }
-
 export function breakerFilePath(namespace) {
   return join(resolveRuntimeRoot(), `breaker-${safeFilePart(namespace)}.json`);
 }
-
 export function buildBreakerNamespace(project = 'default', task = 'default') {
   // Sanitize + 6-hex raw hash chống collision: "a/b" vs "a_b" sanitize cùng chuỗi nhưng raw hash khác.
   const safe = (s) => String(s || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -199,13 +192,9 @@ export function loadBreaker(namespace, { threshold = 3, cooldownMs = 60_000 } = 
   }
   return data;
 }
-
 export function saveBreaker(namespace, registry) {
   atomicWriteJson(breakerFilePath(namespace), registry);
 }
-
-// ---------- HALF_OPEN probe (atomic claim) ----------
-// claimHalfOpenProbe: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock. Fail-closed: reg.ok=false → ok=false, KHÔNG ghi.
 export function claimHalfOpenProbe(namespace, tool, cooldownMs = 60_000, now = Date.now()) {
   return withFileLock(namespace, (ns) => {
     const reg = loadBreaker(ns, { cooldownMs });
@@ -223,8 +212,6 @@ export function claimHalfOpenProbe(namespace, tool, cooldownMs = 60_000, now = D
     return { ok: true, claimed: true, registry: newReg, reason: null };
   }, 5000);
 }
-
-// ---------- convenience wrappers ----------
 export function createPersistFunctions(recordFailurePure, recordSuccessPure) {
   function recordFailurePersist(namespace, tool, reason = 'unspecified', now = Date.now()) {
     return withFileLock(namespace, (ns) => {
