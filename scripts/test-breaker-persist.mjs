@@ -341,7 +341,6 @@ test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXI
   });
 });
 
-
 test('releaseLock A→B→C thật: A stale không xóa/move lock B, C chờ', async () => {
   await withRoot(async (root) => {
     const p = join(root, 'abc.lock');

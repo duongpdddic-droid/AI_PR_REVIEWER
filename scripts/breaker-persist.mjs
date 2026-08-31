@@ -31,7 +31,6 @@ export function readJsonSafe(filePath) {
   }
 }
 
-
 // ---------- file lock ----------
 // Lock file = JSON {pid, nonce, createdAt}. Test seam via _setFsOverride.
 let _fsOverride = null;
@@ -209,7 +208,6 @@ export function loadBreaker(namespace, { threshold = 3, cooldownMs = 60_000 } = 
 export function saveBreaker(namespace, registry) {
   atomicWriteJson(breakerFilePath(namespace), registry);
 }
-
 
 // ---------- HALF_OPEN probe (atomic claim) ----------
 // claimHalfOpenProbe: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock.
