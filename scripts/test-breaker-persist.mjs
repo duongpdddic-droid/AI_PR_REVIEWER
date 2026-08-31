@@ -348,7 +348,7 @@ test('releaseLock A→B→C thật: A stale không xóa/move lock B, C chờ', a
     const aOwner = a.owner; assert.ok(aOwner.fileId.ino > 0);
     closeSync(a.fd); unlinkSync(p);
     const b = acquireLock(p, 1000); assert.equal(b.ok, true);
-    assert.notEqual(b.owner.fileId.ino, aOwner.fileId.ino);
+    assert.notEqual(b.owner.nonce, aOwner.nonce, 'B là owner khác (nonce mới)');
     const aRel = releaseLock(a.fd, p, aOwner);
     assert.equal(aRel.ok, false); assert.match(aRel.reason, /RECOVERY_REQUIRED/);
     assert.ok(existsSync(p), 'B lock còn nguyên');

@@ -101,9 +101,9 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
 }
 
 // releaseLock: ownership protocol — KHÔNG move/unlink pathname không do owner tạo.
-// Có fileId → stat(lockPath) phải trỏ CÙNG inode mới unlink (khác → fail-closed). Không
-// fileId (test seam) → verify nonce+pid. Unlink fail → {ok:false, RECOVERY_REQUIRED}.
-// [test-seam] dùng _fs lookup để honor _setFsOverride (closeSync/unlinkSync).
+// fileId (dev+ino) là fail-fast: stat khác → chắc chắn không phải file của mình. Nhưng
+// inode có thể REUSE sau unlink → fileId không đủ an toàn, luôn verify nonce+pid nội dung.
+// Unlink fail → {ok:false, RECOVERY_REQUIRED}. [test-seam] dùng _fs lookup.
 export function releaseLock(fd, lockPath, expectedOwner) {
   try { _fs('closeSync')(fd); } catch { /* ignore */ }
   if (!expectedOwner || typeof expectedOwner !== 'object'
@@ -117,11 +117,10 @@ export function releaseLock(fd, lockPath, expectedOwner) {
     if (st.ino !== expectedOwner.fileId.ino || st.dev !== expectedOwner.fileId.dev) {
       return { ok: false, reason: 'RECOVERY_REQUIRED: lock replaced by another owner' };
     }
-  } else {
-    const current = _readLockOwner(lockPath);
-    if (!current || current.pid !== expectedOwner.pid || current.nonce !== expectedOwner.nonce) {
-      return { ok: false, reason: 'RECOVERY_REQUIRED: lock not owned by caller' };
-    }
+  }
+  const current = _readLockOwner(lockPath);
+  if (!current || current.pid !== expectedOwner.pid || current.nonce !== expectedOwner.nonce) {
+    return { ok: false, reason: 'RECOVERY_REQUIRED: lock not owned by caller' };
   }
   try { _fs('unlinkSync')(lockPath); return { ok: true, reason: null }; }
   catch (e) { return { ok: false, reason: `RECOVERY_REQUIRED: unlink failed: ${e.message}` }; }
