@@ -107,8 +107,12 @@ Report phải kết thúc bằng ĐÚNG 1 trong:
 ## Tích hợp
 
 - **Validator**: `validateHandoff(report)` → `{ ok, status, errors: [{ code, section, field, message }] }`.
-- **Gate handoff**: `mcp-task-server` `task_handoff` nhận optional `handoffReport`; nếu cung cấp
-  mà không phải `READY_FOR_REVIEW` → chặn fail-closed trước mọi mutation.
+- **Gate handoff**: `mcp-task-server` `task_handoff` BẮT BUỘC kèm `handoffReport`; thiếu report
+  → `HANDOFF_REPORT_REQUIRED`, report không phải `READY_FOR_REVIEW` (kể cả `BLOCKED` /
+  `PARTIAL_EVIDENCE` / invalid / exception) → `HANDOFF_PARTIAL_EVIDENCE`. Chặn fail-closed
+  trước mọi mutation. Registered repositories lấy từ nguồn canonical (`.agent/config.json`
+  `repo` + `targetRepos`), KHÔNG dùng repo caller tự khai báo trong request — report khai báo
+  repository chưa đăng ký → `UNKNOWN_REPOSITORY` fail-closed.
 - **Task packet**: `buildTaskPacket({ resolveRef, maxBytes })` — reference pin version khi resolve
   được; ngược lại inline toàn bộ content; vượt `maxBytes` → `PACKET_TRUNCATED` fail-closed.
   Payload bounded: static contract không nhân bản vào từng packet nếu runtime resolve được reference.

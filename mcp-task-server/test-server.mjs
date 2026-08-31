@@ -7,7 +7,8 @@
 import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs } from "./server.mjs";
+import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs, loadRegisteredRepos } from "./server.mjs";
+import { sampleReport } from "../scripts/review-handoff-contract.mjs";
 
 const REPO = "duongpdddic-droid/QLDA_DTXD";
 let passed = 0;
@@ -72,6 +73,12 @@ for (const bad of [{ state: "weird" }, { limit: 0 }, { limit: 2000 }, { limit: 1
   try { buildListArgs(bad); } catch { threw = true; }
   ok(threw, `buildListArgs chặn input sai ${JSON.stringify(bad)}`);
 }
+
+// GPT-REV-116: registered repos phải từ nguồn canonical (.agent/config.json), độc lập request
+const canonicalRepos = loadRegisteredRepos();
+ok(Array.isArray(canonicalRepos) && canonicalRepos.length >= 2, "loadRegisteredRepos trả list từ .agent/config.json");
+ok(canonicalRepos.includes("duongpdddic-droid/AI_PR_REVIEWER"), "canonical registry chứa repo chính AI_PR_REVIEWER");
+ok(canonicalRepos.includes("duongpdddic-droid/QLDA_DTXD"), "canonical registry chứa targetRepos QLDA_DTXD");
 
 // ---------------------------------------------------------------------------
 // 3) Protocol e2e — spawn server thật qua stdio
@@ -165,6 +172,36 @@ try {
     (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
   ok(afterBadHandoff.status === issue35.status && afterBadHandoff.agent === issue35.agent,
     "label #35 KHÔNG đổi sau handoff bị chặn (không mutation rò rỉ)");
+
+  // GPT-REV-115: omitted handoffReport → HANDOFF_REPORT_REQUIRED, fail-closed trước mutation
+  const omitHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999 } });
+  ok(omitHandoff.result?.isError === true, "task_handoff thiếu handoffReport → isError (fail-closed)");
+  ok(/HANDOFF_REPORT_REQUIRED/.test(omitHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_REPORT_REQUIRED");
+  const afterOmit = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(afterOmit.status === issue35.status && afterOmit.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau handoff thiếu report (không mutation rò rỉ)");
+
+  // GPT-REV-116: unknown repo self-declared → HANDOFF_PARTIAL_EVIDENCE, no mutation
+  const unknownRepoReport = sampleReport({ identity: { repository: "evil/repo" } });
+  const unknownHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: unknownRepoReport } });
+  ok(unknownHandoff.result?.isError === true, "task_handoff unknown repo → isError (fail-closed)");
+  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(unknownHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PARTIAL_EVIDENCE");
+  ok(/UNKNOWN_REPOSITORY/.test(unknownHandoff.result.content[0].text), "lỗi nêu rõ UNKNOWN_REPOSITORY");
+  const afterUnknown = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(afterUnknown.status === issue35.status && afterUnknown.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau handoff unknown repo (không mutation rò rỉ)");
+
+  // GPT-REV-117: BLOCKED terminal status → HANDOFF_PARTIAL_EVIDENCE, no mutation
+  const blockedReport = sampleReport({ terminalStatus: { status: "BLOCKED" } });
+  const blockedHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: blockedReport } });
+  ok(blockedHandoff.result?.isError === true, "task_handoff BLOCKED report → isError (fail-closed)");
+  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(blockedHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PARTIAL_EVIDENCE");
+  const afterBlocked = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(afterBlocked.status === issue35.status && afterBlocked.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau handoff BLOCKED (không mutation rò rỉ)");
 
   // Repo bẩn bị chặn bởi validateRepo
   const badRepo = await rpc("tools/call", { name: "task_get", arguments: { repo: "../evil", number: 1 } });

@@ -9,8 +9,34 @@
  * Chạy: node mcp-task-server/server.mjs
  */
 import { execFileSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateHandoff, canRequestReview, CONTRACT_VERSION } from "../scripts/review-handoff-contract.mjs";
+
+const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * GPT-REV-116: danh sách repo registered lấy từ nguồn canonical độc lập
+ * (.agent/config.json tại root repo này: `repo` + `targetRepos`), KHÔNG dùng
+ * `repo` do caller tự khai báo trong request (self-declared). Fail-closed:
+ * không đọc được config → trả [] → mọi report UNKNOWN_REPOSITORY.
+ */
+export function loadRegisteredRepos() {
+  try {
+    const cfgPath = join(SERVER_DIR, "..", ".agent", "config.json");
+    if (!existsSync(cfgPath)) return [];
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    const list = [];
+    if (typeof cfg.repo === "string" && cfg.repo.trim()) list.push(cfg.repo.trim());
+    for (const r of Array.isArray(cfg.targetRepos) ? cfg.targetRepos : []) {
+      if (typeof r === "string" && r.trim() && !list.includes(r.trim())) list.push(r.trim());
+    }
+    return list;
+  } catch {
+    return []; // fail-closed
+  }
+}
 
 export const SERVER_INFO = { name: "mcp-task-server", version: "1.0.0" };
 
@@ -240,14 +266,22 @@ export const ops = {
   async task_handoff({ repo, number, pr, handoffReport }) {
     const r = repo ?? defaultRepos()[0];
     if (!r) throw new Error("Chưa xác định repo");
-    // Issue #32: canonical REVIEW HANDOFF CONTRACT gate. Nếu coder cung cấp report,
-    // bắt buộc validate fail-closed TRƯỚC mọi mutation — PARTIAL_EVIDENCE không được
-    // transition sang status:review-requested.
-    if (handoffReport !== undefined && handoffReport !== null) {
-      const v = validateHandoff(handoffReport, { registeredRepos: [r] });
-      if (!canRequestReview(v)) {
-        throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. ${JSON.stringify(v.errors)}`);
-      }
+    // GPT-REV-115: handoffReport BẮT BUỘC — thiếu → fail-closed TRƯỚC mọi mutation.
+    if (handoffReport === undefined || handoffReport === null) {
+      throw new Error("HANDOFF_REPORT_REQUIRED: task_handoff sang review-requested bắt buộc kèm handoffReport theo canonical REVIEW HANDOFF CONTRACT (Issue #32)");
+    }
+    // GPT-REV-116: registered repos từ nguồn canonical (.agent/config.json),
+    // không phụ thuộc `repo` caller khai báo trong request.
+    // GPT-REV-117: gate — chỉ report canRequestReview===true mới được transition;
+    // BLOCKED / PARTIAL_EVIDENCE / invalid / exception đều chặn fail-closed.
+    let v;
+    try {
+      v = validateHandoff(handoffReport, { registeredRepos: loadRegisteredRepos() });
+    } catch (err) {
+      throw new Error(`HANDOFF_PARTIAL_EVIDENCE: report không hợp lệ (exception khi validate) — ${err.message}`);
+    }
+    if (canRequestReview(v) !== true) {
+      throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. status=${v.status}, errors=${JSON.stringify(v.errors)}`);
     }
     const current = await listLabels(r, number);
     const check = checkTransition("handoff", extractStatus(current));
@@ -337,10 +371,10 @@ export const TOOLS = [
       required: ["title"] } },
   { name: "task_claim", description: "Coder nhận task: ready-for-cline/queued → in-progress",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp }, required: ["number"] } },
-  { name: "task_handoff", description: "Coder bàn giao: in-progress/changes-requested → review-requested + agent:gpt. Nếu truyền handoffReport phải đạt READY_FOR_REVIEW theo canonical REVIEW HANDOFF CONTRACT (Issue #32), nếu không → chặn fail-closed.",
+  { name: "task_handoff", description: "Coder bàn giao: in-progress/changes-requested → review-requested + agent:gpt. BẮT BUỘC kèm handoffReport đạt READY_FOR_REVIEW theo canonical REVIEW HANDOFF CONTRACT (Issue #32); thiếu hoặc không hợp lệ → chặn fail-closed trước mọi mutation.",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       pr: { type: "number", description: "Số PR bàn giao (tùy chọn, sẽ comment lên Issue)" },
-      handoffReport: { type: "object", description: "Handoff report theo REVIEW HANDOFF CONTRACT v1.0.0 (tùy chọn; nếu có phải READY_FOR_REVIEW)" } }, required: ["number"] } },
+      handoffReport: { type: "object", description: "Handoff report theo REVIEW HANDOFF CONTRACT v1.0.0 (bắt buộc, phải READY_FOR_REVIEW)" } }, required: ["number", "handoffReport"] } },
   { name: "task_review", description: "Reviewer chấm: review-requested → approved | changes-requested (+agent:cline)",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       verdict: { type: "string", enum: ["approve", "request-changes"] },

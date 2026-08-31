@@ -318,8 +318,11 @@ Thiếu một điều kiện phải báo `IN PROGRESS`, `CHANGES REQUESTED` ho�
 - **Validator**: `validateHandoff(report)` → `{ ok, status, errors }` (structured errors). Thiếu
   required section / exact HEAD / commands+exit code / safety / unverified-risks / terminal status,
   hoặc "all green" mâu thuẫn failure → `PARTIAL_EVIDENCE` (fail-closed).
-- **Gate**: chỉ report `READY_FOR_REVIEW` mới qua `canRequestReview`. `task_handoff` (MCP) chặn
-  `HANDOFF_PARTIAL_EVIDENCE` trước mọi mutation nếu `handoffReport` không hợp lệ.
+- **Gate**: chỉ report `READY_FOR_REVIEW` mới qua `canRequestReview`. `task_handoff` (MCP) bắt buộc
+  kèm `handoffReport`; thiếu → `HANDOFF_REPORT_REQUIRED`, không `READY_FOR_REVIEW` (kể cả
+  `BLOCKED`/`PARTIAL_EVIDENCE`/invalid/exception) → `HANDOFF_PARTIAL_EVIDENCE`. Chặn fail-closed
+  trước mọi mutation. Registered repos lấy từ nguồn canonical (`.agent/config.json`
+  `repo`+`targetRepos`), KHÔNG dùng repo caller tự khai báo trong request.
 - **Short operator command**:
 
   > "Thực hiện tiếp và bàn giao theo canonical REVIEW HANDOFF CONTRACT."
