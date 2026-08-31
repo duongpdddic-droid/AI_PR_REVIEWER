@@ -2,7 +2,7 @@
 // test-breaker-persist.mjs — persist circuit breaker (Finding 1+2+3). Exit 0=PASS.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, closeSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, unlinkSync, mkdirSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -31,7 +31,7 @@ if (process.argv[2] === '--acquire-child') {
   const lockPath = process.argv[3];
   const r = acquireLock(lockPath, 250);
   process.stdout.write(JSON.stringify({ ok: r.ok, nonce: r.owner && r.owner.nonce, error: r.error || null }) + '\n');
-  if (r.ok) { await new Promise((res) => setTimeout(res, 500)); releaseLock(r.fd, lockPath, r.owner); }
+  if (r.ok) { await new Promise((res) => setTimeout(res, 500)); releaseLock(lockPath, r.owner); }
   process.exit(0);
 }
 function makeRoot(prefix = 'breaker-persist-') {
@@ -43,6 +43,10 @@ async function withRoot(fn, prefix) {
   const root = makeRoot(prefix);
   try { return await fn(root); }
   finally { rmSync(root, { recursive: true, force: true }); }
+}
+function seedLock(lockPath, owner) {
+  mkdirSync(lockPath);
+  writeFileSync(join(lockPath, `${owner.nonce}.json`), JSON.stringify(owner), 'utf8');
 }
 test('atomicWriteJson + readJsonSafe round-trip; file thiếu/corrupt -> null', async () => {
   await withRoot(async (root) => {
@@ -138,15 +142,15 @@ test('acquireLock: exclusive (lần 2 timeout), ghi owner record {pid, nonce}', 
     assert.equal(first.ok, true);
     assert.equal(first.owner.pid, process.pid);
     assert.ok(typeof first.owner.nonce === 'string' && first.owner.nonce.length > 0);
-    const onDisk = JSON.parse(readFileSync(lockPath, 'utf8'));
+    const onDisk = JSON.parse(readFileSync(join(lockPath, `${first.owner.nonce}.json`), 'utf8'));
     assert.equal(onDisk.pid, process.pid);
     assert.equal(onDisk.nonce, first.owner.nonce);
     const second = acquireLock(lockPath, 300);
     assert.equal(second.ok, false);
-    releaseLock(first.fd, lockPath, first.owner);
+    releaseLock(lockPath, first.owner);
     const third = acquireLock(lockPath, 500);
     assert.equal(third.ok, true);
-    releaseLock(third.fd, lockPath, third.owner);
+    releaseLock(lockPath, third.owner);
   });
 });
 test('releaseLock: identity match xóa file, mismatch/thiếu/sai shape giữ nguyên', async () => {
@@ -154,7 +158,7 @@ test('releaseLock: identity match xóa file, mismatch/thiếu/sai shape giữ ng
     { // happy: identity khớp → xóa.
       const r = acquireLock(join(root, 'good.lock'), 1000);
       assert.equal(r.ok, true);
-      assert.equal(releaseLock(r.fd, join(root, 'good.lock'), r.owner).ok, true);
+      assert.equal(releaseLock(join(root, 'good.lock'), r.owner).ok, true);
       assert.ok(!existsSync(join(root, 'good.lock')));
     }
     // fail-closed: identity mismatch / thiếu owner / shape invalid.
@@ -162,31 +166,32 @@ test('releaseLock: identity match xóa file, mismatch/thiếu/sai shape giữ ng
     assert.equal(r.ok, true);
     const fakeOwner = { pid: r.owner.pid, nonce: 'wrong' };
     for (const bad of [fakeOwner, undefined, null, {}, { pid: 1 }, { pid: 1, nonce: 123 }, 'string', 42]) {
-      const rel = releaseLock(r.fd, join(root, 'fail.lock'), bad);
+      const rel = releaseLock(join(root, 'fail.lock'), bad);
       assert.equal(rel.ok, false, `bad=${JSON.stringify(bad)} → fail-closed`);
       assert.match(rel.reason, /RECOVERY_REQUIRED/, 'reason phải nêu RECOVERY_REQUIRED');
     }
     assert.ok(existsSync(join(root, 'fail.lock')), 'fail-closed giữ nguyên file');
-    releaseLock(r.fd, join(root, 'fail.lock'), r.owner);
+    releaseLock(join(root, 'fail.lock'), r.owner);
   });
 });
 test('recovery fail-closed: orphan (RECOVERY_REQUIRED), alive/corrupt (timeout) — KHÔNG tự xóa', async () => {
   await withRoot(async (root) => {
     const specs = [
-      { name: 'orphan.lock', payload: JSON.stringify({ pid: 999_999_999, nonce: 'old', createdAt: 0 }), match: /RECOVERY_REQUIRED/ },
-      { name: 'alive.lock', payload: JSON.stringify({ pid: process.pid, nonce: 'stale-self', createdAt: 0 }), match: /timeout/ },
-      { name: 'corrupt.lock', payload: 'not-json-at-all', match: /timeout/ },
+      { name: 'orphan.lock', payload: { pid: 999_999_999, nonce: 'old', createdAt: 0 }, match: /RECOVERY_REQUIRED/ },
+      { name: 'alive.lock', payload: { pid: process.pid, nonce: 'stale-self', createdAt: 0 }, match: /timeout/ },
+      { name: 'corrupt.lock', corrupt: true, match: /timeout/ },
     ];
     for (const s of specs) {
       const lockPath = join(root, s.name);
-      writeFileSync(lockPath, s.payload, 'utf8');
+      if (s.corrupt) { mkdirSync(lockPath); writeFileSync(join(lockPath, 'bad.json'), 'not-json-at-all', 'utf8'); }
+      else seedLock(lockPath, s.payload);
       const r = acquireLock(lockPath, 200);
       assert.equal(r.ok, false, `${s.name} → fail-closed`);
       assert.match(r.error, s.match);
       assert.ok(existsSync(lockPath), `${s.name} không bị xóa`);
     }
     const list = readdirSync(root);
-    assert.ok(!list.some((f) => f.startsWith('orphan.lock.recover-')), 'no auto-delete quarantine');
+    assert.ok(list.every((f) => f.endsWith('.lock')), 'no quarantine/recovery artifacts');
   });
 });
 test('interleaving thật: 2 child process claim đồng thời → đúng 1 thắng', async () => {
@@ -212,7 +217,7 @@ test('recovery: PID không xác minh được (unknown) -> KHÔNG xóa lock', as
   await withRoot(async (root) => {
     const lockPath = join(root, 'unknown.lock');
 
-    writeFileSync(lockPath, JSON.stringify({ pid: 12345, nonce: 'old', createdAt: 0 }), 'utf8');
+    seedLock(lockPath, { pid: 12345, nonce: 'old', createdAt: 0 });
     const orig = process.kill;
     process.kill = function (pid, sig) {
       const err = new Error(`mocked failure for pid=${pid}`);
@@ -223,7 +228,7 @@ test('recovery: PID không xác minh được (unknown) -> KHÔNG xóa lock', as
       const r = acquireLock(lockPath, 300);
       assert.equal(r.ok, false, 'PID unknown → fail-closed (timeout)');
       assert.ok(existsSync(lockPath), 'unknown PID → KHÔNG xóa lock');
-      const onDisk = JSON.parse(readFileSync(lockPath, 'utf8'));
+      const onDisk = JSON.parse(readFileSync(join(lockPath, 'old.json'), 'utf8'));
       assert.equal(onDisk.nonce, 'old', 'file giữ nguyên identity');
     } finally {
       process.kill = orig;
@@ -302,40 +307,54 @@ test('race A->B: A giữ lock, B acquire timeout; file của A còn nguyên iden
     assert.match(b.error, /timeout/);
 
     assert.ok(existsSync(lockPath), 'A lock còn nguyên');
-    const onDisk = JSON.parse(readFileSync(lockPath, 'utf8'));
+    const onDisk = JSON.parse(readFileSync(join(lockPath, `${aOwner.nonce}.json`), 'utf8'));
     assert.equal(onDisk.pid, aOwner.pid, 'identity A còn nguyên');
     assert.equal(onDisk.nonce, aOwner.nonce, 'nonce A còn nguyên');
-    releaseLock(a.fd, lockPath, aOwner);
+    releaseLock(lockPath, aOwner);
   });
 });
-test('acquireLock: write-fail thật (wx) → pathname giữ nguyên, retry EEXIST → fail-closed', async () => {
+test('acquireLock: write-fail thật (owner file) → empty lock dir giữ nguyên, retry EEXIST → fail-closed', async () => {
   await withRoot(async (root) => {
     const lockPath = join(root, 'writefail.lock');
-    _setFsOverride({ writeSync: () => { throw new Error('ENOSPC: disk full'); } });
+    _setFsOverride({ writeFileSync: () => { throw new Error('ENOSPC: disk full'); } });
     try {
       const r = acquireLock(lockPath, 250);
       assert.equal(r.ok, false, 'write-fail thật phải fail-closed, không báo success');
       assert.match(r.error, /RECOVERY_REQUIRED/, 'fail-closed reason phải RECOVERY_REQUIRED');
-      assert.ok(existsSync(lockPath), 'pathname phải được giữ (không unlink)');
-      assert.equal(readFileSync(lockPath, 'utf8'), '', 'file rỗng còn nguyên');
+      assert.ok(existsSync(lockPath), 'lock dir phải được giữ (không rmdir)');
+      assert.equal(readdirSync(lockPath).length, 0, 'empty lock dir còn nguyên');
     } finally { _setFsOverride(null); }
   });
 });
-test('releaseLock A→B→C thật: A stale không xóa/move lock B, C chờ', async () => {
+test('releaseLock real-FS A→B→C: C đặt giữa release (sau unlink owner, trước rmdir) không lọt; A stale không xóa/move B', async () => {
   await withRoot(async (root) => {
     const p = join(root, 'abc.lock');
     const a = acquireLock(p, 1000); assert.equal(a.ok, true);
-    const aOwner = a.owner; assert.ok(aOwner.fileId.ino > 0);
-    closeSync(a.fd); unlinkSync(p);
+    const aOwner = a.owner;
+    const aOwnerFile = join(p, `${aOwner.nonce}.json`);
+    assert.ok(existsSync(p) && existsSync(aOwnerFile), 'A tạo lock dir + owner file');
+    // C acquire đúng lúc A release đang giữa chừng: override rmdirSync (A vừa unlink owner chưa rmdir).
+    let cDuring = null;
+    const realRmdir = rmdirSync;
+    _setFsOverride({ rmdirSync: (path) => { cDuring = acquireLock(p, 150); return realRmdir(path); } });
+    try {
+      const aRel = releaseLock(p, aOwner);
+      assert.equal(aRel.ok, true, 'A release thành công (unlink owner + rmdir)');
+    } finally { _setFsOverride(null); }
+    assert.ok(cDuring, 'C đã thử acquire giữa release A');
+    assert.equal(cDuring.ok, false, 'C KHÔNG lọt vào giữa release A (lock dir còn tồn tại → mkdir EEXIST)');
+    const c1 = acquireLock(p, 500); assert.equal(c1.ok, true, 'C acquire được ngay sau A release hoàn tất');
+    releaseLock(p, c1.owner);
+    // A stale sau khi B đã giữ lock → A release không được đụng B.
     const b = acquireLock(p, 1000); assert.equal(b.ok, true);
-    assert.notEqual(b.owner.nonce, aOwner.nonce, 'B là owner khác (nonce mới)');
-    const aRel = releaseLock(a.fd, p, aOwner);
-    assert.equal(aRel.ok, false); assert.match(aRel.reason, /RECOVERY_REQUIRED/);
-    assert.ok(existsSync(p), 'B lock còn nguyên');
+    const bOwnerFile = join(p, `${b.owner.nonce}.json`);
+    const aStale = releaseLock(p, aOwner);
+    assert.equal(aStale.ok, false); assert.match(aStale.reason, /RECOVERY_REQUIRED/);
+    assert.ok(existsSync(bOwnerFile), 'B owner file còn nguyên');
     assert.equal(acquireLock(p, 300).ok, false, 'C timeout vì B giữ');
-    const bRel = releaseLock(b.fd, p, b.owner); assert.equal(bRel.ok, true);
-    const c = acquireLock(p, 500); assert.equal(c.ok, true, 'C acquire sau B release');
-    releaseLock(c.fd, p, c.owner);
+    const bRel = releaseLock(p, b.owner); assert.equal(bRel.ok, true);
+    const c2 = acquireLock(p, 500); assert.equal(c2.ok, true, 'C acquire sau B release');
+    releaseLock(p, c2.owner);
   });
 });
 test('releaseLock unlink fail → {ok:false, RECOVERY_REQUIRED}', async () => {
@@ -344,53 +363,48 @@ test('releaseLock unlink fail → {ok:false, RECOVERY_REQUIRED}', async () => {
     const r = acquireLock(p, 1000); assert.equal(r.ok, true);
     _setFsOverride({ unlinkSync: () => { throw new Error('EPERM'); } });
     try {
-      const rel = releaseLock(r.fd, p, r.owner);
+      const rel = releaseLock(p, r.owner);
       assert.equal(rel.ok, false); assert.match(rel.reason, /RECOVERY_REQUIRED/);
       assert.ok(existsSync(p));
     } finally { _setFsOverride(null); }
-    releaseLock(r.fd, p, r.owner);
+    releaseLock(p, r.owner);
   });
 });
-test('releaseLock honor _fs override closeSync (mock fd=7 không đóng fd thật)', async () => {
-  // Regress SIGABRT: releaseLock phải dùng _fs lookup, không gọi closeSync thật với mock fd.
+test('releaseLock honor _fs override rmdirSync (release dùng _fs lookup, không gọi fs thật)', async () => {
+  // Regress: releaseLock phải dùng _fs('rmdirSync'), không bypass override (trước đây closeSync bypass gây SIGABRT).
   await withRoot(async (root) => {
     const lockPath = join(root, 'rel.lock');
-    let closedMock = 0;
-    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, nonce: 'real', createdAt: 0 }), 'utf8');
-    _setFsOverride({
-      openSync: () => 7,
-      writeSync: (fd, buf, off, len) => len,
-      closeSync: (fd) => { closedMock++; },
-      unlinkSync: () => {},
-      readFileSync: (p) => p === lockPath ? JSON.stringify({ pid: process.pid, nonce: 'real', createdAt: 0 }) : '',
-    });
+    const r = acquireLock(lockPath, 1000); assert.equal(r.ok, true);
+    let rmdirCalls = 0;
+    _setFsOverride({ rmdirSync: (p) => { rmdirCalls++; return rmdirSync(p); } });
     try {
-      const r = acquireLock(lockPath, 200);
-      assert.equal(r.ok, true, 'mock openSync trả fd=7 + writeSync trả len');
-      releaseLock(r.fd, lockPath, r.owner);
-      assert.equal(closedMock, 1, 'releaseLock đã gọi closeSync qua _fs, không đóng fd thật');
+      const rel = releaseLock(lockPath, r.owner);
+      assert.equal(rel.ok, true);
+      assert.equal(rmdirCalls, 1, 'releaseLock đã gọi rmdirSync qua _fs');
+      assert.ok(!existsSync(lockPath), 'lock dir đã được gỡ');
     } finally { _setFsOverride(null); }
   });
 });
-test('GPT-REV-110: readFileSync trả A bytes + swap pathname→B → unlinkSync không xóa B', async () => {
+test('GPT-REV-110: releaseLock chỉ unlink owner file của chính caller (nonce), không bao giờ đụng shared pathname', async () => {
   await withRoot(async (root) => {
     const p = join(root, 'rev110.lock');
     const a = acquireLock(p, 1000); assert.equal(a.ok, true);
     const aOwner = a.owner;
-    const aBytes = JSON.stringify({ pid: aOwner.pid, nonce: aOwner.nonce, createdAt: aOwner.createdAt });
-    writeFileSync(p, JSON.stringify({ pid: 9999, nonce: 'B-nonce', createdAt: 0 }), 'utf8');
-    let unlinkCalls = 0;
-    _setFsOverride({
-      readFileSync: (path, enc) => path === p ? (writeFileSync(p, JSON.stringify({ pid: 9999, nonce: 'B-nonce', createdAt: 0 }), 'utf8'), aBytes) : readFileSync(path, enc),
-      unlinkSync: () => { unlinkCalls++; throw new Error('UNLINK_CALLED'); },
-    });
+    // Swap nội dung dir: owner file B nằm cạnh owner file A (mô phỏng địch thủ chen vào).
+    writeFileSync(join(p, 'B-foreign.json'), JSON.stringify({ pid: 9999, nonce: 'B-nonce', createdAt: 0 }), 'utf8');
+    let unlinkPaths = [];
+    const realUnlink = unlinkSync;
+    _setFsOverride({ unlinkSync: (path) => { unlinkPaths.push(path); return realUnlink(path); } });
     try {
-      const rel = releaseLock(a.fd, p, aOwner);
+      const rel = releaseLock(p, aOwner);
+      // rmdir ENOTEMPTY (còn file lạ) → RECOVERY_REQUIRED, KHÔNG xóa B.
       assert.equal(rel.ok, false);
       assert.match(rel.reason, /RECOVERY_REQUIRED/);
-      assert.equal(JSON.parse(readFileSync(p, 'utf8')).nonce, 'B-nonce', 'B còn nguyên');
-      assert.equal(unlinkCalls, 0, 'unlinkSync không được gọi');
+      assert.ok(unlinkPaths.every((u) => u.includes(aOwner.nonce)), `chỉ unlink owner file của A, got ${JSON.stringify(unlinkPaths)}`);
+      assert.ok(existsSync(join(p, 'B-foreign.json')), 'B còn nguyên');
     } finally { _setFsOverride(null); }
+    // cleanup: gỡ file B + owner A để dọn root.
+    rmSync(p, { recursive: true, force: true });
   });
 });
 test('GPT-REV-111: withFileLock release fail (unlink inject) → public wrapper ok:false RECOVERY_REQUIRED, lock còn', async () => {

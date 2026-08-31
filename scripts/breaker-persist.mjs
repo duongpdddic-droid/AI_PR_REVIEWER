@@ -1,5 +1,5 @@
-// breaker-persist.mjs — persist circuit breaker state (Issue #25). YAGNI: JSON + rename + exclusive lock.
-import { readFileSync, writeFileSync, writeSync, mkdirSync, existsSync, renameSync, unlinkSync, openSync, closeSync, fstatSync, statSync } from 'node:fs';
+// breaker-persist.mjs — persist circuit breaker state (Issue #25). YAGNI: JSON + atomic lock-directory.
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, readdirSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
@@ -23,10 +23,9 @@ export function readJsonSafe(filePath) {
     return null;
   }
 }
-
 let _fsOverride = null;
 export function _setFsOverride(o) { _fsOverride = o; }
-const _fs = (name) => (_fsOverride && _fsOverride[name]) || { openSync, writeFileSync, writeSync, renameSync, unlinkSync, readFileSync, closeSync, existsSync }[name];
+const _fs = (name) => (_fsOverride && _fsOverride[name]) || { mkdirSync, writeFileSync, readdirSync, readFileSync, unlinkSync, rmdirSync }[name];
 function _pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return 'unknown';
   try { process.kill(pid, 0); return 'alive'; }
@@ -38,12 +37,14 @@ function _pidAlive(pid) {
 }
 function _readLockOwner(lockPath) {
   try {
-    const data = JSON.parse(_fs('readFileSync')(lockPath, 'utf8'));
+    const f = _fs('readdirSync')(lockPath).find((n) => n.endsWith('.json'));
+    if (!f) return null;
+    const data = JSON.parse(_fs('readFileSync')(join(lockPath, f), 'utf8'));
     if (data && typeof data === 'object' && Number.isInteger(data.pid) && typeof data.nonce === 'string') return data;
     return null;
   } catch { return null; }
 }
-// MVP: no auto stale-lock deletion/recovery — owner dead/unknown/corrupt → RECOVERY_REQUIRED, chỉ operator xóa sau xác minh.
+// Fail-closed: owner dead/unknown/corrupt → RECOVERY_REQUIRED, chỉ operator xóa sau xác minh (không tự xóa).
 function _tryRecoverStaleLock(lockPath) {
   const owner = _readLockOwner(lockPath);
   if (!owner) return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner unreadable' };
@@ -51,27 +52,25 @@ function _tryRecoverStaleLock(lockPath) {
   return { recovered: false, reason: 'RECOVERY_REQUIRED: lock held by another owner' };
 }
 
-// acquireLock: openSync('wx') exclusive; write fail (throw/short) → close fd, KHÔNG unlink (EEXIST fail-closed); lock khác PID → RECOVERY_REQUIRED.
+// acquireLock: mkdir lock-directory (atomic EEXIST = đang giữ); owner file tên unique nonce; write-fail → dọn dir riêng rồi retry.
 export function acquireLock(lockPath, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
   let firstReason = null;
   const myNonce = randomUUID();
   const fs = _fs;
-  // Write-fail cleanup: chỉ close fd, KHÔNG unlink pathname (TOCTOU-safe, review #5060996893).
-  const cleanup = (fd) => { try { fs('closeSync')(fd); } catch { /* ignore */ } };
   while (Date.now() < deadline) {
     try {
-      const fd = fs('openSync')(lockPath, 'wx');
-      const buf = Buffer.from(JSON.stringify({ pid: process.pid, nonce: myNonce, createdAt: Date.now() }), 'utf8');
-      let written = 0;
-      try { written = fs('writeSync')(fd, buf, 0, buf.length, 0); }
-      catch (writeErr) { cleanup(fd); lastErr = writeErr; continue; }
-      if (written !== buf.length) { cleanup(fd); lastErr = new Error(`short write: ${written}/${buf.length}`); continue; }
-      // Ownership intrinsic: fileId (dev+ino) của file VỪA TẠO qua fd — release không move/unlink path người khác.
-      let fileId = null;
-      try { const st = fstatSync(fd); if (st && st.ino > 0) fileId = { dev: st.dev, ino: st.ino }; } catch { /* fallback: verify bằng nonce */ }
-      return { ok: true, fd, owner: { pid: process.pid, nonce: myNonce, createdAt: Date.now(), fileId }, error: null };
+      fs('mkdirSync')(lockPath); // atomic: EEXIST nếu lock đang tồn tại
+      const owner = { pid: process.pid, nonce: myNonce, createdAt: Date.now() };
+      const ownerPath = join(lockPath, `${myNonce}.json`);
+      try { fs('writeFileSync')(ownerPath, JSON.stringify(owner), 'utf8'); }
+      catch (writeErr) {
+        try { fs('unlinkSync')(ownerPath); } catch {}
+        // không rmdir: để empty dir làm fail-closed marker (RECOVERY_REQUIRED)
+        lastErr = writeErr; continue;
+      }
+      return { ok: true, owner, error: null };
     } catch (err) {
       lastErr = err;
       if (err.code === 'EEXIST' || err.code === 'EEXIT') {
@@ -80,43 +79,31 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
         continue;
       }
-      return { ok: false, fd: null, owner: null, error: `lock acquire error: ${err.message}` };
+      return { ok: false, owner: null, error: `lock acquire error: ${err.message}` };
     }
   }
   const reason = firstReason || (lastErr ? lastErr.message : 'unknown');
-  return { ok: false, fd: null, owner: null, error: `lock timeout after ${timeoutMs}ms: ${reason}` };
+  return { ok: false, owner: null, error: `lock timeout after ${timeoutMs}ms: ${reason}` };
 }
 
-// releaseLock: atomic rename → quarantine (unique nonce), verify nội dung, chỉ unlink quarantine — pathname chung không bao giờ bị unlink trực tiếp. [test-seam] _fs lookup.
-export function releaseLock(fd, lockPath, expectedOwner) {
-  try { _fs('closeSync')(fd); } catch { /* ignore */ }
+// releaseLock: chỉ unlink owner file của chính caller (tên unique nonce) rồi rmdir lock dir; mọi lỗi → RECOVERY_REQUIRED.
+export function releaseLock(lockPath, expectedOwner) {
   if (!expectedOwner || typeof expectedOwner !== 'object'
       || !Number.isInteger(expectedOwner.pid) || typeof expectedOwner.nonce !== 'string') {
     return { ok: false, reason: 'RECOVERY_REQUIRED: invalid owner metadata' };
   }
-  // Guard 1: owner content match
-  const current = _readLockOwner(lockPath);
-  if (!current || current.pid !== expectedOwner.pid || current.nonce !== expectedOwner.nonce) {
-    return { ok: false, reason: 'RECOVERY_REQUIRED: lock not owned by caller' };
-  }
-  // Atomic rename sang quarantine — intrinsic ownership via unique nonce path
-  const qp = lockPath + '.release-' + expectedOwner.nonce;
-  try { renameSync(lockPath, qp); }
+  const fs = _fs;
+  const ownerPath = join(lockPath, `${expectedOwner.nonce}.json`);
+  try { fs('unlinkSync')(ownerPath); }
   catch (e) {
-    if (e.code === 'ENOENT') return { ok: false, reason: 'RECOVERY_REQUIRED: lock file missing' };
-    return { ok: false, reason: `RECOVERY_REQUIRED: rename failed: ${e.message}` };
-  }
-  // Guard 2: verify quarantined content is ours
-  const moved = _readLockOwner(qp);
-  if (!moved || moved.pid !== expectedOwner.pid || moved.nonce !== expectedOwner.nonce) {
-    try { if (!_fs('existsSync')(lockPath)) renameSync(qp, lockPath); } catch {}
-    return { ok: false, reason: 'RECOVERY_REQUIRED: lock replaced by another owner' };
-  }
-  // Unlink quarantine (tên riêng, không bao giờ đụng shared pathname)
-  try { _fs('unlinkSync')(qp); return { ok: true, reason: null }; }
-  catch (e) {
-    try { if (!_fs('existsSync')(lockPath)) renameSync(qp, lockPath); } catch {}
+    if (e.code === 'ENOENT') return { ok: false, reason: 'RECOVERY_REQUIRED: owner file missing' };
     return { ok: false, reason: `RECOVERY_REQUIRED: unlink failed: ${e.message}` };
+  }
+  try { fs('rmdirSync')(lockPath); return { ok: true, reason: null }; }
+  catch (e) {
+    if (e.code === 'ENOENT') return { ok: false, reason: 'RECOVERY_REQUIRED: lock dir missing' };
+    if (e.code === 'ENOTEMPTY') return { ok: false, reason: 'RECOVERY_REQUIRED: lock dir not empty (foreign owner file)' };
+    return { ok: false, reason: `RECOVERY_REQUIRED: rmdir failed: ${e.message}` };
   }
 }
 
@@ -125,13 +112,13 @@ export function withFileLock(namespace, fn, timeoutMs = 5000) {
   const root = resolveRuntimeRoot();
   ensureDir(root);
   const lockPath = join(root, `breaker-${safeFilePart(namespace)}.lock`);
-  const { ok, fd, owner, error } = acquireLock(lockPath, timeoutMs);
+  const { ok, owner, error } = acquireLock(lockPath, timeoutMs);
   if (!ok) return { ok: false, error };
   let result;
   let fnErr = null;
   try { result = fn(namespace); }
   catch (e) { fnErr = e; }
-  const release = releaseLock(fd, lockPath, owner);
+  const release = releaseLock(lockPath, owner);
   if (fnErr) throw fnErr;
   if (!release.ok) return { ok: false, error: release.reason, lockHeld: true, result };
   return result;
