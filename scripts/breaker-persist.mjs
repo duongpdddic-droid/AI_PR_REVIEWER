@@ -53,8 +53,7 @@ function _readLockOwner(lockPath) {
     return null;
   } catch { return null; }
 }
-// MVP: no automatic stale-lock deletion/recovery. Owner dead/unknown/corrupt → ok=false
-// reason RECOVERY_REQUIRED, lock giữ nguyên; chỉ operator xóa sau xác minh thủ công.
+// MVP: no auto stale-lock deletion/recovery — owner dead/unknown/corrupt → RECOVERY_REQUIRED, chỉ operator xóa sau xác minh.
 function _tryRecoverStaleLock(lockPath) {
   const owner = _readLockOwner(lockPath);
   if (!owner) return { recovered: false, reason: 'RECOVERY_REQUIRED: lock owner unreadable' };
@@ -82,8 +81,7 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
       try { written = fs('writeSync')(fd, buf, 0, buf.length, 0); }
       catch (writeErr) { cleanup(fd); lastErr = writeErr; continue; }
       if (written !== buf.length) { cleanup(fd); lastErr = new Error(`short write: ${written}/${buf.length}`); continue; }
-      // Ownership intrinsic: lưu fileId (dev+ino) của file VỪA TẠO qua fd — release xác
-      // nhận pathname vẫn trỏ tới file của mình, không bao giờ move/unlink path người khác.
+      // Ownership intrinsic: fileId (dev+ino) của file VỪA TẠO qua fd — release không move/unlink path người khác.
       let fileId = null;
       try { const st = fstatSync(fd); if (st && st.ino > 0) fileId = { dev: st.dev, ino: st.ino }; } catch { /* fallback: verify bằng nonce */ }
       return { ok: true, fd, owner: { pid: process.pid, nonce: myNonce, createdAt: Date.now(), fileId }, error: null };
@@ -103,9 +101,8 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
 }
 
 // releaseLock: ownership protocol — KHÔNG move/unlink pathname không do owner tạo.
-//   Có fileId → stat(lockPath) phải trỏ CÙNG inode mới unlink (khác → lock đã bị thay,
-//   fail-closed). Không fileId (test seam) → verify nonce+pid nội dung. Unlink fail →
-//   {ok:false, RECOVERY_REQUIRED} (KHÔNG biến cleanup failure thành success).
+// Có fileId → stat(lockPath) phải trỏ CÙNG inode mới unlink (khác → fail-closed). Không
+// fileId (test seam) → verify nonce+pid. Unlink fail → {ok:false, RECOVERY_REQUIRED}.
 // [test-seam] dùng _fs lookup để honor _setFsOverride (closeSync/unlinkSync).
 export function releaseLock(fd, lockPath, expectedOwner) {
   try { _fs('closeSync')(fd); } catch { /* ignore */ }
@@ -146,8 +143,7 @@ export function withFileLock(namespace, fn, timeoutMs = 5000) {
 
 // ---------- breaker persistence ----------
 
-// Windows-safe + collision-safe: thay ký tự nguy hiểm, giới hạn độ dài (MAX_PATH 260),
-// short hash chống collision khi 2 project khác nhau sanitize thành cùng chuỗi.
+// Windows-safe + collision-safe: thay ký tự nguy hiểm, giới hạn độ dài, short hash chống collision.
 const MAX_PART_LEN = 80;
 const HASH_LEN = 8;
 function _shortHash(s) {
@@ -210,8 +206,7 @@ export function saveBreaker(namespace, registry) {
 }
 
 // ---------- HALF_OPEN probe (atomic claim) ----------
-// claimHalfOpenProbe: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock.
-// Fail-closed: reg.ok=false (corrupt shape) → ok=false, KHÔNG ghi.
+// claimHalfOpenProbe: lock → load → check OPEN + cooldown → set HALF_OPEN → save → unlock. Fail-closed: reg.ok=false → ok=false, KHÔNG ghi.
 export function claimHalfOpenProbe(namespace, tool, cooldownMs = 60_000, now = Date.now()) {
   return withFileLock(namespace, (ns) => {
     const reg = loadBreaker(ns, { cooldownMs });
