@@ -1,6 +1,6 @@
 // breaker-persist.mjs — persist circuit breaker state (Issue #25). YAGNI: JSON + atomic lock-directory.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, readdirSync, rmdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 export function resolveRuntimeRoot() {
@@ -86,6 +86,8 @@ export function acquireLock(lockPath, timeoutMs = 5000) {
   return { ok: false, owner: null, error: `lock timeout after ${timeoutMs}ms: ${reason}` };
 }
 
+// Path-traversal guard (Critical): nonce chỉ chấp nhận UUID canonical do randomUUID sinh; ownerPath phải là file con trực tiếp của lockPath.
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // releaseLock: chỉ unlink owner file của chính caller (tên unique nonce) rồi rmdir lock dir; mọi lỗi → RECOVERY_REQUIRED.
 export function releaseLock(lockPath, expectedOwner) {
   if (!expectedOwner || typeof expectedOwner !== 'object'
@@ -93,7 +95,15 @@ export function releaseLock(lockPath, expectedOwner) {
     return { ok: false, reason: 'RECOVERY_REQUIRED: invalid owner metadata' };
   }
   const fs = _fs;
+  // Nonce chứa slash/backslash/'..'/absolute/non-UUID → RECOVERY_REQUIRED trước unlink (chống path traversal).
+  if (!UUID_V4_RE.test(expectedOwner.nonce)) {
+    return { ok: false, reason: 'RECOVERY_REQUIRED: nonce không phải UUID canonical (chống path traversal)' };
+  }
   const ownerPath = join(lockPath, `${expectedOwner.nonce}.json`);
+  // Defense-in-depth: resolved ownerPath phải là file con trực tiếp của lockPath.
+  if (relative(lockPath, ownerPath) !== `${expectedOwner.nonce}.json`) {
+    return { ok: false, reason: 'RECOVERY_REQUIRED: ownerPath không nằm trong lock dir' };
+  }
   try { fs('unlinkSync')(ownerPath); }
   catch (e) {
     if (e.code === 'ENOENT') return { ok: false, reason: 'RECOVERY_REQUIRED: owner file missing' };

@@ -422,6 +422,47 @@ test('GPT-REV-111: withFileLock release fail (unlink inject) → public wrapper 
     } finally { _setFsOverride(null); }
   });
 });
+test('GPT-REV-112: releaseLock chặn nonce path traversal ../victim.json → RECOVERY_REQUIRED, victim ngoài lock dir không bị xóa', async () => {
+  await withRoot(async (root) => {
+    const lockPath = join(root, 'traversal.lock');
+    const r = acquireLock(lockPath, 1000); assert.equal(r.ok, true);
+    // Victim nằm NGOÀI lock dir (cùng cấp root), đích nhắm của nonce '../victim.json'.
+    const victim = join(root, 'victim.json');
+    writeFileSync(victim, 'DO NOT DELETE', 'utf8');
+    const evil = { pid: r.owner.pid, nonce: '../victim.json' };
+    const rel = releaseLock(lockPath, evil);
+    assert.equal(rel.ok, false, 'traversal nonce phải fail-closed');
+    assert.match(rel.reason, /RECOVERY_REQUIRED/);
+    assert.ok(existsSync(victim), 'victim ngoài lock dir KHÔNG bị xóa');
+    assert.ok(existsSync(lockPath), 'lock dir còn nguyên');
+    assert.ok(existsSync(join(lockPath, `${r.owner.nonce}.json`)), 'owner file thật còn nguyên');
+    // vẫn release hợp lệ với owner thật.
+    const okRel = releaseLock(lockPath, r.owner); assert.equal(okRel.ok, true);
+  });
+});
+test('GPT-REV-112: nonce Windows separator/absolute/non-UUID bị chặn; unlink không bao giờ chạm path ngoài lock dir', async () => {
+  await withRoot(async (root) => {
+    const lockPath = join(root, 'winsep.lock');
+    const r = acquireLock(lockPath, 1000); assert.equal(r.ok, true);
+    const victim = join(root, 'victim-win.json');
+    writeFileSync(victim, 'KEEP', 'utf8');
+    let unlinkCalls = [];
+    const realUnlink = unlinkSync;
+    _setFsOverride({ unlinkSync: (p) => { unlinkCalls.push(p); return realUnlink(p); } });
+    try {
+      const evilNonces = ['..\\victim-win.json', 'C:\\evil.json', '/etc/passwd', 'victim-win.json', 'not-a-uuid', 'a/b/c', '..', '../../..'];
+      for (const nonce of evilNonces) {
+        const rel = releaseLock(lockPath, { pid: r.owner.pid, nonce });
+        assert.equal(rel.ok, false, `nonce '${nonce}' phải bị chặn`);
+        assert.match(rel.reason, /RECOVERY_REQUIRED/);
+        assert.ok(existsSync(victim), `victim còn nguyên (nonce '${nonce}')`);
+        assert.ok(existsSync(join(lockPath, `${r.owner.nonce}.json`)), `owner file thật còn nguyên (nonce '${nonce}')`);
+      }
+      assert.equal(unlinkCalls.length, 0, 'không lần nào unlinkSync được gọi cho nonce tấn công');
+    } finally { _setFsOverride(null); }
+    const okRel = releaseLock(lockPath, r.owner); assert.equal(okRel.ok, true);
+  });
+});
 let pass = 0, fail = 0;
 (async () => {
   for (const c of cases) {
