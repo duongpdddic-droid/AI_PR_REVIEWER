@@ -398,7 +398,7 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
 
 // --- C.22 [GPT-REV-046] activation CÓ AUTHORITY: metadata + GitHub state + GPT approval ---
 {
-  const PV = '2026-09-02.0';
+  const PV = '2026-09-02.1';
   const MERGE_SHA = 'c'.repeat(40);
   const MERGED_HEAD = 'd'.repeat(40);
   const WPR = 'duongpdddic-droid/AI_PR_REVIEWER#4';
@@ -474,7 +474,7 @@ eq('C.14 label reviewing tồn tại', RL.reviewing, 'status:reviewing');
   tru('C.23 local marker sai author → KHÔNG nhận diện', !steadyLocalApproval([wrongLocal], lctx));
   eq('C.23 drift khi chỉ có local marker sai author', planApprovalDrift({ labels: [RL.approved], comments: [wrongLocal], gptApprovers: [], localApprovers: ['duongpdddic'] }).drift, true);
   // 6) planPhaseActivation kích hoạt hợp lệ nhưng GPT approval sai author → không kích hoạt.
-  const PV = '2026-09-02.0';
+  const PV = '2026-09-02.1';
   const MERGE = 'c'.repeat(40);
   const HEAD = 'd'.repeat(40);
   const WPR = 'duongpdddic-droid/AI_PR_REVIEWER#4';

@@ -27,7 +27,7 @@ fs.writeFileSync(TEST_ACK_PATH, [
 const SHA = 'c'.repeat(40);
 const SHA2 = 'd'.repeat(40);
 const POLICY = {
-  policyVersion: '2026-09-02.0',
+  policyVersion: '2026-09-02.1',
   requiredChecks: ['verify'],
   blockingSeverities: ['critical', 'important'],
   finalReviewer: 'agent:gpt',
@@ -36,7 +36,7 @@ const POLICY = {
   approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'], reviewerAuthorityAllowlist: ['gpt-account'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
-    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'manual-dec-001' },
+    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'manual-dec-001', activatedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
     auditLogPath: TEST_AUDIT_PATH, auditLogRoot: TEST_AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
   },
 };
@@ -162,7 +162,7 @@ const MANUAL_OPTS = {
 
 function makeExistingMarker() {
   return '<!-- ai-review-approval:{"repository":"o/r","prNumber":7,"reviewer":"agent:gpt","headSha":"' + SHA +
-    '","policyVersion":"2026-09-02.0","policyDigest":"' + POLICY_DIGEST +
+    '","policyVersion":"2026-09-02.1","policyDigest":"' + POLICY_DIGEST +
     '","decisionId":"manual-dec-001","kind":"MANUAL_REVIEW_EXCEPTION_APPROVED","reason":"PRE_REVIEW_DIFF_LIMIT","ciRunId":"42","gptEvidence":{"url":"https://github.com/o/r/issues/7#issuecomment-12345","commentId":"12345","authorLogin":"gpt-account"},"operatorAck":{"source":"local-state","ackPath":"/tmp/ack.txt","operator":"bo","reason":"PRE_REVIEW_DIFF_LIMIT","ackAt":"2026-09-01T10:00:00Z","issueRef":"#36"},"openBlockingFindings":0,"reviewedAt":"2026-09-01T10:00:00Z","auditWritten":true,"auditRef":"manual-dec-001"} -->';
 }
 
@@ -443,6 +443,48 @@ function makeExistingMarker() {
     await expectThrow('target-decision-mismatch',
       async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_DECISION_MISMATCH');
   }
+  // [GPT-REV-152] enabled=true nhưng target thiếu activatedAt/expiresAt, or cửa sổ sai → fail-closed.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    delete cp.manualException.target.expiresAt;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-missing-expiresAt',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    delete cp.manualException.target.activatedAt;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-missing-activatedAt',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target.activatedAt = '2027-01-01T00:00:00Z';
+    cp.manualException.target.expiresAt = '2028-01-01T00:00:00Z';
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-not-activated-yet',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_NOT_ACTIVATED');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target.activatedAt = '2019-01-01T00:00:00Z';
+    cp.manualException.target.expiresAt = '2019-12-31T00:00:00Z';
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-expired-window',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_EXPIRED');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.activationTtlSeconds = 3600;
+    cp.manualException.target.activatedAt = '2026-01-01T00:00:00Z';
+    cp.manualException.target.expiresAt = '2026-06-01T00:00:00Z';
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-ttl-exceeded',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_TTL_EXCEEDED');
+  }
+
+
 
   // Report
   // ================================================================

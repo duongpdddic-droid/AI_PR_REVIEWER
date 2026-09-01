@@ -35,7 +35,7 @@ import {
   buildApprovalMarker, canMutatePr, effectiveApproval, evaluateChecks,
   isApprovalValid, isManualApprovalValid, parseApprovalMarkers,
   validateApprovalPayload, computePolicyDigest,
-  parseGptEvidenceArtifact, validateGptEvidenceBind, isReviewerAuthorized,
+  parseGptEvidenceArtifact, validateGptEvidenceBind, isReviewerAuthorized, validateManualActivationTarget,
 } from './review-contract.mjs';
 import { resolvePolicyForRepo } from './effective-policy.mjs';
 
@@ -771,6 +771,24 @@ export async function performManualApproval(io, {
     verifiedCiRun: ciRun, verifiedGptEvidence, verifiedOperatorAck,
     expectedPolicyDigest: String(expectedPolicyDigest).toLowerCase(),
   };
+  // [GPT-REV-152] Activation time-window (Issue #38): activatedAt/expiresAt ISO, expiresAt > activatedAt,
+  // duration <= activationTtlSeconds, now & evidence.issuedAt trong cửa sổ, evidence mới không thể gia hạn.
+  // Chạy TRƯỚC mọi mutation/marker/audit SUCCESS — fail-closed (đặt trước section 9 ghi audit PASS).
+  {
+    const windowCheck = validateManualActivationTarget({
+      policyTarget: manualPolicy.target,
+      invocation: { repository: repo, prNumber: pr, headSha, decisionId },
+      evidence: verifiedGptEvidence
+        ? { repository: repo, prNumber: pr, headSha, decisionId, issuedAt: verifiedGptEvidence.issuedAt }
+        : null,
+      nowMs: Date.now(),
+      ttlSeconds: Number(manualPolicy.activationTtlSeconds ?? 0),
+    });
+    if (!windowCheck.ok) {
+      throw new Error('TỪ CHỐI (MANUAL_TARGET_WINDOW): ' + windowCheck.reason);
+    }
+  }
+
 
   // --- 8. Re-read exact state TRƯỚC mutation (drift check) ---
   const view2 = io.getPrView(repo, pr);

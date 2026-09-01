@@ -19,7 +19,7 @@ const incl = (name, s, needle) => results.push({ name, ok: String(s).includes(ne
 const SHA = 'a'.repeat(40);
 const DIGEST = 'b'.repeat(64);
 const RDIGEST = 'c'.repeat(64);
-const POLICY_VERSION = '2026-09-02.0';
+const POLICY_VERSION = '2026-09-02.1';
 
 function artifact(overrides = {}) {
   return {
@@ -93,7 +93,7 @@ eq('prefix constant', GPT_EVIDENCE_PREFIX, 'ai-pr-reviewer:gpt-evidence:');
 // ------------------------------------------------------------- validateManualActivationTarget (GPT-REV-149)
 {
   const T_INV = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001' };
-  const T_POLICY = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001' };
+  const T_POLICY = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001', activatedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' };
   const tk = (o) => validateManualActivationTarget({ policyTarget: { ...T_POLICY, ...o }, invocation: T_INV });
   eq('target ok', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV }).ok, true);
   const tn = validateManualActivationTarget({ policyTarget: null, invocation: T_INV });
@@ -113,6 +113,40 @@ eq('prefix constant', GPT_EVIDENCE_PREFIX, 'ai-pr-reviewer:gpt-evidence:');
   eq('evidence head mismatch → fail', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: { repository: 'o/r', prNumber: 7, headSha: 'e'.repeat(40), decisionId: 'evidence-dec-001' } }).ok, false);
   eq('evidence decision mismatch → fail', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'z' } }).ok, false);
 }
+// ------------------------------------------------------------- GPT-REV-152 activation time-window
+{
+  const W = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001', activatedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' };
+  const INV = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001' };
+  const NOW = Date.parse('2026-09-01T12:00:00Z');
+  const ev = (issuedAt) => ({ ...INV, issuedAt });
+  const tgt = (o) => validateManualActivationTarget({ policyTarget: { ...W, ...o }, invocation: INV, nowMs: NOW });
+  eq('window ok', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: NOW }).ok, true);
+  eq('window ok + evidence', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('2026-08-01T00:00:00Z'), nowMs: NOW }).ok, true);
+  eq('window thiếu activatedAt', tgt({ activatedAt: undefined }).ok, false);
+  incl('window thiếu activatedAt code', tgt({ activatedAt: undefined }).reason, 'MANUAL_TARGET_MISSING');
+  eq('window thiếu expiresAt', tgt({ expiresAt: undefined }).ok, false);
+  incl('window thiếu expiresAt code', tgt({ expiresAt: undefined }).reason, 'MANUAL_TARGET_MISSING');
+  eq('window malformed activatedAt', tgt({ activatedAt: 'not-a-date' }).ok, false);
+  incl('window malformed activatedAt code', tgt({ activatedAt: 'not-a-date' }).reason, 'MANUAL_TARGET_ACTIVATED_AT_INVALID');
+  eq('window malformed expiresAt', tgt({ expiresAt: '2026/01/01' }).ok, false);
+  incl('window malformed expiresAt code', tgt({ expiresAt: '2026/01/01' }).reason, 'MANUAL_TARGET_EXPIRES_AT_INVALID');
+  eq('window expires <= act', tgt({ expiresAt: '2026-01-01T00:00:00Z' }).ok, false);
+  incl('window expires <= act code', tgt({ expiresAt: '2026-01-01T00:00:00Z' }).reason, 'MANUAL_TARGET_EXPIRES_NOT_AFTER');
+  eq('window TTL exceeded', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: NOW, ttlSeconds: 100 }).ok, false);
+  incl('window TTL exceeded code', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: NOW, ttlSeconds: 100 }).reason, 'MANUAL_TARGET_TTL_EXCEEDED');
+  eq('window before activation', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: Date.parse('2025-01-01T00:00:00Z') }).ok, false);
+  incl('window before activation code', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: Date.parse('2025-01-01T00:00:00Z') }).reason, 'MANUAL_TARGET_NOT_ACTIVATED');
+  eq('window after expiry', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: Date.parse('2100-01-01T00:00:00Z') }).ok, false);
+  incl('window after expiry code', validateManualActivationTarget({ policyTarget: W, invocation: INV, nowMs: Date.parse('2100-01-01T00:00:00Z') }).reason, 'MANUAL_TARGET_EXPIRED');
+  eq('window evidence trước', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('2025-06-01T00:00:00Z'), nowMs: NOW }).ok, false);
+  incl('window evidence trước code', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('2025-06-01T00:00:00Z'), nowMs: NOW }).reason, 'MANUAL_TARGET_EVIDENCE_BEFORE_ACTIVATION');
+  eq('window evidence sau expiry', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('2100-01-01T00:00:00Z'), nowMs: NOW }).ok, false);
+  incl('window evidence sau expiry code', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('2100-01-01T00:00:00Z'), nowMs: NOW }).reason, 'MANUAL_TARGET_EVIDENCE_AFTER_EXPIRY');
+  eq('window evidence malformed', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('nope'), nowMs: NOW }).ok, false);
+  incl('window evidence malformed code', validateManualActivationTarget({ policyTarget: W, invocation: INV, evidence: ev('nope'), nowMs: NOW }).reason, 'MANUAL_TARGET_EVIDENCE_ISSUED_AT_INVALID');
+}
+
+
 
 // ------------------------------------------------------------- real verifyGptEvidence
 const goodComments = [{ id: '123', user: { login: 'gpt-account' }, body: body(artifact()) }];

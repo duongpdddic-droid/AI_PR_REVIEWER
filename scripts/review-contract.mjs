@@ -1028,11 +1028,11 @@ export function planDiscoveryBehavior({ validTasks, conflicting = false }) {
 // activation target, invocation (repo/pr/head/decision) và structured evidence.
 // Default policy giữ enabled:false + target:null; khi enabled=true mà target null/missing →
 // fail-closed (không cho mở ngoại lệ vô hạn / không scope). Trả { ok, reason }.
-export function validateManualActivationTarget({ policyTarget, invocation, evidence } = {}) {
+export function validateManualActivationTarget({ policyTarget, invocation, evidence, nowMs, ttlSeconds } = {}) {
   if (!policyTarget || typeof policyTarget !== 'object') {
     return { ok: false, reason: 'MANUAL_TARGET_MISSING: manualException.target trống — fail-closed (GPT-REV-149)' };
   }
-  const req = ['repository', 'prNumber', 'headSha', 'decisionId'];
+  const req = ['repository', 'prNumber', 'headSha', 'decisionId', 'activatedAt', 'expiresAt'];
   for (const k of req) {
     if (policyTarget[k] === undefined || policyTarget[k] === null || policyTarget[k] === '') {
       return { ok: false, reason: `MANUAL_TARGET_MISSING: target thiếu ${k}` };
@@ -1040,6 +1040,48 @@ export function validateManualActivationTarget({ policyTarget, invocation, evide
   }
   if (!/^[0-9a-f]{40}$/i.test(String(policyTarget.headSha))) {
     return { ok: false, reason: 'MANUAL_TARGET_HEAD_INVALID: target headSha không phải full 40-hex' };
+  }
+  // [GPT-REV-152] Activation time-window (Issue #38): target yêu cầu activatedAt/expiresAt ISO.
+  // Fail-closed nếu: thiếu/malformed timestamp, expiresAt <= activatedAt, duration >
+  // activationTtlSeconds, invocation (now) hoặc evidence.issuedAt nằm ngoài cửa sổ, hoặc evidence
+  // mới phát hành sau expiresAt (định gia hạn activation). Chạy TRƯỚC mọi mutation/audit SUCCESS.
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+  const actRaw = String(policyTarget.activatedAt);
+  const expRaw = String(policyTarget.expiresAt);
+  if (!ISO_RE.test(actRaw) || Number.isNaN(Date.parse(actRaw))) {
+    return { ok: false, reason: 'MANUAL_TARGET_ACTIVATED_AT_INVALID: target.activatedAt không phải ISO timestamp hợp lệ' };
+  }
+  if (!ISO_RE.test(expRaw) || Number.isNaN(Date.parse(expRaw))) {
+    return { ok: false, reason: 'MANUAL_TARGET_EXPIRES_AT_INVALID: target.expiresAt không phải ISO timestamp hợp lệ' };
+  }
+  const actMs = Date.parse(actRaw);
+  const expMs = Date.parse(expRaw);
+  if (expMs <= actMs) {
+    return { ok: false, reason: 'MANUAL_TARGET_EXPIRES_NOT_AFTER: target.expiresAt <= activatedAt' };
+  }
+  const ttl = Number(ttlSeconds || 0);
+  if (ttl > 0 && (expMs - actMs) > ttl * 1000) {
+    return { ok: false, reason: `MANUAL_TARGET_TTL_EXCEEDED: duration ${(expMs - actMs) / 1000}s > activationTtlSeconds ${ttl}s` };
+  }
+  const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  if (now < actMs) {
+    return { ok: false, reason: 'MANUAL_TARGET_NOT_ACTIVATED: invocation (now) trước activatedAt' };
+  }
+  if (now > expMs) {
+    return { ok: false, reason: 'MANUAL_TARGET_EXPIRED: invocation (now) sau expiresAt — activation đã hết hạn' };
+  }
+  if (evidence && (evidence.issuedAt !== undefined && evidence.issuedAt !== null && evidence.issuedAt !== '')) {
+    const issRaw = String(evidence.issuedAt);
+    if (!ISO_RE.test(issRaw) || Number.isNaN(Date.parse(issRaw))) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_ISSUED_AT_INVALID: evidence.issuedAt không phải ISO timestamp hợp lệ' };
+    }
+    const issMs = Date.parse(issRaw);
+    if (issMs < actMs) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_BEFORE_ACTIVATION: evidence phát hành trước activatedAt' };
+    }
+    if (issMs > expMs) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_AFTER_EXPIRY: evidence.issuedAt sau expiresAt — evidence mới không thể gia hạn activation' };
+    }
   }
   const inv = invocation || {};
   const eqI = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
@@ -1087,6 +1129,11 @@ export function isManualApprovalValid(record, ctx) {
   const targetCheck = validateManualActivationTarget({
     policyTarget: policy.target,
     invocation: { repository: String(record.repository || ''), prNumber: record.prNumber, headSha: String(record.headSha || ''), decisionId: String(record.decisionId || '') },
+    evidence: record.gptEvidence
+      ? { repository: String(record.repository || ''), prNumber: record.prNumber, headSha: String(record.headSha || ''), decisionId: String(record.decisionId || ''), issuedAt: record.gptEvidence.issuedAt }
+      : null,
+    nowMs: ctx.nowMs,
+    ttlSeconds: policy.activationTtlSeconds,
   });
   if (!targetCheck.ok) return { valid: false, reason: targetCheck.reason };
   const allowedReasons = Array.isArray(policy.allowedReason) ? policy.allowedReason.map(String) : [];

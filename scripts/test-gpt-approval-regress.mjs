@@ -39,7 +39,7 @@ writeAck(ACK_IN_WT);
 writeAck(ACK_IN_MB);
 
 const POLICY = {
-  policyVersion: '2026-09-02.0',
+  policyVersion: '2026-09-02.1',
   requiredChecks: ['verify'],
   blockingSeverities: ['critical', 'important'],
   finalReviewer: 'agent:gpt',
@@ -48,7 +48,7 @@ const POLICY = {
   approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'], reviewerAuthorityAllowlist: ['gpt-account'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
-    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'regress-dec-001' },
+    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'regress-dec-001', activatedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
     auditLogPath: AUDIT_PATH, auditLogRoot: AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
   },
 };
