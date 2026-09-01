@@ -123,6 +123,35 @@ export function defaultRepos(env = process.env, cwd = process.cwd()) {
   return [];
 }
 
+/**
+ * GPT-REV-124: resolve repo cho MUTATION — fail-closed, KHÔNG silent fallback sang default.
+ * Env MCP_TASK_REPOS / origin CWD là config read/env default; tuyệt đối KHÔNG được dùng làm chỗ
+ * ném mutation khi task đã có repo identity (sự cố #29: omit repo → default QLDA_DTXD → mutation
+ * nhầm Issue #49). Nguồn canonical identity = Project Registry #17 (loadRegisteredRepos).
+ * - repo tường minh → validate + PHẢI thuộc canonical registered repos; repo lạ → REPO_NOT_REGISTERED.
+ * - repo bỏ qua → fail-closed, không `defaultRepos()[0]`: registry đúng 1 repo → dùng (unambiguous);
+ *   >1 repo → REPO_AMBIGUOUS (bắt buộc repo tường minh); empty/unavailable → REPO_RESOLUTION_FAILED.
+ */
+export function resolveMutationRepo(repo, { load = loadRegisteredRepos } = {}) {
+  const reg = load();
+  if (reg.ok !== true) {
+    throw new Error(`REPO_RESOLUTION_FAILED: ${reg.errors.join("; ")}`);
+  }
+  const registered = reg.repos;
+  if (repo !== undefined && repo !== null) {
+    const v = validateRepo(repo);
+    if (!registered.includes(v)) {
+      throw new Error(`REPO_NOT_REGISTERED: '${v}' không thuộc canonical Project Registry #17 (registered: ${registered.join(", ")})`);
+    }
+    return v;
+  }
+  if (registered.length === 1) return registered[0];
+  if (registered.length === 0) {
+    throw new Error("REPO_RESOLUTION_FAILED: canonical registry #17 rỗng, không đủ để bind mutation");
+  }
+  throw new Error(`REPO_AMBIGUOUS: mutation bắt buộc truyền 'repo' tường minh — có ${registered.length} repo registered (${registered.join(", ")})`);
+}
+
 // ---------------------------------------------------------------------------
 // gh CLI wrapper (execFileSync, args dạng mảng — không shell, chống injection)
 // ---------------------------------------------------------------------------
@@ -246,8 +275,7 @@ export const ops = {
   async task_create({ repo, title, body = "", agent = "cline", queued = false }) {
     if (!title || typeof title !== "string") throw new Error("'title' là bắt buộc");
     if (!["cline", "gpt"].includes(agent)) throw new Error("'agent' phải là 'cline' hoặc 'gpt'");
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     const status = queued ? "queued" : `ready-for-${agent}`;
     ensureLabel(r, `agent:${agent}`, agent === "cline" ? "1d76db" : "d93f0b");
     ensureLabel(r, `status:${status}`);
@@ -258,8 +286,7 @@ export const ops = {
   },
 
   async task_claim({ repo, number }) {
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     const current = await listLabels(r, number);
     const check = checkTransition("claim", extractStatus(current));
     if (!check.ok) throw new Error(check.error);
@@ -268,8 +295,7 @@ export const ops = {
   },
 
   async task_handoff({ repo, number, pr, handoffReport }) {
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     // GPT-REV-115: handoffReport BẮT BUỘC — thiếu → fail-closed TRƯỚC mọi mutation.
     if (handoffReport === undefined || handoffReport === null) {
       throw new Error("HANDOFF_REPORT_REQUIRED: task_handoff sang review-requested bắt buộc kèm handoffReport theo canonical REVIEW HANDOFF CONTRACT (Issue #32)");
@@ -361,8 +387,7 @@ export const ops = {
     if (!["approve", "request-changes"].includes(verdict)) {
       throw new Error("'verdict' phải là 'approve' hoặc 'request-changes'");
     }
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     const current = await listLabels(r, number);
     const action = verdict === "approve" ? "approve" : "requestChanges";
     const check = checkTransition(action, extractStatus(current));
@@ -375,8 +400,7 @@ export const ops = {
   },
 
   async task_block({ repo, number, reason }) {
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     if (reason) {
       gh(["issue", "comment", String(number), "--body", `BLOCKED: ${reason}`], { repo: r });
     }
@@ -387,8 +411,7 @@ export const ops = {
   async task_comment({ repo, number, body }) {
     if (!Number.isInteger(number) || number <= 0) throw new Error("'number' phải là số nguyên dương");
     if (!body || typeof body !== "string") throw new Error("'body' là bắt buộc");
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     gh(["issue", "comment", String(number), "--body", String(body)], { repo: r });
     return { repo: r, number, commented: true };
   },
@@ -398,8 +421,7 @@ export const ops = {
     if (!head || typeof head !== "string") throw new Error("'head' là bắt buộc (tên nhánh coder)");
     validateRef(head);
     validateRef(base);
-    const r = repo ?? defaultRepos()[0];
-    if (!r) throw new Error("Chưa xác định repo");
+    const r = resolveMutationRepo(repo);
     const prTitle = title ?? `PR cho Issue #${number}`;
     const prBody = body ?? `Closes #${number}`;
     const url = gh(["pr", "create", "--base", base, "--head", head,
@@ -414,7 +436,7 @@ export const ops = {
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON Schema thuần — không cần zod)
 // ---------------------------------------------------------------------------
-const repoProp = { type: "string", description: "Repo dạng owner/name. Bỏ qua → env MCP_TASK_REPOS / origin CWD" };
+const repoProp = { type: "string", description: "Repo dạng owner/name. Với mutation (task_create/claim/handoff/review/block/comment/pr) bắt buộc repo tường minh thuộc canonical Project Registry #17; bỏ qua → fail-closed REPO_AMBIGUOUS (KHÔNG silent fallback sang default). Riêng task_list/task_get (read-only) mới cho bỏ qua → env MCP_TASK_REPOS / origin CWD." };
 const numberProp = { type: "number", description: "Số Issue" };
 
 export const TOOLS = [
