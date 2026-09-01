@@ -261,4 +261,3 @@ export function loadRegistryRepos({ registryPath = DEFAULT_SOC_REGISTRY_PATH, cw
   }
   return { ok: true, repos, errors: [] };
 }
-

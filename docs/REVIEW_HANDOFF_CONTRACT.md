@@ -114,12 +114,14 @@ Report phải kết thúc bằng ĐÚNG 1 trong:
   → `HANDOFF_REPORT_REQUIRED`, report không phải `READY_FOR_REVIEW` (kể cả `BLOCKED` /
   `PARTIAL_EVIDENCE` / invalid / exception) → `HANDOFF_PARTIAL_EVIDENCE`. Chặn fail-closed
   trước mọi mutation.
-- **Canonical registry (GPT-REV-119)**: registered repositories lấy từ **Project Registry
-  canonical** (`~/.ai-pr-reviewer/registry.json` — `registry.projects[].repository`), KHÔNG dùng
-  `.agent/config.json` như allowlist độc lập. `.agent/config.json` chỉ là bootstrap và phải đối
-  chiếu với registry — config khai repo không có trong registry → `CONFIG_REGISTRY_MISMATCH`
-  fail-closed. Registry missing/unreadable/malformed → fail-closed trước mọi mutation. Report
-  khai repository chưa đăng ký → `UNKNOWN_REPOSITORY` fail-closed.
+- **Canonical registry (GPT-REV-123)**: registered repositories đọc từ **Project Registry
+  canonical Soc_brain #17** (`~/.soc-brain/registry/projects.json` theo schema v1.0.0, hoặc env
+  `SOC_PROJECT_REGISTRY_PATH`) qua read-only consumer `mcp-task-server/soc-registry-consumer.mjs`.
+  AI_PR_REVIEWER là **consumer-only** — KHÔNG writer/migration/project-creation, KHÔNG dùng
+  `.agent/config.json` hoặc legacy `~/.ai-pr-reviewer/registry.json` làm canonical source.
+  Fail-closed: missing/malformed/unreadable/unsupported/split-brain →
+  `HANDOFF_REGISTRY_UNAVAILABLE` trước mọi mutation. Report khai repository chưa đăng ký →
+  `UNKNOWN_REPOSITORY` fail-closed.
 - **Identity binding (GPT-REV-118)**: `task_handoff` ràng buộc `handoffReport.identity` với dữ
   liệu **server kiểm soát** — `repository===repo`, `issue===number`, `pullRequest===pr`,
   `headSha===exact PR HEAD` đọc từ `gh pr view`. Mọi mismatch / PR không đọc được HEAD →

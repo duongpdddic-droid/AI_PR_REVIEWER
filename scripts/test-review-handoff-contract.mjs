@@ -437,4 +437,3 @@ if (failed.length > 0) {
   console.error(`FAILED: ${failed.map((f) => f.name).join('; ')}`);
   process.exit(1);
 }
-

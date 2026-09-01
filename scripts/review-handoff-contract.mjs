@@ -492,4 +492,3 @@ if (IS_CLI) {
   console.log(JSON.stringify(out));
   process.exit(happy.status === 'READY_FOR_REVIEW' && gate && p.mode === 'reference' && bad.mode === 'inline' && tr.ok === false ? 0 : 1);
 }
-
