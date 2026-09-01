@@ -99,6 +99,8 @@ try {
     'test-integration-review-runtime.mjs',
     'test-effective-policy.mjs',
     'test-review-phases.mjs',
+    'test-gpt-approval-manual-exception.mjs',
+    'test-gpt-approval-getgatestate.mjs',
     'test-context-routing.mjs',
     'test-context-manager.mjs',
     'test-memory-core.mjs',
@@ -116,8 +118,14 @@ try {
     'mcp-test-evidence/test-executor.mjs',
     'mcp-test-evidence/test-server.mjs',
   ];
+  const resolveSuite = (s) => {
+    const direct = path.join(ROOT, s);
+    if (fs.existsSync(direct)) return direct;
+    // Suite trong scripts/ — root cause fix: entry không prefix `scripts/` (Issue #36).
+    return path.join(ROOT, 'scripts', s);
+  };
   for (const suite of [...optionalSuites, ...mcpSuites]) {
-    const f = path.join(ROOT, suite);
+    const f = resolveSuite(suite);
     if (!fs.existsSync(f)) { add(`${suite} (bỏ qua — chưa tồn tại)`, true, 'skip'); continue; }
     const r = spawnSync(node, [f], { encoding: 'utf8', env: { ...process.env, FULL_VERIFY_CHILD: '1' } });
     add(suite, r.status === 0, r.status === 0 ? '' : (r.stdout || r.stderr || '').trim().split('\n').filter((l) => /FAIL|Error|assert/i.test(l)).slice(-3).join(' | ') || (r.stderr || '').trim().split('\n').slice(-3).join(' | '));

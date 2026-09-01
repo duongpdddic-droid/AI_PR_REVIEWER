@@ -5,6 +5,9 @@
 
 import { performManualApproval } from './gpt-approval.mjs';
 import { LABELS, computePolicyDigest } from './review-contract.mjs';
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 
 const SHA = 'c'.repeat(40);
 const SHA2 = 'd'.repeat(40);
@@ -36,9 +39,16 @@ function makeManualIo(opts = {}) {
     labels: [...(opts.labels ?? [LABELS.reviewRequested])],
     comments: [...(opts.comments ?? [])],
   };
-  const s = { mutations: [] };
+  const s = { mutations: [], audit: [] };
   const io = {
     getPrView() { return { state: pr.state, headRefOid: pr.headRefOid, labels: [...pr.labels] }; },
+    // [GPT-REV-134] Resolve worktree root canonical. Default khớp CLI --worktree-root (/worktree).
+    // opts.gitRootForge → trả root KHÁC → mismatch; opts.gitRootFails → throw (fail-closed).
+    resolveGitRoot({ expectRepo } = {}) {
+      if (opts.gitRootFails) throw new Error('git rev-parse --show-toplevel FAIL');
+      if (opts.gitRootForge) return path.resolve('/elsewhere');
+      return path.resolve(String(opts.gitRoot ?? '/worktree'));
+    },
     getPolicy() {
       if (opts.policyFails) throw new Error('gh api policy FAIL');
       return JSON.parse(JSON.stringify(opts.customPolicy || POLICY));
@@ -60,9 +70,10 @@ function makeManualIo(opts = {}) {
       };
     },
     // [GPT-REV-130] Read audit state — mặc định chưa có PASS (sẽ ghi audit PASS trước marker).
+    // Đọc entry JSONL cuối cùng từ s.audit để mô phỏng idempotency/retry thật.
     readAuditLog() {
       if (opts.auditLogState) return opts.auditLogState;
-      return null;
+      return s.audit.length ? s.audit[s.audit.length - 1] : null;
     },
     verifyGptEvidence() {
       if (opts.gptEvidenceFails) throw new Error(opts.gptEvidenceFailMsg || 'evidence FAIL');
@@ -72,9 +83,13 @@ function makeManualIo(opts = {}) {
       if (opts.ackFails) throw new Error(opts.ackFailMsg || 'invalid ack');
       return { operator: 'bo', reason: 'PRE_REVIEW_DIFF_LIMIT', ackAt: '2026-09-01T10:00:00Z', issueRef: '#36' };
     },
-    appendAuditLog() {
+    appendAuditLog(p, entry) {
       if (opts.auditFails) throw new Error('audit write FAIL');
       s.mutations.push('audit');
+      s.audit.push(entry);
+      // [GPT-REV-132] real-FS test: ghi thật vào đường dẫn để chứng minh realpathSync/append
+      // không throw khi path cha tồn tại.
+      if (opts.realAudit && p) fs.appendFileSync(p, JSON.stringify(entry) + '\n', 'utf8');
     },
     listPrComments() {
       return pr.comments.map((c, i) => {
@@ -264,6 +279,78 @@ function makeExistingMarker() {
       const { io } = makeManualIo({ customPolicy: disabledPolicy });
       await performManualApproval(io, { ...MANUAL_OPTS });
     }, 'enabled');
+
+  // [GPT-REV-134] Worktree root từ GIT metadata — CLI root khác canonical → fail-closed.
+  await expectThrow('git-root-mismatch',
+    async () => {
+      const { io } = makeManualIo({ gitRootForge: true });
+      await performManualApproval(io, { ...MANUAL_OPTS });
+    }, 'WORKTREE_ROOT_MISMATCH');
+
+  // [GPT-REV-133] Gate state negative: artifact verdict PRE_REVIEW_PASS → không phải diff-limit → fail-closed.
+  await expectThrow('gate-state-no-diff-limit',
+    async () => {
+      const { io } = makeManualIo({ gateStateOverride: { blockingStatusLabels: [], preReviewVerdict: 'PRE_REVIEW_PASS', openBlockingFindings: 0, dependencyBlocks: 0, failedGates: [] } });
+      await performManualApproval(io, { ...MANUAL_OPTS });
+    }, 'NO_DIFF_LIMIT_FINDING');
+
+  // [GPT-REV-131] Workflow không thuộc approvedCiWorkflows → fail-closed.
+  await expectThrow('ci-wrong-workflow',
+    async () => {
+      const { io } = makeManualIo({ ciRunOverride: { workflow: 'Some Other Workflow' } });
+      await performManualApproval(io, { ...MANUAL_OPTS });
+    }, 'CI_WORKFLOW_NOT_APPROVED');
+
+  // [GPT-REV-135] FAIL audit entry redacted: failure xảy ra trước marker → ghi entry FAIL có
+  // failureCode máy đọc được, KHÔNG rò rỉ message thô/đường dẫn.
+  {
+    const bad = makeManualIo({ ciRunNotFound: true });
+    await expectThrow('fail-audit-records',
+      async () => performManualApproval(bad.io, { ...MANUAL_OPTS }), 'CI_NOT_COMPLETED');
+    const lastFail = bad.state.audit[bad.state.audit.length - 1];
+    eq('fail-audit: result FAIL', lastFail.result, 'FAIL');
+    eq('fail-audit: failureCode', lastFail.failureCode, 'CI_NOT_COMPLETED');
+    eq('fail-audit: failureReason', lastFail.failureReason, 'CI_NOT_COMPLETED');
+    tru('fail-audit: no raw message', !('message' in lastFail));
+    tru('fail-audit: no ack path', !('operatorAckPath' in lastFail));
+  }
+
+  // [GPT-REV-135] Retry sau FAIL: lần 1 fail (gate wrong) ghi FAIL audit; lần 2 gate đúng → PASS.
+  {
+    const bad = makeManualIo({ gateStateOverride: { blockingStatusLabels: [], preReviewVerdict: 'PRE_REVIEW_PASS', openBlockingFindings: 0, dependencyBlocks: 0, failedGates: [] } });
+    await expectThrow('retry-first-fail',
+      async () => performManualApproval(bad.io, { ...MANUAL_OPTS }), 'NO_DIFF_LIMIT_FINDING');
+    eq('retry: audit FAIL', bad.state.audit[bad.state.audit.length - 1].result, 'FAIL');
+    const ok = makeManualIo();
+    const okR = await performManualApproval(ok.io, { ...MANUAL_OPTS });
+    tru('retry: second attempt PASS', okR.mutated);
+  }
+
+  // [GPT-REV-132] Real-FS path: expandHome + realExisting + realpathSync (bug import cũ) → viết
+  // audit thật vào thư mục real; containment kiểm tra bằng realpath fail-closed, không throw.
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gptapproval-'));
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'gptapproval-wt-'));
+    try {
+      const auditRoot = fs.realpathSync(tmp);
+      const wtr = fs.realpathSync(wt);
+      const auditPath = path.join(auditRoot, 'audit.jsonl');
+      const customPolicy = JSON.parse(JSON.stringify(POLICY));
+      customPolicy.manualException.auditLogPath = auditPath;
+      customPolicy.manualException.auditLogRoot = auditRoot;
+      const customDigest = computePolicyDigest(customPolicy);
+      const { io } = makeManualIo({ customPolicy, gitRoot: wtr, realAudit: true });
+      const r = await performManualApproval(io, { ...MANUAL_OPTS, policyDigest: customDigest, worktreeRoot: wtr, auditLogPath: auditPath });
+      tru('real-fs: mutated', r.mutated);
+      tru('real-fs: audit file written', fs.existsSync(auditPath));
+      const raw = fs.readFileSync(auditPath, 'utf8');
+      const last = JSON.parse(raw.trim().split('\n').pop());
+      eq('real-fs: audit result PASS', last.result, 'PASS');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(wt, { recursive: true, force: true });
+    }
+  }
 
   // Report
   // ================================================================

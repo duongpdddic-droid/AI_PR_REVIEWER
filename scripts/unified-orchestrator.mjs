@@ -26,7 +26,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   AGENTS, DEFAULT_BLOCKING_SEVERITIES, LABELS, REVIEWER_LOCAL,
-  canMutatePr, collectActivationRecords, countReviewRounds, evaluateChecks, evaluateDiffLimits,
+  canMutatePr, collectActivationRecords, computePolicyDigest, countReviewRounds, evaluateChecks, evaluateDiffLimits,
   evaluateSteadyApprovalGates, gateOpenFindings, isStaleEvent, mutationKey,
   normalizeStatusLabels, planEscalationForPhase,
   planApprovalDrift, planCiRouting, planPhaseActivation, planPreReviewOutcome,
@@ -194,6 +194,23 @@ export function hasMarkerFor(comments, key) {
 
 function markerBlock(key, extraMarker = '') {
   return `\n<!-- ai-pr-reviewer:key=${key} -->${extraMarker}`;
+}
+
+// [GPT-REV-133] Emit canonical pre-review artifact — structured JSON trong HTML comment, gắn
+// provenance khóa full HEAD + policyVersion + policyDigest. Đây là nguồn DUY NHẤT cho
+// getGateState của gpt-approval.mjs đọc gate state (verdict/failedGates/openBlockingFindings/
+// dependencyBlocks). Không emit → manual approval fail-closed (không có gate state tin cậy).
+export function buildPreReviewArtifact({
+  version = 1, repository, prNumber, headSha, policyVersion, policyDigest,
+  verdict, decisionGate, failedGates, openBlockingFindings, dependencyBlocks = 0,
+}) {
+  const payload = {
+    version, repository, prNumber, headSha, policyVersion, policyDigest,
+    verdict, decisionGate,
+    failedGates: Array.isArray(failedGates) ? failedGates : [],
+    openBlockingFindings, dependencyBlocks,
+  };
+  return `<!-- ai-pr-reviewer:pre-review-artifact:${JSON.stringify(payload)} -->`;
 }
 
 // ---------------------------------------------------------------- semantic PRE-REVIEW (deterministic)
@@ -583,6 +600,18 @@ export async function processPr(io, repo, number, { dryRun } = {}) {
     const extraMarker = pre.verdict === 'PRE_REVIEW_PASS'
       ? ` <!-- ai-pr-reviewer:pre-review=PRE_REVIEW_PASS:${headSha} -->`
       : roundMarker;
+    // [GPT-REV-133] Emit canonical artifact — nguồn DUY NHẤT cho getGateState (gpt-approval.mjs)
+    // đọc gate state tại HEAD. Khóa full HEAD + policyVersion + policyDigest.
+    parts.push('', buildPreReviewArtifact({
+      repository: repo, prNumber: number, headSha,
+      policyVersion: policy ? policy.policyVersion : 'unknown',
+      policyDigest: policy ? computePolicyDigest(policy) : '',
+      verdict: pre.verdict,
+      decisionGate: pre.decisionGate,
+      failedGates: pre.decisionGate === 'diff-limit' ? ['PRE_REVIEW_DIFF_LIMIT'] : [],
+      openBlockingFindings: pre.openBlocking.length,
+      dependencyBlocks: 0,
+    }));
     parts.push(markerBlock(outKey, extraMarker));
     io.postComment(repo, number, parts.join('\n\n'));
   }

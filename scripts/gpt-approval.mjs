@@ -21,8 +21,12 @@
 //     [--note "trích quyết định GPT"]
 //   node scripts/gpt-approval.mjs --repo owner/name --pr 12 --revoke "lý do"
 
-import { readFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs';
+// [GPT-REV-132] Bổ sung import os + realpathSync: hai ký hiệu này được dùng ở đâu đó trong
+// file (expandHome os.homedir, realpathSync cho containment) nhưng thiếu import → ReferenceError
+// trước mọi mutation khi chạy đường path thật. Test cũ pass vì các path đó không được exercise.
+import { readFileSync, appendFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -116,38 +120,85 @@ export function defaultIo() {
         workflowId: Number(parsed.workflowId || 0),
       };
     },
+    // [GPT-REV-134] Resolve canonical worktree identity/root từ GIT METADATA (không tin CLI).
+    // Cwd là nơi người dùng chạy script — đó là Git metadata đáng tin (rev-parse --show-toplevel)
+    // để suy ra worktree root canonical và đối chiếu remote origin với repo PR. CLI --worktree-root
+    // (nếu còn) chỉ dùng cho diagnostics và bắt buộc khớp EXACT với root resolved — không dùng CLI
+    // làm nguồn tin cậy. Fail-closed khi không realpath được root hoặc identity lệch repo.
+    resolveGitRoot({ cwd, expectRepo } = {}) {
+      const dir = String(cwd || process.cwd());
+      const probe = spawnSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+      if (probe.error || probe.status !== 0 || !String(probe.stdout || '').trim()) {
+        throw new Error('git rev-parse --show-toplevel FAIL tại "' + dir + '" — không xác định được worktree root canonical (GPT-REV-134).');
+      }
+      let root;
+      try { root = realpathSync(String(probe.stdout).trim()); }
+      catch {
+        throw new Error('worktree root không realpath được — fail-closed, không suy đoán root theo path lexical (GPT-REV-134).');
+      }
+      if (expectRepo) {
+        const origin = spawnSync('git', ['-C', root, 'remote', 'get-url', 'origin'], { encoding: 'utf8' });
+        if (origin.error || origin.status !== 0 || !String(origin.stdout || '').trim()) {
+          throw new Error('git remote get-url origin FAIL — không xác định được worktree identity (GPT-REV-134).');
+        }
+        const norm = normalizeGithubRepo(String(origin.stdout || ''));
+        if (!norm || norm !== String(expectRepo).toLowerCase()) {
+          throw new Error('worktree identity mismatch: origin "' + norm + '" != PR repo "' + String(expectRepo) + '" (GPT-REV-134).');
+        }
+      }
+      return root;
+    },
     // [GPT-REV-128] Authoritative pre-review/gate/finding/dependency state tại exact HEAD.
-    // Không tin caller tự khai báo "chỉ có diff-limit": derive từ PR comments + labels thật.
-    // Trả { blockingStatusLabels, preReviewVerdict, openBlockingFindings, dependencyBlocks, failedGates }.
-    getGateState(repo, pr, headSha) {
+    // [GPT-REV-133] KHÔNG còn derive từ text tự do trong comment. Chỉ parse MỘT artifact canonical
+    // có provenance: HTML comment `ai-pr-reviewer:pre-review-artifact` mang structured JSON
+    // {version, repository, prNumber, headSha, policyVersion, policyDigest, verdict, decisionGate,
+    // failedGates, openBlockingFindings, dependencyBlocks}. Phải khớp: repo, PR, full HEAD,
+    // policyVersion + policyDigest (chống artifact từ policy cũ/HEAD khác), và author comment
+    // thuộc allowlist artifactAuthors. Không khớp → preReviewVerdict null → gate fail-closed.
+    getGateState(repo, pr, headSha, expect = {}) {
       const view = this.getPrView(repo, pr);
       const names = labelNames(view);
       const blockingStatusLabels = names.filter((l) =>
         l === LABELS.blocked || l === LABELS.changesRequested || l === LABELS.queued || l === LABELS.inProgress);
       const comments = this.listPrComments(repo, pr);
       const hs = String(headSha || '').toLowerCase();
-      let preReviewVerdict = null;
-      let findingsCount = 0;
-      let dependencyBlocks = 0;
-      let failedGates = [];
+      const allow = Array.isArray(expect.artifactAuthors) ? expect.artifactAuthors.map(String) : [];
+      const ARTIFACT_RE = /<!--\s*ai-pr-reviewer:pre-review-artifact:([^>]+)-->/g;
+      let canonical = null;
       for (const c of comments) {
         const body = c && typeof c === 'object' && c.body != null ? String(c.body) : String(c || '');
-        if (body.includes(`pre-review=PRE_REVIEW_PASS:${hs}`)) preReviewVerdict = 'PRE_REVIEW_PASS';
-        if (body.includes(`pre-review=PRE_REVIEW_FINDINGS:${hs}`)) {
-          preReviewVerdict = 'PRE_REVIEW_FINDINGS';
-          findingsCount = (body.match(/####\s*\[LOCAL-REV-\d+\]/g) || []).length;
+        if (body.indexOf('ai-pr-reviewer:pre-review-artifact:') === -1) continue;
+        // Nguồn có AUTHORITY: author comment phải thuộc allowlist. Comment từ account khác
+        // (spoofed/bot lạ) → bỏ, không được cộng dồn vào gate state.
+        const author = String(c && c.user && c.user.login || '');
+        if (!allow.includes(author)) continue;
+        let m;
+        while ((m = ARTIFACT_RE.exec(body)) !== null) {
+          let a;
+          try { a = JSON.parse(m[1]); } catch { continue; } // JSON hỏng → bỏ, không tự suy diễn
+          if (!a || typeof a !== 'object' || a.version !== 1) continue;
+          if (String(a.repository || '') !== String(repo)) continue;
+          if (Number(a.prNumber) !== Number(pr)) continue;
+          // HEAD phải khớp EXACT (fuzzy → stale-head artifact vẫn match → hỏng). Duyệt tuần tự nên
+          // artifact LỚN TUỔI hơn cho cùng HEAD sẽ ghi đè — giữ artifact MỚI NHẤT đúng HEAD.
+          if (String(a.headSha || '').toLowerCase() !== hs) continue;
+          if (expect.policyVersion && String(a.policyVersion || '') !== String(expect.policyVersion)) continue;
+          if (expect.policyDigest && String(a.policyDigest || '').toLowerCase() !== String(expect.policyDigest).toLowerCase()) continue;
+          if (a.verdict !== 'PRE_REVIEW_PASS' && a.verdict !== 'PRE_REVIEW_FINDINGS') continue;
+          if (!Array.isArray(a.failedGates) || a.failedGates.some((g) => typeof g !== 'string')) continue;
+          canonical = a;
         }
-        const depMatches = body.match(/dependency-block[:=][^\s]+/g) || [];
-        dependencyBlocks += depMatches.length;
-        const gateMatches = body.match(/failed-gate[:=]([A-Z_]+)/g) || [];
-        failedGates = failedGates.concat(gateMatches.map((m) => m.replace(/failed-gate[:=]/, '')));
+      }
+      if (!canonical) {
+        // Không có artifact canonical hợp lệ tại exact HEAD → fail-closed (không có gate state nào tin được).
+        return { blockingStatusLabels, preReviewVerdict: null, openBlockingFindings: 0, dependencyBlocks: 0, failedGates: [] };
       }
       return {
         blockingStatusLabels,
-        preReviewVerdict,
-        openBlockingFindings: findingsCount,
-        dependencyBlocks,
-        failedGates,
+        preReviewVerdict: canonical.verdict,
+        openBlockingFindings: Number(canonical.openBlockingFindings || 0),
+        dependencyBlocks: Number(canonical.dependencyBlocks || 0),
+        failedGates: canonical.failedGates.map(String),
       };
     },
     // [Issue #36] Verify GPT evidence: fetch comment + check author ∈ gptApprovers +
@@ -195,9 +246,10 @@ export function defaultIo() {
       if (!worktreeRoot) throw new Error('worktreeRoot bắt buộc cho containment check — không tin path rời rạc (GPT-REV-129)');
       const absPath = path.resolve(String(ackPath));
       const wt = path.resolve(String(worktreeRoot));
-      const real = (p) => { try { return realpathSync(p); } catch { return path.resolve(p); } };
-      const realWt = real(wt);
-      const rel = path.relative(realWt, real(absPath));
+      // [GPT-REV-134] Fail-closed realpath: nếu root/ack không realpath được → throw, không fallback lexical.
+      // realExisting hỗ trợ ack path chưa tồn tại qua ancestor, nhưng không bao giờ bỏ qua symlink.
+      const realWt = realExisting(wt);
+      const rel = path.relative(realWt, realExisting(absPath));
       if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
         throw new Error('operator ack file "' + absPath + '" nằm trong worktree (' + wt + ') — fail-closed');
       }
@@ -254,6 +306,42 @@ export function defaultIo() {
 
 function labelNames(view) {
   return (view.labels || []).map((l) => (typeof l === 'string' ? l : l.name));
+}
+
+// [GPT-REV-134] Chuẩn hóa remote URL GitHub gh -> "owner/name" (lowercase) để so sánh identity
+// worktree với repo PR. Hỗ trợ cả https://github.com/owner/name(.git) và git@github.com:owner/name(.git).
+function normalizeGithubRepo(url) {
+  const s = String(url || '').trim().replace(/\.git$/i, '');
+  const m = s.match(/github\.com[/:]([^/]+)\/([^/#?]+)/i) || s.match(/^([^/]+)\/([^/#?]+)$/);
+  return m ? (m[1] + '/' + m[2]).toLowerCase() : '';
+}
+
+// [GPT-REV-132][GPT-REV-134] realpath của "ancestor tồn tại gần nhất" + nối lại phần dư.
+// Khác `real` cũ (fail-soft trả path.resolve): với audit path chưa tồn tại (lần ghi đầu) vẫn
+// resolve được qua ancestor; nhưng với path KHÔNG có ancestor realpath được (cấu trúc hỏng/không
+// tồn tại tới root) thì THROW -> fail-closed, không bao giờ dùng đường dẫn lexical chưa được kiểm
+// chứng làm anchor. Dùng cho: audit destination, operator ack, worktree root.
+function realExisting(p) {
+  let cur = path.resolve(String(p));
+  const suffixes = [];
+  for (;;) {
+    try { return path.join(realpathSync(cur), ...suffixes); }
+    catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) throw new Error('không realpath được path: ' + String(p));
+      suffixes.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+// [GPT-REV-135] Phân tách mã lỗi redacted từ message để ghi audit entry FAIL mà KHÔNG rò rỉ
+// đường dẫn/credentials/raw env. Chỉ lấy token [A-Z_]+ trong ngoặc sau "TỪ CHỐI (...)". Không khớp
+// → code tổng quát. Message không bao giờ được ghi vào audit — chỉ code.
+function failureCode(err) {
+  const msg = String((err && err.message) || err || '');
+  const m = msg.match(/TỪ CHỐI \((\w+)\)/);
+  return m ? m[1] : 'MANUAL_APPROVAL_FAIL';
 }
 
 const OTHER_STATUSES = [
@@ -425,6 +513,65 @@ export async function performManualApproval(io, {
   if (!gptApprovers.includes(String(actor || ''))) {
     throw new Error('TỪ CHỐI: actor "' + actor + '" không thuộc gptApprovalCommentAuthors — không được relay approval.');
   }
+  // [GPT-REV-134] Trusted root từ GIT METADATA (không tin CLI --worktree-root làm nguồn tin cậy).
+  // resolveGitRoot suy ra worktree root canonical + đối chiếu origin với repo PR. CLI worktreeRoot
+  // (nếu còn) chỉ cho diagnostics và bắt buộc khớp EXACT → sai root = mismatch, fail-closed.
+  let trustedRoot;
+  try {
+    trustedRoot = io.resolveGitRoot
+      ? io.resolveGitRoot({ expectRepo: repo })
+      : path.resolve(String(worktreeRoot || ''));
+  } catch (e) {
+    throw new Error('TỪ CHỐI (WORKTREE_ROOT): không resolve được worktree root canonical — ' + String((e && e.message) || e).slice(0, 160) + ' (GPT-REV-134).');
+  }
+  if (worktreeRoot && path.resolve(String(worktreeRoot)) !== trustedRoot) {
+    throw new Error('TỪ CHỐI (WORKTREE_ROOT_MISMATCH): CLI --worktree-root "' + worktreeRoot + '" khác worktree root canonical "' + trustedRoot + '" (GPT-REV-134).');
+  }
+
+  // [GPT-REV-129] Audit destination resolved độc lập từ policy (không tin caller). Đây là trusted
+  // destination để ghi cả PASS và FAIL audit — resolve TRƯỚC nhánh rủi ro (GPT-REV-135).
+  const policyAuditPath = manualPolicy.auditLogPath ? String(manualPolicy.auditLogPath) : '';
+  const auditRoot = manualPolicy.auditLogRoot ? String(manualPolicy.auditLogRoot) : '';
+  if (!policyAuditPath || !auditRoot) {
+    throw new Error('TỪ CHỐI (AUDIT_POLICY): policy manualException.auditLogPath/auditLogRoot bắt buộc (GPT-REV-129).');
+  }
+  const expandHome = (p) => (p === '~' || p.startsWith('~/')) ? path.join(os.homedir(), p.slice(2)) : p;
+  const resolvedAuditPath = path.resolve(expandHome(policyAuditPath));
+  const resolvedAuditRoot = path.resolve(expandHome(auditRoot));
+  if (auditLogPath && path.resolve(String(auditLogPath)) !== resolvedAuditPath) {
+    throw new Error('TỪ CHỐI (AUDIT_PATH_MISMATCH): --audit-log-path "' + auditLogPath + '" khác policy path "' + resolvedAuditPath + '" (GPT-REV-129).');
+  }
+  // Containment bằng realpath fail-closed (GPT-REV-132): không fallback lexical làm anchor.
+  const relRoot = path.relative(realExisting(resolvedAuditRoot), realExisting(resolvedAuditPath));
+  if (relRoot.startsWith('..') || path.isAbsolute(relRoot)) {
+    throw new Error('TỪ CHỐI (AUDIT_OUTSIDE_ROOT): audit path "' + resolvedAuditPath + '" ngoài auditLogRoot "' + resolvedAuditRoot + '" (GPT-REV-129).');
+  }
+  const relWt = path.relative(trustedRoot, realExisting(resolvedAuditPath));
+  if (!relWt.startsWith('..') && !path.isAbsolute(relWt)) {
+    throw new Error('TỪ CHỐI (AUDIT_IN_WORKTREE): audit path "' + resolvedAuditPath + '" nằm trong worktree (GPT-REV-129).');
+  }
+  const mbPath = path.join(trustedRoot, 'memory-bank');
+  const relMb = path.relative(mbPath, realExisting(resolvedAuditPath));
+  if (!relMb.startsWith('..') && !path.isAbsolute(relMb)) {
+    throw new Error('TỪ CHỐI (AUDIT_IN_MEMORY_BANK): audit path "' + resolvedAuditPath + '" nằm trong memory-bank (GPT-REV-129).');
+  }
+
+  // [GPT-REV-133] expectedPolicyDigest + artifactAuthors sớm — cần cho provenance gate state.
+  let expectedPolicyDigest;
+  try {
+    expectedPolicyDigest = computePolicyDigest(policy);
+  } catch (e) {
+    throw new Error('TỪ CHỐI (POLICY_DIGEST): ' + String((e && e.message) || e).slice(0, 120));
+  }
+  const artifactAuthors = Array.isArray(policy && policy.approvalAuthorities && policy.approvalAuthorities.localApprovalCommentAuthors)
+    ? policy.approvalAuthorities.localApprovalCommentAuthors.map(String) : [];
+
+  // ===== [GPT-REV-135] SANCTIONED INVOCATION OUTCOME BOUNDARY =====
+  // Mọi lỗi trong nhánh này được ghi audit entry FAIL redacted (chỉ failureCode máy đọc được) vào
+  // destination đã resolve ở trên, rồi rethrow. FAIL audit KHÔNG chứa đường dẫn/credentials/raw
+  // env/message thô.
+  try {
+  // --- 2. Config/identity checks (reason/decisionId/headSha/policyDigest) ---
   const allowedReasons = Array.isArray(manualPolicy.allowedReason) ? manualPolicy.allowedReason.map(String) : [];
   if (!allowedReasons.includes(String(reason || ''))) {
     throw new Error('TỪ CHỐI: reason "' + reason + '" không thuộc [' + allowedReasons.join(', ') + '] — manual path chỉ waive reason được phép.');
@@ -435,9 +582,8 @@ export async function performManualApproval(io, {
   if (!/^[0-9a-f]{40}$/i.test(String(headSha || ''))) {
     throw new Error('TỪ CHỐI: headSha "' + headSha + '" không phải full 40-hex.');
   }
-  // [GPT-REV-129] worktreeRoot BẮT BUỘC: không thể containment check nếu thiếu.
-  if (!worktreeRoot) {
-    throw new Error('TỪ CHỐI (WORKTREE_ROOT): worktreeRoot bắt buộc — không thể kiểm tra containment (GPT-REV-129).');
+  if (String(policyDigest || '').toLowerCase() !== String(expectedPolicyDigest).toLowerCase()) {
+    throw new Error('TỪ CHỐI (POLICY_DIGEST_MISMATCH): policyDigest="' + policyDigest + '" != computed "' + expectedPolicyDigest + '" — policy đã đổi, không approve.');
   }
 
   // --- 2. Verify CI run qua GitHub API (khong tin client-side) ---
@@ -478,7 +624,7 @@ export async function performManualApproval(io, {
   // [GPT-REV-129] worktreeRoot bắt buộc (đã check bước 1); containment realpath.
   let verifiedOperatorAck;
   try {
-    verifiedOperatorAck = io.readOperatorAck(operatorAckPath, { worktreeRoot });
+    verifiedOperatorAck = io.readOperatorAck(operatorAckPath, { worktreeRoot: trustedRoot });
   } catch (e) {
     throw new Error('TỪ CHỐI (OPERATOR_ACK): ' + String((e && e.message) || e).slice(0, 200));
   }
@@ -490,7 +636,7 @@ export async function performManualApproval(io, {
   // (không synthesize 0).
   let gate;
   try {
-    gate = io.getGateState(repo, pr, headSha);
+    gate = io.getGateState(repo, pr, headSha, { policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest).toLowerCase(), artifactAuthors });
   } catch (e) {
     throw new Error('TỪ CHỐI (GATE_STATE): ' + String((e && e.message) || e).slice(0, 200));
   }
@@ -513,45 +659,6 @@ export async function performManualApproval(io, {
   }
   // Derive: 1 blocker (diff-limit) được waive → còn 0. Không synthesize.
   const openBlockingFindings = Math.max(0, Number(gate.openBlockingFindings || 0) - 1);
-
-  // --- 6. [GPT-REV-129] Audit path từ policy (không tin caller path rời rạc) ---
-  const policyAuditPath = manualPolicy.auditLogPath ? String(manualPolicy.auditLogPath) : '';
-  const auditRoot = manualPolicy.auditLogRoot ? String(manualPolicy.auditLogRoot) : '';
-  if (!policyAuditPath || !auditRoot) {
-    throw new Error('TỪ CHỐI (AUDIT_POLICY): policy manualException.auditLogPath/auditLogRoot bắt buộc (GPT-REV-129).');
-  }
-  const expandHome = (p) => (p === '~' || p.startsWith('~/')) ? path.join(os.homedir(), p.slice(2)) : p;
-  const resolvedAuditPath = path.resolve(expandHome(policyAuditPath));
-  const resolvedAuditRoot = path.resolve(expandHome(auditRoot));
-  const real = (p) => { try { return realpathSync(p); } catch { return path.resolve(p); } };
-  // CLI override nếu có PHẢI khớp policy path (strict compare realpath).
-  if (auditLogPath && path.resolve(String(auditLogPath)) !== resolvedAuditPath) {
-    throw new Error('TỪ CHỐI (AUDIT_PATH_MISMATCH): --audit-log-path "' + auditLogPath + '" khác policy path "' + resolvedAuditPath + '" (GPT-REV-129).');
-  }
-  const relRoot = path.relative(real(resolvedAuditRoot), real(resolvedAuditPath));
-  if (relRoot.startsWith('..') || path.isAbsolute(relRoot)) {
-    throw new Error('TỪ CHỐI (AUDIT_OUTSIDE_ROOT): audit path "' + resolvedAuditPath + '" ngoài auditLogRoot "' + resolvedAuditRoot + '" (GPT-REV-129).');
-  }
-  const wtReal = real(path.resolve(String(worktreeRoot)));
-  const relWt = path.relative(wtReal, real(resolvedAuditPath));
-  if (!relWt.startsWith('..') && !path.isAbsolute(relWt)) {
-    throw new Error('TỪ CHỐI (AUDIT_IN_WORKTREE): audit path "' + resolvedAuditPath + '" nằm trong worktree (GPT-REV-129).');
-  }
-  const relMb = path.relative(path.join(wtReal, 'memory-bank'), real(resolvedAuditPath));
-  if (!relMb.startsWith('..') && !path.isAbsolute(relMb)) {
-    throw new Error('TỪ CHỐI (AUDIT_IN_MEMORY_BANK): audit path "' + resolvedAuditPath + '" nằm trong memory-bank (GPT-REV-129).');
-  }
-
-  // --- 7. Compute policy digest + build manual ctx ---
-  let expectedPolicyDigest;
-  try {
-    expectedPolicyDigest = computePolicyDigest(policy);
-  } catch (e) {
-    throw new Error('TỪ CHỐI (POLICY_DIGEST): ' + String((e && e.message) || e).slice(0, 120));
-  }
-  if (String(policyDigest || '').toLowerCase() !== String(expectedPolicyDigest).toLowerCase()) {
-    throw new Error('TỪ CHỐI (POLICY_DIGEST_MISMATCH): policyDigest="' + policyDigest + '" != computed "' + expectedPolicyDigest + '" — policy đã đổi, không approve.');
-  }
 
   const manualCtx = {
     manualExceptionPolicy: manualPolicy, gptApprovers, actorSelf: actor,
@@ -660,6 +767,20 @@ export async function performManualApproval(io, {
     mutated: true, skipped: null, headSha,
     message: 'ĐÃ GHI manual approval ' + AGENTS.gpt + ' cho ' + repo + '#' + pr + ' tại HEAD ' + headSha.slice(0, 12) + ' (reason ' + reason + ', policy ' + policy.policyVersion + ', decision ' + decisionId + ') — status:approved.',
   };
+  } catch (err) {
+    // [GPT-REV-135] Bounded/redacted FAIL audit — destination đã resolve ở trên. Entry chỉ chứa
+    // failureCode máy đọc được (KHÔNG message thô/đường dẫn/credentials/raw env). Best-effort:
+    // nếu chính việc ghi FAIL audit lỗi thì không che lỗi gốc — rethrow nguyên trạng.
+    const failCode = failureCode(err);
+    const failEntry = {
+      timestamp: new Date().toISOString(), repository: repo, prNumber: pr, headSha,
+      reason, ciRunId, policyVersion: policy && policy.policyVersion,
+      decisionId, gptEvidence: String((gptEvidence && gptEvidence.url) || ''),
+      result: 'FAIL', failureCode: failCode, failureReason: failCode,
+    };
+    try { io.appendAuditLog(resolvedAuditPath, failEntry); } catch (_) { /* best-effort */ }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------- revoke

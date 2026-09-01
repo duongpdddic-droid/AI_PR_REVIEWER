@@ -253,6 +253,48 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: editor để lại newline kép cuối file; `git diff --check` coi blank line at EOF là lỗi whitespace.
 - **Tránh lặp lại**: trước commit chạy `git diff --check` trên mọi file đã sửa; cắt dòng trắng thừa ở cuối (file kết thúc bằng ký tự cuối của code, không có blank line). Lỗi này full-verify bắt được nhưng chỉ hiện khi chạy thực tế (pipe/Select-String có thể không in).
 
+## L-049 (01/09/2026) — Shell integration của môi trường không capture stdout đáng tin cậy; dùng file redirect + read
+
+**Triệu chứng**: nhiều lệnh `node scripts/*.mjs` / `Select-String` chạy trong PowerShell không trả output qua kênh shell; terminal chỉ hiển thị prompt đã gõ + dòng chào của PowerShell, còn stdout bị nuốt (exit code vẫn đúng, lệnh chạy xong).
+
+**Nguyên nhân gốc**: shell integration của VS Code Cline không ổn định với các lệnh có output dài/đa dòng hoặc pipeline `| Select-Object`; kết quả "không có output" là do capture fail, KHÔNG phải lệnh fail.
+
+**Tránh lặp lại**: khi cần đọc output dài, redirect ra file tạm (`cmd /c "node scripts\\x.mjs > out.txt 2>&1"`) rồi `read_files` file đó; không kết luận "chạy xong nhưng rỗng" từ kênh shell. Dọn file tạm sau khi đọc.
+
+## L-050 (01/09/2026) — Editor replace không match khi old_text chứa Unicode/Vietnamese hoặc mất dòng header liền kề
+
+**Triệu chứng**: editor replace trả "No replacement performed: text not found" dù old_text đọc từ chính file; và khi replace dòng header, kết quả chèn kèm tool-markup lạ xuống file.
+
+**Nguyên nhân gốc**: (1) ký tự Unicode/Vietnamese (tiếng Việt có dấu) trong old_text dễ lệch byte/white-space khi so khớp — nhất là khi old_text do ta gõ lại thay vì copy nguyên văn từ read; (2) replace một khối lớn có thể chèn nhầm markup nếu new_text được dán lẫn nội dung bất thường.
+
+**Tránh lặp lại**: copy-old_text NGUYÊN VĂN từ output read gần nhất; với khối lớn chia nhỏ, replace bằng tham chiếu không chứa Unicode (nếu được); sau replace READ LẠI vùng đó để xác nhận không chèn markup/tool-call lạ.
+
+## L-051 (01/09/2026) — Splice script tìm marker revoke nhầm comment usage ở đầu file
+
+**Triệu chứng**: splice script findIndex 'revoke' bắt được dòng '--revoke \"lý do\"' (dòng 23) trước cả function start.
+
+**Nguyên nhân gốc**: findIndex scan toàn file không giới hạn vị trí sau start.
+
+**Tránh lặp lại**: Tìm marker revoke với loop từ start+1 trở đi; không dùng findIndex toàn file.
+
+## L-052 (01/09/2026) — Bump policyVersion trên branch feature gây test fail (project-registry)
+
+**Triệu chứng**: test-project-registry AC11 fail vì canonical policy từ remote (main .7) ≠ local constant (.8).
+
+**Nguyên nhân gốc**: Bump policyVersion trên branch feature chưa merge; remote main vẫn version cũ.
+
+**Tránh lặp lại**: Không bump policyVersion khi canonical repo remote chưa merge; hoặc coordinate bump với merge main. Thêm field additive (approvedCiWorkflows) vẫn OK với old version — chỉ digest thay đổi.
+
+## L-053 (01/09/2026) — Test real-FS với policy override: digest đổi + mock bypass I/O thật
+
+**Triệu chứng**: test real-FS (gpt-approval manual) fail hai lần: lần 1 `POLICY_DIGEST_MISMATCH`, lần 2 `ENOENT` mở file audit không tồn tại.
+
+**Nguyên nhân gốc**:
+- Khi test dùng `customPolicy` đổi field (vd `manualException.auditLogPath`) thì `computePolicyDigest(customPolicy)` KHÁC digest của policy base. PASS tới `MANUAL_OPTS.policyDigest = POLICY_DIGEST` (base) → mismatch. Phải tự tính digest của override rồi truyền vào.
+- Mock `io.appendAuditLog`/`readAuditLog` KHÔNG chạm filesystem thật — chỉ đẩy vào array. Assert trên file thật (`fs.existsSync`/`readFileSync`) vô nghĩa vì chưa có gì được ghi. Muốn chứng minh real-FS (realpathSync/append) phải cho mock ghi thật khi cờ `realAudit` bật.
+
+**Tránh lặp lại**: khi test override policy, tính `computePolicyDigest(customPolicy)` và truyền `policyDigest` đó. Khi cần assert side-effect real-FS, mock method phải thực sự gọi FS (appendFileSync) thay vì chỉ ghi vào state — nếu không assertion nói dối.
+
 ## L-039 (26/08/2026) — Stale-lock takeover race: không bao giờ ghi đè lock của instance đang sống
 - **Triệu chứng**: 2 contender cùng thấy lock cũ STALE, cả 2 `unlinkSync` rồi `writeFileSync` (overwrite) → 1 process ghi đè lock mới của process thắng; hoặc unlink luôn lock TƯƠI của process khác đang alive → 2 instance chạy song song (409 conflict / gửi Telegram trùng). GPT-REV-078 Critical.
 - **Nguyên nhân gốc**: takeover dùng `unlinkSync`+`writeFileSync` (không atomic), không serialize contenders, không re-check staleness sau khi giành quyền; `writeFileSync` overwrite vô điều kiện nên xóa được lock của process khác.

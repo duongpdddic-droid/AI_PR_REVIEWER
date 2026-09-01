@@ -1,4 +1,17 @@
 # Active Context
+## Round 3 — GPT-REV-132..135, PR #37 HEAD 55033ce (09/09/2026) — COMPLETED
+- **Nhiệm vụ**: fix 5 mục ưu tiên trên PR #37 tại HEAD 55033ce (GPT-REV-132..135).
+- **Thực hiện**:
+  1. [x] gpt-approval.mjs: thêm import `os` + `realpathSync`; helper `realExisting()` (realpath fail-closed), `normalizeGithubRepo`, `failureCode`; `resolveGitRoot` (git metadata + origin đối chiếu repo PR); `getGateState` parse canonical exact-HEAD artifact có provenance; `readOperatorAck` dùng `realExisting`; `performManualApproval` restructure với pre-resolved audit root + FAIL audit catch block redacted.
+  2. [x] unified-orchestrator.mjs: import `computePolicyDigest`; helper `buildPreReviewArtifact`; emit artifact trong comment pre-review.
+  3. [x] Tests: `test-gpt-approval-manual-exception.mjs` (mock + negatives + real-FS), mới `test-gpt-approval-getgatestate.mjs` (12 case provenance).
+  4. [x] CI: package.json `test:gpt-approval` nối cả 2 suite; verify.yml thêm bước; full-verify optionalSuites thêm suite mới.
+  5. [x] **Root cause fix**: full-verify optionalSuites thiếu prefix `scripts/` → 19 suite bị skip; thêm `resolveSuite()` cho path trỏ `scripts/`.
+- **Verify**: `pnpm test:gpt-approval` 38/38 + 12/12 PASS; `node scripts/full-verify.mjs` 155/155 PASS exit 0 (19 suite chạy thật, không skip); `node --check` 6 file PASS; `git diff --check` sạch.
+- **Deferred**: không đổi policy schema/policyVersion (AC11 project-registry khóa .7); không chạm PR #33/Issue #32; không merge/deploy.
+
+
+# Active Context
 ## Vòng review-fix PR #21 — GPT-REV-094..097 (28/08/2026 01:53)
 - GPT verdict CHANGES_REQUESTED (0 Critical, 4 Important):
   - **094** MCP redaction bypass: `opLogExcerpt` đọc `logExcerpt` raw, `collectFindings` trả `detail` raw — test cũ `maxLines:1` bỏ sót (secret ở dòng 2).
@@ -252,3 +265,16 @@ PR #20 FREEZE tại HEAD `10c9e278e66b7798fac694550dde710b7d0d8931`. GPT DELTA T
 - Chờ GPT review PR #37 (theo dõi `[GPT-REV-NNN]`).
 - Nếu request changes → sửa theo review, commit, push.
 - Merge/deploy do người dùng quyết định.
+### Round 2 — GPT-REV-128..131 (review comment 5488833645, HEAD 58b0b93)
+- [x] GPT-REV-128: authoritative gate state (getGateState) — reject blocking status/dependency/other gate; derive openBlockingFindings (không synth 0)
+- [x] GPT-REV-129: worktreeRoot bắt buộc; audit path từ policy (tilde-expand + realpath containment + strict CLI compare)
+- [x] GPT-REV-130: audit-first (PASS trước marker); marker auditWritten+auditRef; retry resume labels; contract yêu cầu auditVerified+auditWritten
+- [x] GPT-REV-131: CI status===completed + workflow ∈ approvedCiWorkflows (getCiRun trả status/workflowId)
+- [x] Policy: approvedCiWorkflows ['Verify CI'] thêm vào manualException (policyVersion giữ .7 — remote main chưa merge nên không bump)
+- [x] Test: 23/23 PASS; project-registry 136/136 PASS
+- [x] Commit 55033ce pushed (58b0b93..55033ce)
+### Deferred Issues (round 2)
+- [ ] Negative tests bổ sung (gate-state variations, real-FS containment, retry-repair, wrong-workflow, FAIL audit cho pre-validation failure) — commit 55033ce chưa cover, làm ở delta sau
+### Bước tiếp theo
+- Chờ CI verify trên HEAD mới 55033ce (workflow Verify CI)
+- Chờ GPT re-review delta-only
