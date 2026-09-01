@@ -8,7 +8,7 @@ import { defaultIo } from './gpt-approval.mjs';
 
 const SHA = 'c'.repeat(40);
 const SHA2 = 'd'.repeat(40);
-const POL = '2026-08-23.7';
+const POL = '2026-09-02.0';
 const DIG = 'a'.repeat(64);
 const REPO = 'o/r';
 const PR = 7;

@@ -8,6 +8,7 @@
 import { defaultIo } from './gpt-approval.mjs';
 import {
   GPT_EVIDENCE_PREFIX, parseGptEvidenceArtifact, validateGptEvidenceBind, isReviewerAuthorized,
+  validateManualActivationTarget,
 } from './review-contract.mjs';
 
 const results = [];
@@ -18,7 +19,7 @@ const incl = (name, s, needle) => results.push({ name, ok: String(s).includes(ne
 const SHA = 'a'.repeat(40);
 const DIGEST = 'b'.repeat(64);
 const RDIGEST = 'c'.repeat(64);
-const POLICY_VERSION = '2026-08-23.7';
+const POLICY_VERSION = '2026-09-02.0';
 
 function artifact(overrides = {}) {
   return {
@@ -87,6 +88,30 @@ eq('prefix constant', GPT_EVIDENCE_PREFIX, 'ai-pr-reviewer:gpt-evidence:');
   incl('authority self-author code', selfAuth.reason, 'MANUAL_GPT_SELF_AUTHORED');
   const issuerMismatch = isReviewerAuthorized({ authorLogin: 'gpt-account', issuer: 'other', reviewerAuthorities: ['gpt-account'], actorSelf: 'bo' });
   eq('authority issuer mismatch → fail', issuerMismatch.ok, false);
+}
+
+// ------------------------------------------------------------- validateManualActivationTarget (GPT-REV-149)
+{
+  const T_INV = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001' };
+  const T_POLICY = { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001' };
+  const tk = (o) => validateManualActivationTarget({ policyTarget: { ...T_POLICY, ...o }, invocation: T_INV });
+  eq('target ok', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV }).ok, true);
+  const tn = validateManualActivationTarget({ policyTarget: null, invocation: T_INV });
+  eq('target null → fail', tn.ok, false);
+  incl('target null code', tn.reason, 'MANUAL_TARGET_MISSING');
+  eq('target thiếu field → fail', validateManualActivationTarget({ policyTarget: { ...T_POLICY, prNumber: undefined }, invocation: T_INV }).ok, false);
+  eq('target head sha invalid hex → fail', validateManualActivationTarget({ policyTarget: { ...T_POLICY, headSha: 'short' }, invocation: T_INV }).ok, false);
+  eq('target repo mismatch → fail', tk({ repository: 'x/y' }).ok, false);
+  incl('target repo mismatch code', tk({ repository: 'x/y' }).reason, 'MANUAL_TARGET_REPO_MISMATCH');
+  eq('target pr mismatch → fail', tk({ prNumber: 99 }).ok, false);
+  eq('target head mismatch → fail', tk({ headSha: 'e'.repeat(40) }).ok, false);
+  eq('target decision mismatch → fail', tk({ decisionId: 'other' }).ok, false);
+  // structured evidence khớp invocation
+  eq('evidence ok', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: T_INV }).ok, true);
+  eq('evidence repo mismatch → fail', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: { repository: 'y/z', prNumber: 7, headSha: SHA, decisionId: 'evidence-dec-001' } }).ok, false);
+  eq('evidence pr mismatch → fail', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: { repository: 'o/r', prNumber: 99, headSha: SHA, decisionId: 'evidence-dec-001' } }).ok, false);
+  eq('evidence head mismatch → fail', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: { repository: 'o/r', prNumber: 7, headSha: 'e'.repeat(40), decisionId: 'evidence-dec-001' } }).ok, false);
+  eq('evidence decision mismatch → fail', validateManualActivationTarget({ policyTarget: T_POLICY, invocation: T_INV, evidence: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'z' } }).ok, false);
 }
 
 // ------------------------------------------------------------- real verifyGptEvidence

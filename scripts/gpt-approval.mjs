@@ -795,6 +795,9 @@ export async function performManualApproval(io, {
     gptEvidence: String(gptEvidence && gptEvidence.url || ''), operatorAckPath,
     policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest),
     decisionId, result: 'PASS', failureReason: null,
+    // [GPT-REV-149] Activation target: bind exact repository/prNumber/full-40-hex headSha/decisionId
+    // (Issue #38) — activation không thể được tái sử dụng cho target khác.
+    target: { repository: repo, prNumber: pr, headSha, decisionId },
     expiresAt: ttlSeconds > 0 ? new Date(nowMs + ttlSeconds * 1000).toISOString() : null,
   };
   // [Issue #38] Anti-replay + expiry: scan TOÀN BỘ audit entries cho decisionId (không chỉ entry cuối).

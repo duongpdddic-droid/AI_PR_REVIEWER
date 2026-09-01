@@ -1023,6 +1023,56 @@ export function planDiscoveryBehavior({ validTasks, conflicting = false }) {
 // Được gọi từ isApprovalValid sau khi các check chung (headSha/policyVersion/repo/pr/decisionId/authorLogin) đã pass.
 // Fail-closed: thiếu bất kỳ field bắt buộc → reject. Hàm pure: KHÔNG IO; tất cả IO do caller
 // (gpt-approval.mjs) thực hiện và truyền vào ctx kết quả verify.
+// [GPT-REV-149] Activation target binding (Issue #38): một manual activation phải bind EXACT
+// repository + prNumber + full 40-hex headSha + decisionId; và khớp hoàn toàn giữa policy
+// activation target, invocation (repo/pr/head/decision) và structured evidence.
+// Default policy giữ enabled:false + target:null; khi enabled=true mà target null/missing →
+// fail-closed (không cho mở ngoại lệ vô hạn / không scope). Trả { ok, reason }.
+export function validateManualActivationTarget({ policyTarget, invocation, evidence } = {}) {
+  if (!policyTarget || typeof policyTarget !== 'object') {
+    return { ok: false, reason: 'MANUAL_TARGET_MISSING: manualException.target trống — fail-closed (GPT-REV-149)' };
+  }
+  const req = ['repository', 'prNumber', 'headSha', 'decisionId'];
+  for (const k of req) {
+    if (policyTarget[k] === undefined || policyTarget[k] === null || policyTarget[k] === '') {
+      return { ok: false, reason: `MANUAL_TARGET_MISSING: target thiếu ${k}` };
+    }
+  }
+  if (!/^[0-9a-f]{40}$/i.test(String(policyTarget.headSha))) {
+    return { ok: false, reason: 'MANUAL_TARGET_HEAD_INVALID: target headSha không phải full 40-hex' };
+  }
+  const inv = invocation || {};
+  const eqI = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+  if (String(policyTarget.repository) !== String(inv.repository || '')) {
+    return { ok: false, reason: `MANUAL_TARGET_REPO_MISMATCH: target repository="${String(policyTarget.repository)}" != invocation "${String(inv.repository || '')}"` };
+  }
+  if (Number(policyTarget.prNumber) !== Number(inv.prNumber)) {
+    return { ok: false, reason: `MANUAL_TARGET_PR_MISMATCH: target prNumber=${policyTarget.prNumber} != invocation ${Number(inv.prNumber)}` };
+  }
+  if (!eqI(policyTarget.headSha, inv.headSha)) {
+    return { ok: false, reason: 'MANUAL_TARGET_HEAD_MISMATCH: target headSha != invocation headSha' };
+  }
+  if (String(policyTarget.decisionId) !== String(inv.decisionId || '')) {
+    return { ok: false, reason: `MANUAL_TARGET_DECISION_MISMATCH: target decisionId="${String(policyTarget.decisionId)}" != invocation "${String(inv.decisionId || '')}"` };
+  }
+  if (evidence) {
+    const eqE = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+    if (String(evidence.repository || '') !== String(inv.repository || '')) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_REPO_MISMATCH: structured evidence repository != invocation' };
+    }
+    if (Number(evidence.prNumber) !== Number(inv.prNumber)) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_PR_MISMATCH: structured evidence prNumber != invocation' };
+    }
+    if (!eqE(evidence.headSha, inv.headSha)) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_HEAD_MISMATCH: structured evidence headSha != invocation' };
+    }
+    if (String(evidence.decisionId || '') !== String(inv.decisionId || '')) {
+      return { ok: false, reason: 'MANUAL_TARGET_EVIDENCE_DECISION_MISMATCH: structured evidence decisionId != invocation' };
+    }
+  }
+  return { ok: true, reason: null };
+}
+
 export function isManualApprovalValid(record, ctx) {
   if (!ctx || !ctx.manualExceptionPolicy) {
     return { valid: false, reason: 'MANUAL_POLICY_MISSING: ctx.manualExceptionPolicy không được truyền — fail-closed' };
@@ -1031,6 +1081,14 @@ export function isManualApprovalValid(record, ctx) {
   if (policy.enabled !== true) {
     return { valid: false, reason: 'MANUAL_POLICY_DISABLED: manualException.enabled !== true — manual path fail-closed' };
   }
+  // [GPT-REV-149] Activation target (Issue #38): khi enabled=true, manualException.target BẮT BUỘC
+  // và phải bind exact repository/prNumber/full-40-hex headSha/decisionId của invocation. Default
+  // target:null → fail-closed. Không cho mở ngoại lệ vô scope.
+  const targetCheck = validateManualActivationTarget({
+    policyTarget: policy.target,
+    invocation: { repository: String(record.repository || ''), prNumber: record.prNumber, headSha: String(record.headSha || ''), decisionId: String(record.decisionId || '') },
+  });
+  if (!targetCheck.ok) return { valid: false, reason: targetCheck.reason };
   const allowedReasons = Array.isArray(policy.allowedReason) ? policy.allowedReason.map(String) : [];
   if (allowedReasons.length === 0) {
     return { valid: false, reason: 'MANUAL_POLICY_EMPTY: manualException.allowedReason rỗng' };

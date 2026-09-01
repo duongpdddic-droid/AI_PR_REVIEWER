@@ -27,7 +27,7 @@ fs.writeFileSync(TEST_ACK_PATH, [
 const SHA = 'c'.repeat(40);
 const SHA2 = 'd'.repeat(40);
 const POLICY = {
-  policyVersion: '2026-08-23.7',
+  policyVersion: '2026-09-02.0',
   requiredChecks: ['verify'],
   blockingSeverities: ['critical', 'important'],
   finalReviewer: 'agent:gpt',
@@ -36,6 +36,7 @@ const POLICY = {
   approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'], reviewerAuthorityAllowlist: ['gpt-account'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
+    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'manual-dec-001' },
     auditLogPath: TEST_AUDIT_PATH, auditLogRoot: TEST_AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
   },
 };
@@ -161,7 +162,7 @@ const MANUAL_OPTS = {
 
 function makeExistingMarker() {
   return '<!-- ai-review-approval:{"repository":"o/r","prNumber":7,"reviewer":"agent:gpt","headSha":"' + SHA +
-    '","policyVersion":"2026-08-23.7","policyDigest":"' + POLICY_DIGEST +
+    '","policyVersion":"2026-09-02.0","policyDigest":"' + POLICY_DIGEST +
     '","decisionId":"manual-dec-001","kind":"MANUAL_REVIEW_EXCEPTION_APPROVED","reason":"PRE_REVIEW_DIFF_LIMIT","ciRunId":"42","gptEvidence":{"url":"https://github.com/o/r/issues/7#issuecomment-12345","commentId":"12345","authorLogin":"gpt-account"},"operatorAck":{"source":"local-state","ackPath":"/tmp/ack.txt","operator":"bo","reason":"PRE_REVIEW_DIFF_LIMIT","ackAt":"2026-09-01T10:00:00Z","issueRef":"#36"},"openBlockingFindings":0,"reviewedAt":"2026-09-01T10:00:00Z","auditWritten":true,"auditRef":"manual-dec-001"} -->';
 }
 
@@ -394,6 +395,54 @@ function makeExistingMarker() {
       async () => performManualApproval(io, { ...MANUAL_OPTS }), 'REPLAY_CONFLICT');
   }
 
+  // [GPT-REV-149] Activation target (Issue #38): enabled=true nhưng target:null → MANUAL_TARGET_MISSING.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = null;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-null',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  // [GPT-REV-149] target thiếu field bắt buộc → MANUAL_TARGET_MISSING.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    delete cp.manualException.target.prNumber;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-missing-field',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  // [GPT-REV-149] target repository mismatch → MANUAL_TARGET_REPO_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, repository: 'x/y' };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-repo-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_REPO_MISMATCH');
+  }
+  // [GPT-REV-149] target prNumber mismatch → MANUAL_TARGET_PR_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, prNumber: 99 };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-pr-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_PR_MISMATCH');
+  }
+  // [GPT-REV-149] target headSha mismatch → MANUAL_TARGET_HEAD_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, headSha: 'e'.repeat(40) };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-head-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_HEAD_MISMATCH');
+  }
+  // [GPT-REV-149] target decisionId mismatch → MANUAL_TARGET_DECISION_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, decisionId: 'other-dec' };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-decision-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_DECISION_MISMATCH');
+  }
 
   // Report
   // ================================================================
