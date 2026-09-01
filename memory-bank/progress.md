@@ -1,4 +1,33 @@
-## 28/08/2026 00:19 — Re-handoff PR #21 khóa HEAD + Issue #22
+## 02/09/2026 01:55 — Issue #38 PR #39 MERGED vào main `239380a` (GPT approved exact HEAD `39d6258`)
+- Bố xác nhận GPT approved; gate đọc-lại PASS đủ (OPEN/MERGEABLE/non-draft, HEAD exact `39d6258…`, comment `5498797036`, Verify CI SUCCESS, không commit mới). `gh pr merge --squash` → merge commit `239380a` = origin/main; PR #39 state MERGED; CI sau merge (commit `239380a`) COMPLETED/success 19:20:35Z.
+- Issue #38 giữ OPEN (PR body `Ref #38`). Remote branch `feat/issue-38-reviewer-principal` xóa. Không provision credential; `enabled:false`+`target:null`; không re-run pre-review; không chạm PR #33/Issue #32; không deploy/self-approve.
+- Cleannup: remote branch đã xóa. Local worktree `C:\Users\Admin\.ai-pr-reviewer-issue38` + local branch `feat/issue-38-reviewer-principal` GIỮ lại — `git worktree remove` bị chặn vì memory-bank dirty (uncommitted, guard tự nhiên); cần quyết định commit/migrate memory-bank bookkeeping (Round 6 + L-051) trước khi xóa.
+
+
+## 02/09/2026 01:52 — Issue #38 Round 6: fix GPT-REV-152 (activation time-window), re-handoff ACCEPTED → status:review-requested
+- GPT-REV-152: `validateManualActivationTarget` thêm `activatedAt`+`expiresAt` required + validate ISO/`expiresAt>activatedAt`/`duration<=activationTtlSeconds`/`now∈[act,exp]`/`evidence.issuedAt∈[act,exp]` (evidence mới không thể gia hạn). `isManualApprovalValid` truyền evidence+nowMs+ttlSeconds. `performManualApproval` thêm early check TRƯỚC audit PASS (fail-closed MANUAL_TARGET_WINDOW).
+- Bump `policyVersion` `2026-09-02.0`→`2026-09-02.1`; sync đủ pins/tests (policy.json, project-registry CANONICAL_POLICY_VERSION, .agent/project.json, fixtures project-registry ×4, test-pure-logic 2×, evidence/getgatestate/regress/manual-exception). Không đổi maxLines/allowedReason.
+- Negative tests: evidence 80/80 (+27 window), manual-exception 51/51 (+5 window integration).
+- Verify: `node scripts/full-verify.mjs` **161/161 PASS exit 0**; `git diff --check` sạch.
+- Commit `39d6258` push origin `feat/issue-38-reviewer-principal` (`5d7c625..39d6258`); local = remote = PR HEAD.
+- `task_handoff` (#38, PR #39) accepted: reportCommentId `5498797036`, digest `ff6b8b0bcf40787bf84d00fc8f3719b517ccbae8dfef0520a0f5d5cf37751c3b`, labels `agent:gpt`+`status:review-requested`. Trước đó chuyển `review-requested`→`changes-requested`. Issue #38 OPEN; không merge/deploy/approve/enable policy; không provision credential; không chạm PR #33/Issue #32.
+
+
+## 02/09/2026 01:24 — Issue #38 Round 5: fix GPT-REV-149/150/151, re-handoff ACCEPTED → status:review-requested
+- `mcp-task-server__task_handoff` (#38, PR #39) accepted lần 2: reportCommentId `5498447694`, digest `889c292482489df2b29756736d88c2c465ba384ef2250d69a577eecbc911e44d`, head = exact PR HEAD `5d7c625bf380c3130adc3c8ed0d4b3814c1281b2`, labels `agent:gpt` + `status:review-requested`. Issue #38 OPEN (PR body `Ref #38` — không auto-close).
+- GPT-REV-149: `validateManualActivationTarget` (bind exact repo/pr/full-40-hex-head/decisionId; khớp invocation↔evidence↔policy target; target null khi enabled → fail-closed); audit entry thêm `target` binding; policy `manualException.target:null`; negative tests.
+- GPT-REV-150: bump `policyVersion` `2026-08-23.7`→`2026-09-02.0`; sync CANONICAL_POLICY_VERSION/.agent/project.json/fixtures project-registry/test-pure-logic/test-gpt-approval-getgatestate/test-gpt-approval-evidence/test-gpt-approval-regress/test-gpt-approval-manual-exception. Không đổi maxLines/allowedReason.
+- GPT-REV-151: PR #39 body `Closes #38`→`Ref #38` + section "Còn lại / Deployment gate".
+- Verify: `node scripts/full-verify.mjs` **161/161 PASS exit 0** (đúng worktree root); evidence 56/56, manual-exception 46/46, regress 25/25, getgatestate 12/12, pure-logic 229/229, project-registry 136/136; `git diff --check` sạch.
+- Commit `5d7c625` push origin `feat/issue-38-reviewer-principal` (`4c03cdb..5d7c625`); local = remote = PR HEAD.
+- Follow-up issue #41 tạo cho `full-verify.mjs` dùng `process.cwd()` làm ROOT (không sửa trong PR #39). Không merge/deploy/approve/enable policy; không provision credential; không chạm PR #33/Issue #32.
+
+- `mcp-task-server__task_handoff` (#38, PR #39) accepted: reportCommentId `5497909019`, digest `1fc6a4ac...` (khớp local), head = exact PR HEAD `4c03cdb135c28b028457ea0ce23b46279128e6dd`, labels `agent:gpt` + `status:review-requested`.
+- Contract v1.0.0 lấy từ module THẬT running server (`C:\Users\Admin\.cline\AI_PR_REVIEWER\scripts\review-handoff-contract.mjs`): delivery FLAT; findingResolution status enum fixed|disputed|unresolved; tests.items đủ name/location/setup/assertions/negativeAssertion/realFs/result/exitCode; codeEvidence.items đủ 10 field.
+- Local validate bằng chính contract module (registeredRepos có repo) → READY_FOR_REVIEW, verifyHandoffIdentity ok, secret/abs=0. Chỉ retry 1 lần sau local PASS (không trial-and-error).
+- CI `Verify CI` success tại exact HEAD. Không commit/push code; không merge/self-approve/deploy/enable policy.
+
+
 - A: chạy orchestrator THẬT tạo PRE_REVIEW_PASS mới khóa đúng HEAD `039c721` (policy 2026-08-23.7, openBlocking 0), labels `agent:gpt`+`status:review-requested`, CI success, HEAD frozen.
 - B: Issue follow-up #22 "HEAD-Lock Lifecycle & Handoff Gate" (labels rỗng, không auto-claim).
 - Chi tiết: activeContext.md "Re-handoff PR #21 khóa HEAD".
