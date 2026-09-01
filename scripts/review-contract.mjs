@@ -8,6 +8,7 @@
 // - Required checks rỗng/thiếu/không đọc được → CI_MISSING/CI_UNKNOWN fail-closed.
 // Không dependency ngoài (chỉ Node stdlib). Test: scripts/test-pure-logic.mjs
 // và scripts/test-integration-orchestrator.mjs.
+import { createHash } from 'node:crypto';
 
 export const POLICY_PATH = '.github/ai-review-policy.json';
 
@@ -190,14 +191,37 @@ export function planPreReviewOutcome({ verdict, round = 0, maxRounds = 3, decisi
 
 // Marker HTML comment chứa JSON approval — máy đọc được, đính trong comment PR do
 // scripts/gpt-approval.mjs đăng khi relay quyết định GPT.
+//
+// [Issue #36] Thêm field optional cho MANUAL_REVIEW_EXCEPTION_APPROVED:
+//   - `kind` ∈ {undefined|'PRE_REVIEW_PASS'|'MANUAL_REVIEW_EXCEPTION_APPROVED'}
+//     (undefined = backward-compatible, coi như PRE_REVIEW_PASS).
+//   - `reason` (manual only): 'PRE_REVIEW_DIFF_LIMIT' (chỉ reason được phép).
+//   - `ciRunId` (manual only): numeric CI run id, phải verify qua GitHub API
+//     (cùng repo, cùng workflow, head_sha chính xác, conclusion=success).
+//   - `policyDigest` (manual only): SHA-256 hex trên canonical JSON policy
+//     (sorted keys) — chống policy swap giữa approval và mutation.
+//   - `gptEvidence` (manual only): { url, commentId, authorLogin, headSha, policyVersion }
+//     — chỉ chấp nhận issuecomment URL trong đúng repo; author thuộc policy.approvalAuthorities
+//     .gptApprovalCommentAuthors; self-authored comment KHÔNG hợp lệ.
+//   - `operatorAck` (manual only): { source, ackPath, ackId, operator, reason, ackAt, issueRef }
+//     — `source='local-state'` chỉ chấp nhận file ngoài worktree + ngoài memory-bank.
+// `ciEvidence` cũ (cho PRE_REVIEW_PASS) giữ nguyên semantics; manual path thay thế bằng
+// `ciRunId` (GitHub Actions run id) — phải được verify qua API, không tin client-side.
 export function buildApprovalMarker(record) {
+  const kind = record.kind ? String(record.kind) : 'PRE_REVIEW_PASS';
   const json = JSON.stringify({
     repository: String(record.repository),
     prNumber: Number(record.prNumber),
     reviewer: String(record.reviewer), // 'agent:gpt'
     headSha: String(record.headSha),   // full 40-hex SHA
     policyVersion: String(record.policyVersion),
+    policyDigest: record.policyDigest ? String(record.policyDigest) : undefined,
     decisionId: String(record.decisionId), // ID quyết định do người dùng relay cung cấp (GPT-REV-032)
+    kind,
+    reason: record.reason ? String(record.reason) : undefined,
+    ciRunId: record.ciRunId != null ? String(record.ciRunId) : undefined,
+    gptEvidence: record.gptEvidence ?? undefined,
+    operatorAck: record.operatorAck ?? undefined,
     ciEvidence: record.ciEvidence ?? null,
     openBlockingFindings: Number(record.openBlockingFindings ?? 0),
     reviewedAt: String(record.reviewedAt),
@@ -249,6 +273,12 @@ export function parseApprovalMarkers(comments) {
 // [GPT-REV-048] Fail-closed: record PHẢI có provenance (authorLogin + commentId) hợp lệ.
 // GPT approval marker CHỈ hợp lệ khi do user relay (author là người dùng/coder) —
 // marker do actor bất kỳ khác đăng (bot,第三方) bị từ chối.
+//
+// [Issue #36] Hỗ trợ 2 kind:
+//   - 'PRE_REVIEW_PASS' (mặc định, backward-compat): validate như cũ + diff-limit check tùy policy.
+//   - 'MANUAL_REVIEW_EXCEPTION_APPROVED': chỉ waive `PRE_REVIEW_DIFF_LIMIT`; bắt buộc
+//     reason/ciRunId/policyDigest/gptEvidence/operatorAck; ctx.manualExceptionPolicy mô tả
+//     allowed reasons + audit location.
 export function isApprovalValid(record, ctx) {
   if (!record || typeof record !== 'object') return { valid: false, reason: 'record rỗng' };
   // [GPT-REV-048] provenance check: cần authorLogin + commentId
@@ -277,6 +307,16 @@ export function isApprovalValid(record, ctx) {
   }
   if (!gptApprovers.includes(String(record.authorLogin))) {
     return { valid: false, reason: `UNAUTHORIZED_ACTOR: author "${String(record.authorLogin || '(rỗng)')}" không thuộc policy.approvalAuthorities.gptApprovalCommentAuthors` };
+  }
+  // [Issue #36] Manual path: nếu kind = MANUAL_REVIEW_EXCEPTION_APPROVED, áp dụng validation
+  // BỔ SUNG (ciRunId / gptEvidence / operatorAck / reason / policyDigest). PRE_REVIEW_PASS path
+  // không cần các field này.
+  const kind = String(record.kind || 'PRE_REVIEW_PASS');
+  if (kind === 'MANUAL_REVIEW_EXCEPTION_APPROVED') {
+    return isManualApprovalValid(record, ctx);
+  }
+  if (kind !== 'PRE_REVIEW_PASS') {
+    return { valid: false, reason: `kind không hợp lệ: ${kind}` };
   }
   return { valid: true, reason: null };
 }
@@ -969,3 +1009,177 @@ export function planDiscoveryBehavior({ validTasks, conflicting = false }) {
 }
 
 
+
+// [Issue #36] Validate MANUAL_REVIEW_EXCEPTION_APPROVED marker (phần A: reason + ciRunId + policyDigest).
+// Được gọi từ isApprovalValid sau khi các check chung (headSha/policyVersion/repo/pr/decisionId/authorLogin) đã pass.
+// Fail-closed: thiếu bất kỳ field bắt buộc → reject. Hàm pure: KHÔNG IO; tất cả IO do caller
+// (gpt-approval.mjs) thực hiện và truyền vào ctx kết quả verify.
+// [Issue #36] Validate MANUAL_REVIEW_EXCEPTION_APPROVED marker (phần A: reason + ciRunId + policyDigest).
+// Được gọi từ isApprovalValid sau khi các check chung (headSha/policyVersion/repo/pr/decisionId/authorLogin) đã pass.
+// Fail-closed: thiếu bất kỳ field bắt buộc → reject. Hàm pure: KHÔNG IO; tất cả IO do caller
+// (gpt-approval.mjs) thực hiện và truyền vào ctx kết quả verify.
+export function isManualApprovalValid(record, ctx) {
+  if (!ctx || !ctx.manualExceptionPolicy) {
+    return { valid: false, reason: 'MANUAL_POLICY_MISSING: ctx.manualExceptionPolicy không được truyền — fail-closed' };
+  }
+  const policy = ctx.manualExceptionPolicy;
+  if (policy.enabled !== true) {
+    return { valid: false, reason: 'MANUAL_POLICY_DISABLED: manualException.enabled !== true — manual path fail-closed' };
+  }
+  const allowedReasons = Array.isArray(policy.allowedReason) ? policy.allowedReason.map(String) : [];
+  if (allowedReasons.length === 0) {
+    return { valid: false, reason: 'MANUAL_POLICY_EMPTY: manualException.allowedReason rỗng' };
+  }
+  const reason = String(record.reason || '');
+  if (!reason) return { valid: false, reason: 'MANUAL_REASON_MISSING' };
+  if (!allowedReasons.includes(reason)) {
+    return { valid: false, reason: 'MANUAL_REASON_NOT_ALLOWED: "' + reason + '" không thuộc [' + allowedReasons.join(', ') + ']' };
+  }
+
+  // ciRunId
+  const ciRunId = String(record.ciRunId || '');
+  if (!ciRunId) return { valid: false, reason: 'MANUAL_CI_RUN_ID_MISSING' };
+  if (!/^\d+$/.test(ciRunId)) {
+    return { valid: false, reason: 'MANUAL_CI_RUN_ID_INVALID: "' + ciRunId + '" không phải số nguyên' };
+  }
+  if (ctx.verifiedCiRun === undefined) {
+    return { valid: false, reason: 'MANUAL_CI_NOT_VERIFIED: ctx.verifiedCiRun không được truyền' };
+  }
+  if (ctx.verifiedCiRun === null) {
+    return { valid: false, reason: 'MANUAL_CI_NOT_FOUND: ciRunId không tồn tại trên GitHub' };
+  }
+  if (typeof ctx.verifiedCiRun !== 'object') {
+    return { valid: false, reason: 'MANUAL_CI_BAD_VERIFIED: ctx.verifiedCiRun phải là object hoặc null' };
+  }
+  if (String(ctx.verifiedCiRun.repository || '') !== String(record.repository || '')) {
+    return { valid: false, reason: 'MANUAL_CI_REPO_MISMATCH: CI thuộc repo "' + ctx.verifiedCiRun.repository + '" không khớp marker "' + record.repository + '"' };
+  }
+  if (String(ctx.verifiedCiRun.headSha || '').toLowerCase() !== String(record.headSha || '').toLowerCase()) {
+    return { valid: false, reason: 'MANUAL_CI_HEAD_MISMATCH: CI head_sha "' + ctx.verifiedCiRun.headSha + '" không khớp marker "' + record.headSha + '"' };
+  }
+  if (String(ctx.verifiedCiRun.conclusion || '') !== 'success') {
+    return { valid: false, reason: 'MANUAL_CI_NOT_SUCCESS: conclusion="' + ctx.verifiedCiRun.conclusion + '" (yêu cầu "success")' };
+  }
+
+  // policyDigest
+  const policyDigest = String(record.policyDigest || '');
+  if (!policyDigest) return { valid: false, reason: 'MANUAL_POLICY_DIGEST_MISSING' };
+  if (!/^[0-9a-f]{64}$/i.test(policyDigest)) {
+    return { valid: false, reason: 'MANUAL_POLICY_DIGEST_INVALID: "' + policyDigest + '" không phải SHA-256 hex' };
+  }
+  if (!ctx.expectedPolicyDigest) {
+    return { valid: false, reason: 'MANUAL_POLICY_DIGEST_NOT_COMPUTED: ctx.expectedPolicyDigest không được truyền' };
+  }
+  if (String(ctx.expectedPolicyDigest).toLowerCase() !== policyDigest.toLowerCase()) {
+    return { valid: false, reason: 'MANUAL_POLICY_DIGEST_MISMATCH: digest="' + policyDigest + '" expected="' + ctx.expectedPolicyDigest + '"' };
+  }
+
+  return isManualApprovalValidPart2(record, ctx);
+}
+
+// [Issue #36] Phần 2: validate gptEvidence + operatorAck. Tách hàm để tránh new_text vượt giới hạn.
+// Caller không gọi trực tiếp — chỉ qua isManualApprovalValid.
+function isManualApprovalValidPart2(record, ctx) {
+  // gptEvidence
+  const gptEv = record.gptEvidence;
+  if (!gptEv || typeof gptEv !== 'object') {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_MISSING' };
+  }
+  const gptUrl = String(gptEv.url || '');
+  const gptCommentId = String(gptEv.commentId || '');
+  const gptAuthor = String(gptEv.authorLogin || '');
+  if (!gptUrl || !gptCommentId || !gptAuthor) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_FIELDS_MISSING: url/commentId/authorLogin bắt buộc' };
+  }
+  const urlRe = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)#issuecomment-(\d+)$/i;
+  const um = urlRe.exec(gptUrl);
+  if (!um) return { valid: false, reason: 'MANUAL_GPT_URL_INVALID: "' + gptUrl + '" không phải issuecomment URL canonical' };
+  const uOwner = um[1]; const uRepo = um[2]; const uNumber = um[3]; const uCommentId = um[4];
+  if ((uOwner + '/' + uRepo) !== String(record.repository)) {
+    return { valid: false, reason: 'MANUAL_GPT_URL_REPO_MISMATCH: URL trỏ ' + uOwner + '/' + uRepo + ' không khớp marker ' + record.repository };
+  }
+  if (Number(uNumber) !== Number(record.prNumber)) {
+    return { valid: false, reason: 'MANUAL_GPT_URL_PR_MISMATCH: URL pr=' + uNumber + ' không khớp marker prNumber=' + record.prNumber };
+  }
+  if (uCommentId !== gptCommentId) {
+    return { valid: false, reason: 'MANUAL_GPT_URL_COMMENTID_MISMATCH: URL commentId=' + uCommentId + ' không khớp gptEvidence.commentId=' + gptCommentId };
+  }
+  const gptApprovers = Array.isArray(ctx.gptApprovers) ? ctx.gptApprovers.map(String) : [];
+  if (gptApprovers.length === 0) {
+    return { valid: false, reason: 'MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: ctx.gptApprovers rỗng' };
+  }
+  if (!gptApprovers.includes(gptAuthor)) {
+    return { valid: false, reason: 'MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: "' + gptAuthor + '" không thuộc gptApprovalCommentAuthors' };
+  }
+  if (ctx.actorSelf && ctx.actorSelf === gptAuthor) {
+    return { valid: false, reason: 'MANUAL_GPT_SELF_AUTHORED: GPT evidence không được đăng bởi chính actor đang ghi approval' };
+  }
+  if (ctx.verifiedGptEvidence === undefined) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_NOT_VERIFIED: ctx.verifiedGptEvidence không được truyền' };
+  }
+  if (ctx.verifiedGptEvidence === null) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_NOT_FOUND: commentId không tồn tại trong PR comments hoặc thiếu reference headSha/policyVersion' };
+  }
+  if (String(ctx.verifiedGptEvidence.headSha || '').toLowerCase() !== String(record.headSha || '').toLowerCase()) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_HEAD_MISMATCH: GPT evidence tham chiếu HEAD "' + ctx.verifiedGptEvidence.headSha + '" khác marker "' + record.headSha + '"' };
+  }
+  if (String(ctx.verifiedGptEvidence.policyVersion || '') !== String(record.policyVersion || '')) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_POLICY_MISMATCH: GPT evidence tham chiếu policyVersion "' + ctx.verifiedGptEvidence.policyVersion + '" khác marker "' + record.policyVersion + '"' };
+  }
+
+  // operatorAck
+  const op = record.operatorAck;
+  if (!op || typeof op !== 'object') {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_MISSING' };
+  }
+  if (String(op.source || '') !== 'local-state') {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_SOURCE_INVALID: source="' + op.source + '" (chỉ chấp nhận "local-state")' };
+  }
+  const opPath = String(op.ackPath || '');
+  if (!opPath) return { valid: false, reason: 'MANUAL_OPERATOR_ACK_PATH_MISSING' };
+  if (ctx.verifiedOperatorAck === undefined) {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_NOT_VERIFIED: ctx.verifiedOperatorAck không được truyền' };
+  }
+  if (ctx.verifiedOperatorAck === null) {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_INVALID: file ack nằm trong worktree/memory-bank hoặc không đọc được' };
+  }
+  if (String(ctx.verifiedOperatorAck.operator || '').trim() !== String(op.operator || '').trim()) {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_OPERATOR_MISMATCH: operator trong file khác operator trong marker' };
+  }
+  if (String(ctx.verifiedOperatorAck.reason || '') !== String(op.reason || '')) {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_REASON_MISMATCH: reason trong file khác reason trong marker' };
+  }
+  if (String(ctx.verifiedOperatorAck.issueRef || '') !== String(op.issueRef || '')) {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_ISSUE_MISMATCH: issueRef trong file khác issueRef trong marker' };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(String(op.ackAt || ''))) {
+    return { valid: false, reason: 'MANUAL_OPERATOR_ACK_AT_INVALID: ackAt không phải ISO8601' };
+  }
+
+  return { valid: true, reason: null };
+}
+
+// [Issue #36] Compute SHA-256 hex digest trên canonical JSON (sorted keys) cho policy object.
+// Pure, no IO. Trả digest 64-hex chars.
+export function computePolicyDigest(policy) {
+  if (!policy || typeof policy !== 'object') {
+    throw new Error('computePolicyDigest: policy phải là object');
+  }
+  const stable = stableStringify(policy);
+  return createHash('sha256').update(stable, 'utf8').digest('hex');
+}
+
+// Stringify với key sort recursively (RFC 8785 subset). Pure.
+export function stableStringify(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'boolean' || typeof value === 'number') return JSON.stringify(value);
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return '[' + value.map((v) => stableStringify(v)).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+  }
+  throw new Error('stableStringify: type không hỗ trợ: ' + typeof value);
+}

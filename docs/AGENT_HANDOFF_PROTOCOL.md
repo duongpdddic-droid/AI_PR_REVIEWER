@@ -280,6 +280,26 @@ bằng chứng `SENT`/`FAILED` (xem §11).
   handoff approval; chỉ người dùng có thể ghi nhận ngoại lệ hoặc yêu cầu tách PR (GPT-REV-031).
 - GPT không tự merge; Cline không tự deploy; reviewer:local không approve.
 
+## 9a. Manual GPT Approval Path (Issue #36)
+
+Đường đi manual cho phép ghi GPT approval khi automated pre-review fail CHỈ vì
+`PRE_REVIEW_DIFF_LIMIT` (diff vượt `diffLimits.maxLines`). Đây KHÔNG phải alternate
+approval source: chỉ waive đúng reason trong `manualException.allowedReason`; mọi
+blocker/finding/dependency khác vẫn fail-closed.
+
+- Cổng (gate): policy `manualException.enabled === true` (mặc định `false` → fail-closed);
+  reason thuộc `allowedReason`; actor thuộc `approvalAuthorities.gptApprovalCommentAuthors`;
+  PR mở; HEAD không drift.
+- Bắt buộc: `ciRunId` verify trên GitHub (conclusion `success`, đúng repo + head_sha);
+  `gptEvidence` là comment issue của GPT trong allowlist (url/commentId/authorLogin khớp);
+  `operatorAck` (người dùng xác nhận) nằm ngoài worktree; `policyDigest` khớp SHA-256;
+  audit log ghi ngoài worktree (`manualException.auditLogPath`).
+- Marker: `kind: MANUAL_REVIEW_EXCEPTION_APPROVED`, kèm `reason`/`ciRunId`/`gptEvidence`/
+  `operatorAck`/`policyDigest`. Idempotent: marker trùng → skip, không mutation mới.
+- Vẫn tôn trọng khóa HEAD SHA: HEAD đổi → marker cũ vô hiệu, cần verify lại.
+- Thực thi: `scripts/gpt-approval.mjs` (`performManualApproval`); test:
+  `pnpm test:gpt-approval`. Chỉ người dùng bật `enabled: true` khi có nhu cầu vận hành cụ thể.
+
 ## 10. Quy tắc hoàn thành
 
 `COMPLETE` chỉ hợp lệ khi có đủ:

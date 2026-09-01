@@ -7,6 +7,7 @@
     "test": "node scripts/test-pure-logic.mjs && node scripts/test-dod.mjs && node scripts/test-circuit-breaker.mjs && node scripts/test-breaker-persist.mjs",
     "test:integration": "node scripts/test-integration-orchestrator.mjs && node scripts/test-integration-approval-gate.mjs && node scripts/test-integration-review-runtime.mjs",
     "test:policy": "node scripts/test-effective-policy.mjs && node scripts/test-review-phases.mjs",
+    "test:gpt-approval": "node scripts/test-gpt-approval-manual-exception.mjs",
     "test:context": "node scripts/test-context-routing.mjs",
     "test:tg": "node scripts/test-tg-notify.mjs",
     "test:gateway": "node scripts/test-telegram-gateway.mjs",
