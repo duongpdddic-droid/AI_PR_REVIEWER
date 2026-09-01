@@ -1,5 +1,5 @@
 # Active Context
-## Round 4 — GPT-REV-136..138, PR #37 HEAD 9091bdd (09/09/2026) — COMPLETED
+## Round 4 — GPT-REV-136..138, PR #37 HEAD 890a5b0 (09/09/2026) — CODE COMPLETED, HANDOFF BLOCKED
 - **Nhiệm vụ**: fix 3 finding GPT-re-review trên PR #37 tại HEAD `9091bdd` (GPT-REV-136/137/138).
 - **Thực hiện**:
   1. [x] GPT-REV-136: thay lời gọi `real(absPath)` còn sót → `realExisting(absPath)` trong `defaultIo().readOperatorAck()` (ReferenceError mọi ack hợp lệ ngoài worktree). Thêm real-FS test trực tiếp `readOperatorAck` (không mock): ack ngoài worktree OK; ack trong worktree reject; ack trong memory-bank reject; symlink escape reject (skip khi thiếu quyền).
@@ -7,8 +7,9 @@
   3. [x] GPT-REV-138: mở rộng audit boundary — resolve trusted audit destination NGAY SAU trustedRoot, TRƯỚC actor/policy-digest/CI validation; mọi lỗi có destination → FAIL redacted (chỉ failureCode, không message/đường dẫn/ack path); lỗi KHÔNG có destination → `NonAuditableBootstrapFailure` (không ghi audit, không mutation). Test actor-reject/root-mismatch/policy-digest/audit-path mismatch.
 - **Verify**: `node scripts/full-verify.mjs` **158/158 PASS exit 0** (suite regression mới `test-gpt-approval-regress.mjs` 25/25 PASS); `pnpm test:gpt-approval` 38/38 + 12/12 PASS; `node --check` 4 file + `git diff --check` sạch.
 - **Deferred**: không đổi policy schema/policyVersion; không chạm PR #33/Issue #32; không merge/deploy.
-- **Commit**: (chờ commit/push) HEAD mới + push origin `feat/issue-36-gpt-approval-manual-exception`.
-- **BLOCKER bàn giao (vẫn)**: `mcp-task-server__task_handoff` (#36, PR #37) trả `HANDOFF_PARTIAL_EVIDENCE` — `UNKNOWN_REPOSITORY: duongpdddic-droid/AI_PR_REVIEWER`. Running MCP server (dùng `soc-registry-consumer.mjs` absent khỏi worktree) không nhận repo đã đăng ký trong `~/.ai-pr-reviewer/registry.json`. `task_comment`/`task_list` không bị gate → chỉ `task_handoff`. Chờ người dùng quyết (nguồn registered-repos / registry canonical / bypass hợp lệ).
+- **Commit**: `890a5b00ad129c5b50cb96c0dcffd8c415f58c23` (6 file, +440/-59) push origin `feat/issue-36-gpt-approval-manual-exception`. Local = remote = PR HEAD. CI Verify success run `33494113293`.
+- **PR #37**: body + comment tóm tắt fix đã post; OPEN + MERGEABLE, base main.
+- **BLOCKER bàn giao**: thử `mcp-task-server__task_handoff` (#36, PR #37, repo `duongpdddic-droid/AI_PR_REVIEWER`) → `HANDOFF_PARTIAL_EVIDENCE` với `UNKNOWN_REPOSITORY` (repo "undefined" trong registry view của running server). Running MCP server (dùng `soc-registry-consumer.mjs` absent khỏi worktree) không nhận repo — registry source mismatch. KHÔNG bypass label trực tiếp. Chờ người dùng quyết (nguồn registered-repos của running server / registry canonical).
 
 ## Round 3 — GPT-REV-132..135, PR #37 HEAD 55033ce (09/09/2026) — COMPLETED
 - **Nhiệm vụ**: fix 5 mục ưu tiên trên PR #37 tại HEAD 55033ce (GPT-REV-132..135).
