@@ -1,4 +1,15 @@
 # Active Context
+## Round 4 — GPT-REV-136..138, PR #37 HEAD 9091bdd (09/09/2026) — COMPLETED
+- **Nhiệm vụ**: fix 3 finding GPT-re-review trên PR #37 tại HEAD `9091bdd` (GPT-REV-136/137/138).
+- **Thực hiện**:
+  1. [x] GPT-REV-136: thay lời gọi `real(absPath)` còn sót → `realExisting(absPath)` trong `defaultIo().readOperatorAck()` (ReferenceError mọi ack hợp lệ ngoài worktree). Thêm real-FS test trực tiếp `readOperatorAck` (không mock): ack ngoài worktree OK; ack trong worktree reject; ack trong memory-bank reject; symlink escape reject (skip khi thiếu quyền).
+  2. [x] GPT-REV-137: yêu cầu `failedGates` chính xác `["PRE_REVIEW_DIFF_LIMIT"]` (cardinality 1, không duplicate, không gate khác — reject rỗng/[diff,diff]/[diff,other]); validate `openBlockingFindings`/`dependencyBlocks` là finite non-negative integer (reject NaN/negative/float). Negative tests đủ.
+  3. [x] GPT-REV-138: mở rộng audit boundary — resolve trusted audit destination NGAY SAU trustedRoot, TRƯỚC actor/policy-digest/CI validation; mọi lỗi có destination → FAIL redacted (chỉ failureCode, không message/đường dẫn/ack path); lỗi KHÔNG có destination → `NonAuditableBootstrapFailure` (không ghi audit, không mutation). Test actor-reject/root-mismatch/policy-digest/audit-path mismatch.
+- **Verify**: `node scripts/full-verify.mjs` **158/158 PASS exit 0** (suite regression mới `test-gpt-approval-regress.mjs` 25/25 PASS); `pnpm test:gpt-approval` 38/38 + 12/12 PASS; `node --check` 4 file + `git diff --check` sạch.
+- **Deferred**: không đổi policy schema/policyVersion; không chạm PR #33/Issue #32; không merge/deploy.
+- **Commit**: (chờ commit/push) HEAD mới + push origin `feat/issue-36-gpt-approval-manual-exception`.
+- **BLOCKER bàn giao (vẫn)**: `mcp-task-server__task_handoff` (#36, PR #37) trả `HANDOFF_PARTIAL_EVIDENCE` — `UNKNOWN_REPOSITORY: duongpdddic-droid/AI_PR_REVIEWER`. Running MCP server (dùng `soc-registry-consumer.mjs` absent khỏi worktree) không nhận repo đã đăng ký trong `~/.ai-pr-reviewer/registry.json`. `task_comment`/`task_list` không bị gate → chỉ `task_handoff`. Chờ người dùng quyết (nguồn registered-repos / registry canonical / bypass hợp lệ).
+
 ## Round 3 — GPT-REV-132..135, PR #37 HEAD 55033ce (09/09/2026) — COMPLETED
 - **Nhiệm vụ**: fix 5 mục ưu tiên trên PR #37 tại HEAD 55033ce (GPT-REV-132..135).
 - **Thực hiện**:
@@ -9,6 +20,10 @@
   5. [x] **Root cause fix**: full-verify optionalSuites thiếu prefix `scripts/` → 19 suite bị skip; thêm `resolveSuite()` cho path trỏ `scripts/`.
 - **Verify**: `pnpm test:gpt-approval` 38/38 + 12/12 PASS; `node scripts/full-verify.mjs` 155/155 PASS exit 0 (19 suite chạy thật, không skip); `node --check` 6 file PASS; `git diff --check` sạch.
 - **Deferred**: không đổi policy schema/policyVersion (AC11 project-registry khóa .7); không chạm PR #33/Issue #32; không merge/deploy.
+- **Commit/push**: `9091bdd` (9 file, +492/-74) push origin `feat/issue-36-gpt-approval-manual-exception`; base `55033ce`. HEAD full `9091bdd64f9294e844f15130c1eb489f38570262`. Worktree sạch.
+- **CI**: Verify CI (job `verify`) success trên exact HEAD `9091bdd` — run `33487765117` (gồm bước `pnpm test:gpt-approval`).
+- **PR #37**: body đã cập nhật (full 40-hex HEAD + test counts + CI run + delta). OPEN + MERGEABLE, base main.
+- **BLOCKER bàn giao**: `mcp-task-server__task_handoff` (#36, PR #37) trả `HANDOFF_PARTIAL_EVIDENCE` — `UNKNOWN_REPOSITORY: duongpdddic-droid/AI_PR_REVIEWER`. Dù `~/.ai-pr-reviewer/registry.json` (schemaVersion 1.0, projects: Soc_brain / AI_PR_REVIEWER / QLDA_DTXD) ĐĂNG KÝ repo này, running MCP server (bản mới, dùng soc-registry-consumer.mjs absent khỏi worktree) không nhận. `task_comment`/`task_list` không bị gate này → gate chỉ đặc thù `task_handoff`. BLOCKED → cần người dùng quyết (nguồn registered-repos của server / registry canonical).
 
 
 # Active Context

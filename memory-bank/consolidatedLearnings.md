@@ -285,6 +285,16 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 
 **Tránh lặp lại**: Không bump policyVersion khi canonical repo remote chưa merge; hoặc coordinate bump với merge main. Thêm field additive (approvedCiWorkflows) vẫn OK với old version — chỉ digest thay đổi.
 
+## L-054 (09/09/2026) — `const` redeclare trong try shadowing biến `let` khai báo ngoài → catch thấy giá trị stale
+- **Triệu chứng**: mở rộng audit boundary bằng cách khai báo `let resolvedAuditPath = ''` ở ngoài try, trong try lại `const resolvedAuditPath = auditDest.path;` → mọi lỗi trong try throw, nhưng catch nhìn biến ngoài vẫn `''` → wrap thành `NonAuditableBootstrapFailure` thay vì ghi FAIL audit; test cũ `fail-audit-records` bị `bad.state.audit[-1]` → TypeError `Cannot read properties of undefined (reading 'result')`.
+- **Nguyên nhân gốc**: biến đã khai báo ở scope ngoài để catch dùng lại, nhưng bên trong lại `const` redeclare cùng tên → JS tạo binding mới shadowing binding ngoài; catch (scope ngoài) không thấy binding trong.
+- **Tránh lặp lại**: state cần chia sẻ giữa try và catch PHẢI khai báo 1 lần ở scope bao ngoài và **gán** (`resolvedAuditPath = x;`) trong try, KHÔNG `const/let redeclare`. Khi test báo `Cannot read properties of undefined (reading 'result')` trên mảng audit → kiểm tra biến audit destination có bị shadow không.
+
+## L-055 (09/09/2026) — Mock policy dùng path lexical không tồn tại khi production resolve realpath → fail-closed
+- **Triệu chứng**: test-gpt-approval-manual-exception mock `manualException.auditLogPath: '/tmp/audit.jsonl'` (path không tồn tại trên Windows) + production `resolveTrustedAuditDestination` gọi `realExisting()` (realpathSync) → throw `AUDIT_PATH_UNRESOLVABLE` → `NonAuditableBootstrapFailure`, `fail-audit-records` audit mảng rỗng → test fail.
+- **Nguyên nhân gốc**: test dùng path lexical giả `'/tmp/...'`; production resolve realpath fail-closed với path không tồn tại; mock io `readOperatorAck`/`appendAuditLog` bypass I/O thật nên test cũ không phát hiện.
+- **Tránh lặp lại**: khi production dùng `realpathSync`/containment realpath, mock policy/ack phải dùng **real temp dir** (`fs.mkdtempSync(path.join(os.tmpdir(), ...))`) — `realpathSync` cần ancestor tồn tại; đặt ack/audit path ngoài worktree + ngoài memory-bank (2 temp dir khác nhau). Nếu mock bypass của IO không đủ → dùng `defaultIo()` thật cho test real-FS (như test-gpt-approval-regress).
+
 ## L-053 (01/09/2026) — Test real-FS với policy override: digest đổi + mock bypass I/O thật
 
 **Triệu chứng**: test real-FS (gpt-approval manual) fail hai lần: lần 1 `POLICY_DIGEST_MISMATCH`, lần 2 `ENOENT` mở file audit không tồn tại.

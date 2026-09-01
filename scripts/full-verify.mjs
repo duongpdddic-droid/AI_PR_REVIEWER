@@ -101,6 +101,7 @@ try {
     'test-review-phases.mjs',
     'test-gpt-approval-manual-exception.mjs',
     'test-gpt-approval-getgatestate.mjs',
+    'test-gpt-approval-regress.mjs',
     'test-context-routing.mjs',
     'test-context-manager.mjs',
     'test-memory-core.mjs',

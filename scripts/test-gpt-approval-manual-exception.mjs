@@ -9,6 +9,21 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 
+// [GPT-REV-138] Mock policy dùng audit path thật trong temp dir (resolveTrustedAuditDestination
+// gọi realpathSync — path lexical không tồn tại sẽ fail-closed thành NonAuditableBootstrapFailure).
+const TEST_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'gpt-appr-test-'));
+const TEST_AUDIT_ROOT = TEST_TMP;
+const TEST_AUDIT_PATH = path.join(TEST_TMP, 'audit.jsonl');
+const TEST_WORKTREE = fs.mkdtempSync(path.join(os.tmpdir(), 'gpt-appr-wt-'));
+// [GPT-REV-136] Operator ack file cũng phải ngoài worktree + ngoài memory-bank → đặt ngoài TEST_WORKTREE.
+const TEST_ACK_PATH = path.join(TEST_TMP, 'ack.txt');
+fs.writeFileSync(TEST_ACK_PATH, [
+  'OPERATOR: bo',
+  'REASON: PRE_REVIEW_DIFF_LIMIT',
+  'ACK_AT: 2026-09-01T10:00:00Z',
+  'ISSUE_REF: #36',
+].join('\n'), 'utf8');
+
 const SHA = 'c'.repeat(40);
 const SHA2 = 'd'.repeat(40);
 const POLICY = {
@@ -21,7 +36,7 @@ const POLICY = {
   approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
-    auditLogPath: '/tmp/audit.jsonl', auditLogRoot: '/tmp', approvedCiWorkflows: ['Verify CI'],
+    auditLogPath: TEST_AUDIT_PATH, auditLogRoot: TEST_AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
   },
 };
 const POLICY_DIGEST = computePolicyDigest(POLICY);
@@ -47,7 +62,7 @@ function makeManualIo(opts = {}) {
     resolveGitRoot({ expectRepo } = {}) {
       if (opts.gitRootFails) throw new Error('git rev-parse --show-toplevel FAIL');
       if (opts.gitRootForge) return path.resolve('/elsewhere');
-      return path.resolve(String(opts.gitRoot ?? '/worktree'));
+      return path.resolve(String(opts.gitRoot ?? TEST_WORKTREE));
     },
     getPolicy() {
       if (opts.policyFails) throw new Error('gh api policy FAIL');
@@ -128,8 +143,8 @@ async function expectThrow(name, fn, needle) {
 
 const MANUAL_OPTS = {
   repo: 'o/r', pr: 7, reason: 'PRE_REVIEW_DIFF_LIMIT', ciRunId: '42',
-  gptEvidence: GPT_EVIDENCE, operatorAckPath: '/tmp/ack.txt', policyDigest: POLICY_DIGEST,
-  decisionId: 'manual-dec-001', worktreeRoot: '/worktree', auditLogPath: '/tmp/audit.jsonl',
+  gptEvidence: GPT_EVIDENCE, operatorAckPath: TEST_ACK_PATH, policyDigest: POLICY_DIGEST,
+  decisionId: 'manual-dec-001', worktreeRoot: TEST_WORKTREE, auditLogPath: TEST_AUDIT_PATH,
 };
 
 function makeExistingMarker() {
