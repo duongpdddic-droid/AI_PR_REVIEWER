@@ -225,6 +225,11 @@ export function buildApprovalMarker(record) {
     ciEvidence: record.ciEvidence ?? null,
     openBlockingFindings: Number(record.openBlockingFindings ?? 0),
     reviewedAt: String(record.reviewedAt),
+    // [Issue #36 / GPT-REV-130] auditWritten + auditRef: marker chỉ được coi hoàn chỉnh
+    // khi audit log đã ghi PASS. Downstream effectiveApproval yêu cầu auditWritten===true
+    // cho MANUAL_REVIEW_EXCEPTION_APPROVED kind — orphan marker (audit chưa PASS) bị từ chối fail-closed.
+    auditWritten: record.auditWritten === true ? true : undefined,
+    auditRef: record.auditRef ? String(record.auditRef) : undefined,
   });
   return `<!-- ai-review-approval:${json} -->`;
 }
@@ -1072,6 +1077,18 @@ export function isManualApprovalValid(record, ctx) {
   }
   if (String(ctx.expectedPolicyDigest).toLowerCase() !== policyDigest.toLowerCase()) {
     return { valid: false, reason: 'MANUAL_POLICY_DIGEST_MISMATCH: digest="' + policyDigest + '" expected="' + ctx.expectedPolicyDigest + '"' };
+  }
+
+  // [GPT-REV-130] Marker manual CHỈ hợp lệ khi audit log đã xác nhận PASS (ctx.auditVerified===true).
+  // Fail-closed: không truyền auditVerified (undefined/false) → marker chưa hoàn chỉnh → từ chối.
+  // Điều này chặn orphan marker (audit ghi lỗi sau khi đăng marker) không bao giờ được coi là
+  // effective approval ở downstream effectiveApproval / drift-check.
+  if (ctx.auditVerified !== true) {
+    return { valid: false, reason: 'MANUAL_AUDIT_NOT_VERIFIED: ctx.auditVerified !== true — marker thiếu bằng chứng audit PASS, không được coi là approval hiệu lực' };
+  }
+  // [GPT-REV-130] Marker phải tự khai báo auditWritten===true (bằng chứng audit đã ghi).
+  if (record.auditWritten !== true) {
+    return { valid: false, reason: 'MANUAL_AUDIT_NOT_WRITTEN: marker auditWritten !== true — không được coi là approval hiệu lực' };
   }
 
   return isManualApprovalValidPart2(record, ctx);

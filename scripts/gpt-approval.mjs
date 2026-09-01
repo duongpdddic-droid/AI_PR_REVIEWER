@@ -100,7 +100,7 @@ export function defaultIo() {
       let out;
       try {
         out = gh(['api', 'repos/' + repo + '/actions/runs/' + String(runId), '--jq',
-          '{repository: .repository.full_name, headSha: .head_sha, conclusion: .conclusion, workflow: .name}']);
+          '{repository: .repository.full_name, headSha: .head_sha, status: .status, conclusion: .conclusion, workflow: .name, workflowId: (.workflow_id // 0)}']);
       } catch (e) {
         // 404 hoặc lỗi khác → coi như không tìm thấy CI run (fail-closed ở caller).
         return null;
@@ -110,8 +110,44 @@ export function defaultIo() {
       return {
         repository: String(parsed.repository || ''),
         headSha: String(parsed.headSha || ''),
+        status: String(parsed.status || ''),
         conclusion: String(parsed.conclusion || ''),
         workflow: String(parsed.workflow || ''),
+        workflowId: Number(parsed.workflowId || 0),
+      };
+    },
+    // [GPT-REV-128] Authoritative pre-review/gate/finding/dependency state tại exact HEAD.
+    // Không tin caller tự khai báo "chỉ có diff-limit": derive từ PR comments + labels thật.
+    // Trả { blockingStatusLabels, preReviewVerdict, openBlockingFindings, dependencyBlocks, failedGates }.
+    getGateState(repo, pr, headSha) {
+      const view = this.getPrView(repo, pr);
+      const names = labelNames(view);
+      const blockingStatusLabels = names.filter((l) =>
+        l === LABELS.blocked || l === LABELS.changesRequested || l === LABELS.queued || l === LABELS.inProgress);
+      const comments = this.listPrComments(repo, pr);
+      const hs = String(headSha || '').toLowerCase();
+      let preReviewVerdict = null;
+      let findingsCount = 0;
+      let dependencyBlocks = 0;
+      let failedGates = [];
+      for (const c of comments) {
+        const body = c && typeof c === 'object' && c.body != null ? String(c.body) : String(c || '');
+        if (body.includes(`pre-review=PRE_REVIEW_PASS:${hs}`)) preReviewVerdict = 'PRE_REVIEW_PASS';
+        if (body.includes(`pre-review=PRE_REVIEW_FINDINGS:${hs}`)) {
+          preReviewVerdict = 'PRE_REVIEW_FINDINGS';
+          findingsCount = (body.match(/####\s*\[LOCAL-REV-\d+\]/g) || []).length;
+        }
+        const depMatches = body.match(/dependency-block[:=][^\s]+/g) || [];
+        dependencyBlocks += depMatches.length;
+        const gateMatches = body.match(/failed-gate[:=]([A-Z_]+)/g) || [];
+        failedGates = failedGates.concat(gateMatches.map((m) => m.replace(/failed-gate[:=]/, '')));
+      }
+      return {
+        blockingStatusLabels,
+        preReviewVerdict,
+        openBlockingFindings: findingsCount,
+        dependencyBlocks,
+        failedGates,
       };
     },
     // [Issue #36] Verify GPT evidence: fetch comment + check author ∈ gptApprovers +
@@ -155,18 +191,20 @@ export function defaultIo() {
     // Trả {operator, reason, ackAt, issueRef} hoặc throw (invalid).
     readOperatorAck(ackPath, { worktreeRoot }) {
       if (!ackPath) throw new Error('operatorAckPath bắt buộc');
+      // [GPT-REV-129] worktreeRoot BẮT BUỘC (không còn optional): thiếu → fail-closed.
+      if (!worktreeRoot) throw new Error('worktreeRoot bắt buộc cho containment check — không tin path rời rạc (GPT-REV-129)');
       const absPath = path.resolve(String(ackPath));
-      if (worktreeRoot) {
-        const wt = path.resolve(String(worktreeRoot));
-        const rel = path.relative(wt, absPath);
-        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
-          throw new Error('operator ack file "' + absPath + '" nằm trong worktree (' + wt + ') — fail-closed');
-        }
-        const mbPath = path.join(wt, 'memory-bank');
-        const relMb = path.relative(mbPath, absPath);
-        if (!relMb.startsWith('..') && !path.isAbsolute(relMb)) {
-          throw new Error('operator ack file "' + absPath + '" nằm trong memory-bank — fail-closed');
-        }
+      const wt = path.resolve(String(worktreeRoot));
+      const real = (p) => { try { return realpathSync(p); } catch { return path.resolve(p); } };
+      const realWt = real(wt);
+      const rel = path.relative(realWt, real(absPath));
+      if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+        throw new Error('operator ack file "' + absPath + '" nằm trong worktree (' + wt + ') — fail-closed');
+      }
+      const mbPath = path.join(realWt, 'memory-bank');
+      const relMb = path.relative(mbPath, real(absPath));
+      if (!relMb.startsWith('..') && !path.isAbsolute(relMb)) {
+        throw new Error('operator ack file "' + absPath + '" nằm trong memory-bank — fail-closed');
       }
       const content = readFileSync(absPath, 'utf8');
       const lines = String(content).split(/\r?\n/);
@@ -190,12 +228,23 @@ export function defaultIo() {
       return out;
     },
     // [Issue #36] Append JSONL entry vào audit log. Fail-closed: throw nếu không ghi được.
+    // [GPT-REV-129] Audit path phải đến từ policy manualException.auditLogPath/auditLogRoot
+    // (không tin caller tự đặt path rời rạc); containment: dưới auditLogRoot, ngoài worktree,
+    // ngoài memory-bank. [GPT-REV-130] Ghi audit TRƯỚC khi đăng marker (marker không bao giờ
+    // tồn tại mà thiếu audit — orphan không xảy ra).
     appendAuditLog(logPath, entry) {
       if (!logPath) throw new Error('auditLogPath bắt buộc');
       const absPath = path.resolve(String(logPath));
       const dir = path.dirname(absPath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       appendFileSync(absPath, JSON.stringify(entry) + '\n', 'utf8');
+    },
+    // [GPT-REV-130] Read audit state: trả entry JSONL cuối cùng của audit log hoặc null.
+    readAuditLog(logPath) {
+      if (!logPath || !existsSync(String(logPath))) return null;
+      const lines = String(readFileSync(String(logPath), 'utf8')).split(/\r?\n/).filter(Boolean);
+      if (!lines.length) return null;
+      try { return JSON.parse(lines[lines.length - 1]); } catch { return null; }
     },
     log(level, msg) { console.error(`[${level}] ${msg}`); },
   };
@@ -356,14 +405,13 @@ export async function performManualApproval(io, {
   const view = io.getPrView(repo, pr);
   const headSha = view.headRefOid;
   if (!canMutatePr(view.state)) {
-    throw new Error(`TỪ CHỐI: PR ${repo}#${pr} state=${view.state} — chỉ PR open được mutation.`);
+    throw new Error('TỪ CHỐI: PR ' + repo + '#' + pr + ' state=' + view.state + ' — chỉ PR open được mutation.');
   }
-
   let policy;
   try {
     policy = io.getPolicy(repo, headSha);
   } catch (e) {
-    throw new Error(`TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại HEAD — ${String((e && e.message) || e).slice(0, 160)}`);
+    throw new Error('TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại HEAD — ' + String((e && e.message) || e).slice(0, 160));
   }
   const manualPolicy = policy && policy.manualException;
   if (!manualPolicy || typeof manualPolicy !== 'object' || manualPolicy.enabled !== true) {
@@ -375,34 +423,47 @@ export async function performManualApproval(io, {
   }
   const actor = io.getCurrentUser();
   if (!gptApprovers.includes(String(actor || ''))) {
-    throw new Error(`TỪ CHỐI: actor "${actor}" không thuộc gptApprovalCommentAuthors — không được relay approval.`);
+    throw new Error('TỪ CHỐI: actor "' + actor + '" không thuộc gptApprovalCommentAuthors — không được relay approval.');
   }
   const allowedReasons = Array.isArray(manualPolicy.allowedReason) ? manualPolicy.allowedReason.map(String) : [];
   if (!allowedReasons.includes(String(reason || ''))) {
-    throw new Error(`TỪ CHỐI: reason "${reason}" không thuộc [${allowedReasons.join(', ')}] — manual path chỉ waive reason được phép.`);
+    throw new Error('TỪ CHỐI: reason "' + reason + '" không thuộc [' + allowedReasons.join(', ') + '] — manual path chỉ waive reason được phép.');
   }
   if (String(decisionId || '').trim() === '' || /\s/.test(String(decisionId || ''))) {
     throw new Error('TỪ CHỐI: decisionId bắt buộc, không chứa khoảng trắng.');
   }
   if (!/^[0-9a-f]{40}$/i.test(String(headSha || ''))) {
-    throw new Error(`TỪ CHỐI: headSha "${headSha}" không phải full 40-hex.`);
+    throw new Error('TỪ CHỐI: headSha "' + headSha + '" không phải full 40-hex.');
+  }
+  // [GPT-REV-129] worktreeRoot BẮT BUỘC: không thể containment check nếu thiếu.
+  if (!worktreeRoot) {
+    throw new Error('TỪ CHỐI (WORKTREE_ROOT): worktreeRoot bắt buộc — không thể kiểm tra containment (GPT-REV-129).');
   }
 
-  // --- 2. Verify CI run qua GitHub API (không tin client-side) ---
+  // --- 2. Verify CI run qua GitHub API (khong tin client-side) ---
+  // [GPT-REV-131] Bat buoc: status==='completed', conclusion==='success',
+  // workflow thuoc policy manualException.approvedCiWorkflows (approved workflow identity).
   let ciRun;
   try {
     ciRun = io.getCiRun(repo, ciRunId);
   } catch (e) {
-    throw new Error(`TỪ CHỐI (CI_NOT_FOUND): không đọc được CI run ${ciRunId} — ${String((e && e.message) || e).slice(0, 160)}`);
+    throw new Error('TỪ CHỐI (CI_NOT_FOUND): không đọc được CI run ' + ciRunId + ' — ' + String((e && e.message) || e).slice(0, 160));
   }
   if (ciRun && ciRun.repository && String(ciRun.repository) !== String(repo)) {
-    throw new Error(`TỪ CHỐI (CI_REPO_MISMATCH): CI run thuộc repo "${ciRun.repository}" không khớp "${repo}".`);
+    throw new Error('TỪ CHỐI (CI_REPO_MISMATCH): CI run thuộc repo "' + ciRun.repository + '" không khớp "' + repo + '".');
   }
   if (ciRun && String(ciRun.headSha || '').toLowerCase() !== String(headSha).toLowerCase()) {
-    throw new Error(`TỪ CHỐI (CI_HEAD_MISMATCH): CI head_sha "${ciRun.headSha}" không khớp PR head "${headSha}".`);
+    throw new Error('TỪ CHỐI (CI_HEAD_MISMATCH): CI head_sha "' + ciRun.headSha + '" không khớp PR head "' + headSha + '".');
+  }
+  if (!ciRun || String(ciRun.status || '') !== 'completed') {
+    throw new Error('TỪ CHỐI (CI_NOT_COMPLETED): CI run ' + ciRunId + ' status="' + (ciRun && ciRun.status) + '" — yêu cầu completed (GPT-REV-131).');
   }
   if (!ciRun || String(ciRun.conclusion || '') !== 'success') {
-    throw new Error(`TỪ CHỐI (CI_FAIL): CI run ${ciRunId} conclusion="${ciRun && ciRun.conclusion}" — yêu cầu success.`);
+    throw new Error('TỪ CHỐI (CI_FAIL): CI run ' + ciRunId + ' conclusion="' + (ciRun && ciRun.conclusion) + '" — yêu cầu success.');
+  }
+  const approvedWorkflows = Array.isArray(manualPolicy.approvedCiWorkflows) ? manualPolicy.approvedCiWorkflows.map(String) : [];
+  if (approvedWorkflows.length > 0 && !approvedWorkflows.includes(String(ciRun.workflow || ''))) {
+    throw new Error('TỪ CHỐI (CI_WORKFLOW_NOT_APPROVED): workflow "' + ciRun.workflow + '" không thuộc [' + approvedWorkflows.join(', ') + '] (GPT-REV-131).');
   }
 
   // --- 3. Verify GPT evidence (canonical artifact, không self-authored) ---
@@ -410,26 +471,86 @@ export async function performManualApproval(io, {
   try {
     verifiedGptEvidence = io.verifyGptEvidence(repo, pr, gptEvidence, { gptApprovers, headSha, policyVersion: policy.policyVersion, actorSelf: actor });
   } catch (e) {
-    throw new Error(`TỪ CHỐI (GPT_EVIDENCE): ${String((e && e.message) || e).slice(0, 200)}`);
+    throw new Error('TỪ CHỐI (GPT_EVIDENCE): ' + String((e && e.message) || e).slice(0, 200));
   }
 
   // --- 4. Verify operator ack (file ngoài worktree + ngoài memory-bank) ---
+  // [GPT-REV-129] worktreeRoot bắt buộc (đã check bước 1); containment realpath.
   let verifiedOperatorAck;
   try {
     verifiedOperatorAck = io.readOperatorAck(operatorAckPath, { worktreeRoot });
   } catch (e) {
-    throw new Error(`TỪ CHỐI (OPERATOR_ACK): ${String((e && e.message) || e).slice(0, 200)}`);
+    throw new Error('TỪ CHỐI (OPERATOR_ACK): ' + String((e && e.message) || e).slice(0, 200));
   }
 
-  // --- 5. Compute policy digest + build manual ctx ---
+  // --- 5. [GPT-REV-128] Authoritative gate state tại exact HEAD ---
+  // Chứng minh PRE_REVIEW_DIFF_LIMIT là blocker DUY NHẤT: pre-review verdict phải là
+  // PRE_REVIEW_FINDINGS với đúng 1 finding blocking (diff-limit); không có blocking status,
+  // dependency block, hay failed gate khác. openBlockingFindings DERIVE từ gate state
+  // (không synthesize 0).
+  let gate;
+  try {
+    gate = io.getGateState(repo, pr, headSha);
+  } catch (e) {
+    throw new Error('TỪ CHỐI (GATE_STATE): ' + String((e && e.message) || e).slice(0, 200));
+  }
+  const blockingStatusLabels = Array.isArray(gate.blockingStatusLabels) ? gate.blockingStatusLabels : [];
+  if (blockingStatusLabels.length) {
+    throw new Error('TỪ CHỐI (STATUS_BLOCKED): PR đang ở trạng thái blocking [' + blockingStatusLabels.join(', ') + '] — không được waive (GPT-REV-128).');
+  }
+  if (String(gate.preReviewVerdict || '') !== 'PRE_REVIEW_FINDINGS') {
+    throw new Error('TỪ CHỐI (NO_DIFF_LIMIT_FINDING): pre-review verdict="' + gate.preReviewVerdict + '" — cần PRE_REVIEW_FINDINGS tại HEAD (GPT-REV-128).');
+  }
+  if (Number(gate.openBlockingFindings || 0) !== 1) {
+    throw new Error('TỪ CHỐI (BLOCKER_COUNT): openBlockingFindings=' + gate.openBlockingFindings + ' — cần đúng 1 blocker (diff-limit) (GPT-REV-128).');
+  }
+  if (Number(gate.dependencyBlocks || 0) > 0) {
+    throw new Error('TỪ CHỐI (DEPENDENCY_BLOCK): có ' + gate.dependencyBlocks + ' dependency block — không được waive (GPT-REV-128).');
+  }
+  const otherGates = (Array.isArray(gate.failedGates) ? gate.failedGates : []).filter((g) => g !== 'PRE_REVIEW_DIFF_LIMIT');
+  if (otherGates.length) {
+    throw new Error('TỪ CHỐI (OTHER_GATE_FAIL): failed gates khác diff-limit: [' + otherGates.join(', ') + '] (GPT-REV-128).');
+  }
+  // Derive: 1 blocker (diff-limit) được waive → còn 0. Không synthesize.
+  const openBlockingFindings = Math.max(0, Number(gate.openBlockingFindings || 0) - 1);
+
+  // --- 6. [GPT-REV-129] Audit path từ policy (không tin caller path rời rạc) ---
+  const policyAuditPath = manualPolicy.auditLogPath ? String(manualPolicy.auditLogPath) : '';
+  const auditRoot = manualPolicy.auditLogRoot ? String(manualPolicy.auditLogRoot) : '';
+  if (!policyAuditPath || !auditRoot) {
+    throw new Error('TỪ CHỐI (AUDIT_POLICY): policy manualException.auditLogPath/auditLogRoot bắt buộc (GPT-REV-129).');
+  }
+  const expandHome = (p) => (p === '~' || p.startsWith('~/')) ? path.join(os.homedir(), p.slice(2)) : p;
+  const resolvedAuditPath = path.resolve(expandHome(policyAuditPath));
+  const resolvedAuditRoot = path.resolve(expandHome(auditRoot));
+  const real = (p) => { try { return realpathSync(p); } catch { return path.resolve(p); } };
+  // CLI override nếu có PHẢI khớp policy path (strict compare realpath).
+  if (auditLogPath && path.resolve(String(auditLogPath)) !== resolvedAuditPath) {
+    throw new Error('TỪ CHỐI (AUDIT_PATH_MISMATCH): --audit-log-path "' + auditLogPath + '" khác policy path "' + resolvedAuditPath + '" (GPT-REV-129).');
+  }
+  const relRoot = path.relative(real(resolvedAuditRoot), real(resolvedAuditPath));
+  if (relRoot.startsWith('..') || path.isAbsolute(relRoot)) {
+    throw new Error('TỪ CHỐI (AUDIT_OUTSIDE_ROOT): audit path "' + resolvedAuditPath + '" ngoài auditLogRoot "' + resolvedAuditRoot + '" (GPT-REV-129).');
+  }
+  const wtReal = real(path.resolve(String(worktreeRoot)));
+  const relWt = path.relative(wtReal, real(resolvedAuditPath));
+  if (!relWt.startsWith('..') && !path.isAbsolute(relWt)) {
+    throw new Error('TỪ CHỐI (AUDIT_IN_WORKTREE): audit path "' + resolvedAuditPath + '" nằm trong worktree (GPT-REV-129).');
+  }
+  const relMb = path.relative(path.join(wtReal, 'memory-bank'), real(resolvedAuditPath));
+  if (!relMb.startsWith('..') && !path.isAbsolute(relMb)) {
+    throw new Error('TỪ CHỐI (AUDIT_IN_MEMORY_BANK): audit path "' + resolvedAuditPath + '" nằm trong memory-bank (GPT-REV-129).');
+  }
+
+  // --- 7. Compute policy digest + build manual ctx ---
   let expectedPolicyDigest;
   try {
     expectedPolicyDigest = computePolicyDigest(policy);
   } catch (e) {
-    throw new Error(`TỪ CHỐI (POLICY_DIGEST): ${String((e && e.message) || e).slice(0, 120)}`);
+    throw new Error('TỪ CHỐI (POLICY_DIGEST): ' + String((e && e.message) || e).slice(0, 120));
   }
   if (String(policyDigest || '').toLowerCase() !== String(expectedPolicyDigest).toLowerCase()) {
-    throw new Error(`TỪ CHỐI (POLICY_DIGEST_MISMATCH): policyDigest="${policyDigest}" != computed "${expectedPolicyDigest}" — policy đã đổi, không approve.`);
+    throw new Error('TỪ CHỐI (POLICY_DIGEST_MISMATCH): policyDigest="' + policyDigest + '" != computed "' + expectedPolicyDigest + '" — policy đã đổi, không approve.');
   }
 
   const manualCtx = {
@@ -437,87 +558,110 @@ export async function performManualApproval(io, {
     verifiedCiRun: ciRun, verifiedGptEvidence, verifiedOperatorAck,
     expectedPolicyDigest: String(expectedPolicyDigest).toLowerCase(),
   };
+
+  // --- 8. Re-read exact state TRƯỚC mutation (drift check) ---
+  const view2 = io.getPrView(repo, pr);
+  if (String(view2.headRefOid || '').toLowerCase() !== String(headSha).toLowerCase()) {
+    throw new Error('TỪ CHỐI (HEAD_DRIFT): PR HEAD đổi giữa validation và mutation (' + headSha.slice(0, 12) + ' → ' + String(view2.headRefOid || '').slice(0, 12) + ') — fail-closed.');
+  }
+  if (!canMutatePr(view2.state)) {
+    throw new Error('TỪ CHỐI: PR state đổi thành ' + view2.state + ' — không mutation.');
+  }
+
+  // --- 9. [GPT-REV-130] Audit TRƯỚC marker (transaction state) + idempotency/repair ---
+  // Giao dịch: audit PASS phải tồn tại TRƯỚC khi marker được coi là hoàn chỉnh.
+  // Ghi audit trước → nếu audit fail, chưa có marker nào (không orphan). Retry: marker có
+  // sẵn + audit PASS → duplicate; marker có sẵn nhưng audit thiếu → repair (ghi audit) rồi
+  // tiếp tục labels. effectiveApproval yêu cầu auditVerified + auditWritten (contract đã thêm).
+  const auditEntry = {
+    timestamp: new Date().toISOString(), repository: repo, prNumber: pr, headSha, reason, ciRunId,
+    gptEvidence: String(gptEvidence && gptEvidence.url || ''), operatorAckPath,
+    policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest),
+    decisionId, result: 'PASS', failureReason: null,
+  };
+  const lastAudit = io.readAuditLog ? io.readAuditLog(resolvedAuditPath) : null;
+  const auditPassed = lastAudit && String(lastAudit.decisionId || '') === String(decisionId) && lastAudit.result === 'PASS';
+  if (!auditPassed) {
+    try {
+      io.appendAuditLog(resolvedAuditPath, auditEntry);
+    } catch (e) {
+      throw new Error('TỪ CHỐI (AUDIT_FAIL): ' + String((e && e.message) || e).slice(0, 160) + ' — chưa có marker (ghi audit trước marker).');
+    }
+  }
+
+  // Existing marker + audit đủ → duplicate (idempotent, không ghi trùng).
+  const existing = parseApprovalMarkers(io.listPrComments(repo, pr)).filter((r) =>
+    r.authorLogin && gptApprovers.includes(String(r.authorLogin))
+      && isApprovalValid({ ...r.marker, commentId: r.commentId, authorLogin: r.authorLogin },
+        { ...manualCtx, auditVerified: true, headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion }).valid);
+  if (existing.length) {
+    // [GPT-REV-130] Repair/resume: marker + audit PASS da du nhung labels chua approved
+    // (truoc do labels fail giua chung) → apply labels de kha phuc, khong bo qua im lang.
+    const currentNames = labelNames(io.getPrView(repo, pr));
+    if (!currentNames.includes(LABELS.approved)) {
+      io.removeLabels(repo, pr, OTHER_STATUSES.filter((l) => l !== LABELS.approved));
+      io.addLabels(repo, pr, [LABELS.approved]);
+      const finalNames = labelNames(io.getPrView(repo, pr));
+      if (!finalNames.includes(LABELS.approved)) {
+        throw new Error('RESUME_FAIL: marker + audit PASS ton tai nhung khong gan duoc status:approved — can nguoi dung kiem tra.');
+      }
+      return { mutated: true, skipped: null, headSha, message: 'RESUME: marker + audit PASS da ton tai, da kha phuc status:approved.' };
+    }
+    return { mutated: false, skipped: 'duplicate', headSha, message: 'BO QUA: manual approval cho HEAD ' + headSha.slice(0, 12) + ' da ton tai (' + existing.length + ' marker + audit PASS) — idempotent, khong ghi trung.' };
+  }
+
+  // --- 10. Mutation order (GPT-REV-033 + GPT-REV-130): audit đã ghi → marker comment ---
   const probeMarker = {
     repository: repo, prNumber: pr, reviewer: AGENTS.gpt, headSha,
     policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest).toLowerCase(),
     decisionId, kind: 'MANUAL_REVIEW_EXCEPTION_APPROVED', reason: String(reason),
     ciRunId: String(ciRunId), gptEvidence: { ...gptEvidence, authorLogin: verifiedGptEvidence ? verifiedGptEvidence.authorLogin : '' },
     operatorAck: verifiedOperatorAck ? { source: 'local-state', ackPath: operatorAckPath, operator: verifiedOperatorAck.operator, reason: String(reason), ackAt: verifiedOperatorAck.ackAt, issueRef: verifiedOperatorAck.issueRef } : null,
-    openBlockingFindings: 0, reviewedAt: new Date().toISOString(),
+    openBlockingFindings, reviewedAt: new Date().toISOString(),
+    auditWritten: true, auditRef: String(decisionId),
   };
-  const preVerdict = isManualApprovalValid({ ...probeMarker, commentId: 'probe', authorLogin: actor }, manualCtx);
+  const preVerdict = isManualApprovalValid({ ...probeMarker, commentId: 'probe', authorLogin: actor }, { ...manualCtx, auditVerified: true });
   if (!preVerdict.valid) {
-    throw new Error(`TỪ CHỐI (MANUAL_VALIDATION): ${preVerdict.reason}`);
+    throw new Error('TỪ CHỐI (MANUAL_VALIDATION): ' + preVerdict.reason);
   }
-
-  // --- 6. Re-read exact state TRƯỚC mutation (drift check, GPT amendment) ---
-  const view2 = io.getPrView(repo, pr);
-  if (String(view2.headRefOid || '').toLowerCase() !== String(headSha).toLowerCase()) {
-    throw new Error(`TỪ CHỐI (HEAD_DRIFT): PR HEAD đổi giữa validation và mutation (${headSha.slice(0, 12)} → ${String(view2.headRefOid || '').slice(0, 12)}) — fail-closed.`);
-  }
-  if (!canMutatePr(view2.state)) {
-    throw new Error(`TỪ CHỐI: PR state đổi thành ${view2.state} — không mutation.`);
-  }
-  const existing = parseApprovalMarkers(io.listPrComments(repo, pr)).filter((r) =>
-    r.authorLogin && gptApprovers.includes(String(r.authorLogin))
-      && isApprovalValid({ ...r.marker, commentId: r.commentId, authorLogin: r.authorLogin },
-        { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, gptApprovers, manualExceptionPolicy: manualPolicy, verifiedCiRun: ciRun, verifiedGptEvidence, verifiedOperatorAck, expectedPolicyDigest: String(expectedPolicyDigest).toLowerCase() }).valid);
-  if (existing.length) {
-    return { mutated: false, skipped: 'duplicate', headSha, message: `BỎ QUA: manual approval cho HEAD ${headSha.slice(0, 12)} đã tồn tại (${existing.length} marker) — idempotent, không ghi trùng.` };
-  }
-
-  // --- 7. Mutation order (GPT-REV-033): marker comment TRƯỚC ---
   const marker = buildApprovalMarker(probeMarker);
   const body = [
     '## ✅ APPROVAL CUỐI — GPT (manual exception, PRE_REVIEW_DIFF_LIMIT)',
-    note ? `\n> ${note}` : '',
+    note ? '\n> ' + note : '',
     '',
-    `Reason: \`${reason}\`. CI run \`${ciRunId}\` SUCCESS tại HEAD \`${headSha}\`.`,
-    `Policy: \`${policy.policyVersion}\` (digest \`${String(expectedPolicyDigest).slice(0, 12)}…\`).`,
-    'Lưu ý: path này chỉ waive `PRE_REVIEW_DIFF_LIMIT`; mọi blocker/finding/dependency khác vẫn fail-closed.',
+    'Reason: \`' + reason + '\`. CI run \`' + ciRunId + '\` SUCCESS tại HEAD \`' + headSha + '\`.',
+    'Policy: \`' + policy.policyVersion + '\` (digest \`' + String(expectedPolicyDigest).slice(0, 12) + '…\`).',
+    'Audit: PASS tại \`' + resolvedAuditPath + '\`.',
+    'Lưu ý: path này chỉ waive \`PRE_REVIEW_DIFF_LIMIT\`; mọi blocker/finding/dependency khác vẫn fail-closed.',
     'Merge/deploy vẫn do người dùng thực hiện.',
     '', marker,
   ].join('\n');
   io.postComment(repo, pr, body);
 
   const afterComments = io.listPrComments(repo, pr);
-  const recorded = effectiveApproval(afterComments, { headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion, gptApprovers, manualExceptionPolicy: manualPolicy, verifiedCiRun: ciRun, verifiedGptEvidence, verifiedOperatorAck, expectedPolicyDigest: String(expectedPolicyDigest).toLowerCase() });
+  const recorded = effectiveApproval(afterComments, { ...manualCtx, auditVerified: true, headSha, repository: repo, prNumber: pr, policyVersion: policy.policyVersion });
   if (!recorded || String(recorded.decisionId || '') !== String(decisionId)) {
     throw new Error('read-back FAIL: manual approval marker chưa ghi nhận được tại HEAD — giữ nguyên nhãn, KHÔNG gắn status:approved.');
   }
 
-  // --- 8. Audit log (ngoài worktree; lỗi ghi audit → fail-closed, chưa đổi label) ---
-  if (!auditLogPath) {
-    throw new Error('TỪ CHỐI (AUDIT_PATH): auditLogPath bắt buộc — không thể ghi evidence manual approval.');
-  }
-  try {
-    io.appendAuditLog(auditLogPath, {
-      timestamp: new Date().toISOString(), repository: repo, prNumber: pr, headSha, reason, ciRunId,
-      gptEvidence: String(gptEvidence && gptEvidence.url || ''), operatorAckPath,
-      policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest),
-      result: 'PASS', failureReason: null,
-    });
-  } catch (e) {
-    throw new Error(`TỪ CHỐI (AUDIT_FAIL): ${String((e && e.message) || e).slice(0, 160)} — marker đã đăng, cần drift-repair.`);
-  }
-
-  // --- 9. Labels SAU (approved chỉ khi marker + audit đều thành công) ---
+  // --- 11. Labels SAU (approved chỉ khi marker + audit đều thành công) ---
   try {
     io.removeLabels(repo, pr, OTHER_STATUSES.filter((l) => l !== LABELS.approved));
     io.addLabels(repo, pr, [LABELS.approved]);
     const finalNames = labelNames(io.getPrView(repo, pr));
-    if (!finalNames.includes(LABELS.approved)) throw new Error(`read-after-write FAIL: thiếu ${LABELS.approved}`);
+    if (!finalNames.includes(LABELS.approved)) throw new Error('read-after-write FAIL: thiếu ' + LABELS.approved);
     const statuses = finalNames.filter((l) => l.startsWith('status:'));
-    if (statuses.length !== 1) throw new Error(`read-after-write FAIL: PR có ${statuses.length} status:* (${statuses.join(', ')})`);
+    if (statuses.length !== 1) throw new Error('read-after-write FAIL: PR có ' + statuses.length + ' status:* (' + statuses.join(', ') + ')');
   } catch (e) {
     await ensureNotApproved(io, repo, pr, e instanceof Error ? e : new Error(String(e)));
   }
 
   return {
     mutated: true, skipped: null, headSha,
-    message: `ĐÃ GHI manual approval ${AGENTS.gpt} cho ${repo}#${pr} tại HEAD ${headSha.slice(0, 12)} (reason ${reason}, policy ${policy.policyVersion}, decision ${decisionId}) — status:approved.`,
+    message: 'ĐÃ GHI manual approval ' + AGENTS.gpt + ' cho ' + repo + '#' + pr + ' tại HEAD ' + headSha.slice(0, 12) + ' (reason ' + reason + ', policy ' + policy.policyVersion + ', decision ' + decisionId + ') — status:approved.',
   };
 }
+
 // ---------------------------------------------------------------- revoke
 
 export async function performRevoke(io, { repo, pr, reason }) {
@@ -566,7 +710,7 @@ function parseArgs(argv) {
   const hasRevoke = out.repo && out.pr && out.revoke;
   const hasManual = out.manualApproval && out.repo && out.pr && out.reason && out.ciRunId
     && out.gptEvidenceUrl && out.gptEvidenceCommentId && out.operatorAckFile
-    && out.policyDigest && out.decisionId && out.auditLogPath;
+    && out.policyDigest && out.decisionId && out.worktreeRoot;
   if (!hasNormal && !hasRevoke && !hasManual) {
     console.error([
       'Usage:',
@@ -580,8 +724,8 @@ function parseArgs(argv) {
       '    --reason PRE_REVIEW_DIFF_LIMIT --ci-run-id <numeric> \\',
       '    --gpt-evidence-url "https://github.com/owner/repo/issues/<pr>#issuecomment-<id>" \\',
       '    --gpt-evidence-comment-id <id> --operator-ack-file <path OUTSIDE worktree> \\',
-      '    --policy-digest <sha256hex> --decision-id id-khong-trang --audit-log-path <path outside worktree>',
-      '    [--worktree-root <path>] [--note "..."]',
+      '    --policy-digest <sha256hex> --decision-id id-khong-trang --worktree-root <git worktree root> \\',
+      '    [--audit-log-path <path> (bắt buộc khớp policy manualException.auditLogPath)] [--note "..."]',
     ].join('\n'));
     process.exit(2);
   }

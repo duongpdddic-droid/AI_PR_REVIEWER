@@ -16,11 +16,14 @@ const POLICY = {
   maxReviewRounds: 3,
   diffLimits: { maxLines: 1500 },
   approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'] },
-  manualException: { enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'] },
+  manualException: {
+    enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
+    auditLogPath: '/tmp/audit.jsonl', auditLogRoot: '/tmp', approvedCiWorkflows: ['Verify CI'],
+  },
 };
 const POLICY_DIGEST = computePolicyDigest(POLICY);
 const GPT_EVIDENCE = { url: 'https://github.com/o/r/issues/7#issuecomment-12345', commentId: '12345' };
-const CI_RUN = { repository: 'o/r', headSha: SHA, conclusion: 'success', workflow: 'verify' };
+const CI_RUN = { repository: 'o/r', headSha: SHA, status: 'completed', conclusion: 'success', workflow: 'Verify CI' };
 
 const results = [];
 const eq = (name, got, want) => results.push({ name, ok: got === want, got, want });
@@ -45,6 +48,21 @@ function makeManualIo(opts = {}) {
       if (opts.ciRunNotFound) return null;
       const override = opts.ciRunOverride || {};
       return { ...CI_RUN, ...override };
+    },
+    // [GPT-REV-128] Authoritative gate state — mặc định PRE_REVIEW_FINDINGS + đúng 1 blocker diff-limit.
+    getGateState() {
+      if (opts.gateStateFails) throw new Error(opts.gateStateFailMsg || 'gate state FAIL');
+      const override = opts.gateStateOverride || {};
+      return {
+        blockingStatusLabels: [], preReviewVerdict: 'PRE_REVIEW_FINDINGS',
+        openBlockingFindings: 1, dependencyBlocks: 0, failedGates: ['PRE_REVIEW_DIFF_LIMIT'],
+        ...override,
+      };
+    },
+    // [GPT-REV-130] Read audit state — mặc định chưa có PASS (sẽ ghi audit PASS trước marker).
+    readAuditLog() {
+      if (opts.auditLogState) return opts.auditLogState;
+      return null;
     },
     verifyGptEvidence() {
       if (opts.gptEvidenceFails) throw new Error(opts.gptEvidenceFailMsg || 'evidence FAIL');
@@ -102,7 +120,7 @@ const MANUAL_OPTS = {
 function makeExistingMarker() {
   return '<!-- ai-review-approval:{"repository":"o/r","prNumber":7,"reviewer":"agent:gpt","headSha":"' + SHA +
     '","policyVersion":"2026-08-23.7","policyDigest":"' + POLICY_DIGEST +
-    '","decisionId":"manual-dec-001","kind":"MANUAL_REVIEW_EXCEPTION_APPROVED","reason":"PRE_REVIEW_DIFF_LIMIT","ciRunId":"42","gptEvidence":{"url":"https://github.com/o/r/issues/7#issuecomment-12345","commentId":"12345","authorLogin":"gpt-account"},"operatorAck":{"source":"local-state","ackPath":"/tmp/ack.txt","operator":"bo","reason":"PRE_REVIEW_DIFF_LIMIT","ackAt":"2026-09-01T10:00:00Z","issueRef":"#36"},"openBlockingFindings":0,"reviewedAt":"2026-09-01T10:00:00Z"} -->';
+    '","decisionId":"manual-dec-001","kind":"MANUAL_REVIEW_EXCEPTION_APPROVED","reason":"PRE_REVIEW_DIFF_LIMIT","ciRunId":"42","gptEvidence":{"url":"https://github.com/o/r/issues/7#issuecomment-12345","commentId":"12345","authorLogin":"gpt-account"},"operatorAck":{"source":"local-state","ackPath":"/tmp/ack.txt","operator":"bo","reason":"PRE_REVIEW_DIFF_LIMIT","ackAt":"2026-09-01T10:00:00Z","issueRef":"#36"},"openBlockingFindings":0,"reviewedAt":"2026-09-01T10:00:00Z","auditWritten":true,"auditRef":"manual-dec-001"} -->';
 }
 
 (async () => {
@@ -119,7 +137,11 @@ function makeExistingMarker() {
 
   // 2. Idempotency: gá»i láº¡i cÃ¹ng evidence â†’ skip, khÃ´ng mutation má»›i
   {
-    const { io, pr, state } = makeManualIo({ comments: [makeExistingMarker()], labels: [LABELS.reviewRequested, LABELS.approved] });
+    const { io, pr, state } = makeManualIo({
+      comments: [makeExistingMarker()],
+      labels: [LABELS.reviewRequested, LABELS.approved],
+      auditLogState: { decisionId: 'manual-dec-001', result: 'PASS' },
+    });
     const r = await performManualApproval(io, { ...MANUAL_OPTS });
     eq('idempotent: skipped', r.skipped, 'duplicate');
     tru('idempotent: no new mutation', state.mutations.length === 0);
@@ -145,7 +167,7 @@ function makeExistingMarker() {
     async () => {
       const { io } = makeManualIo({ ciRunNotFound: true });
       await performManualApproval(io, { ...MANUAL_OPTS });
-    }, 'CI_FAIL');
+    }, 'CI_NOT_COMPLETED');
 
   // 6. CI run conclusion != success â†’ fail-closed
   await expectThrow('ci-not-success',
@@ -199,11 +221,11 @@ function makeExistingMarker() {
     }, 'manualException');
 
   // 13. Audit log path thiáº¿u â†’ fail-closed
-  await expectThrow('audit-path-missing',
+  await expectThrow('audit-path-mismatch',
     async () => {
       const { io } = makeManualIo();
-      await performManualApproval(io, { ...MANUAL_OPTS, auditLogPath: '' });
-    }, 'AUDIT_PATH');
+      await performManualApproval(io, { ...MANUAL_OPTS, auditLogPath: '/tmp/OTHER-audit.jsonl' });
+    }, 'AUDIT_PATH_MISMATCH');
 
   // 14. Audit log ghi lá»—i â†’ fail-closed (marker Ä‘Ã£ Ä‘Äƒng, cáº§n drift-repair)
   await expectThrow('audit-fail',

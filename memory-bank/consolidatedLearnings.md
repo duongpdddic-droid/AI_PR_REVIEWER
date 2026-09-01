@@ -300,3 +300,8 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Triệu chứng**: gọi editor sửa file nhưng path gõ sai (vd `...\VA_PR_REVIEWER\...`, `...\.clinem\...`) → tool tạo FILE MỚI ở thư mục không tồn tại đó (x2 lần trong phiên), gây thêm bước dọn.
 - **Nguyên nhân gốc**: editor tool tự mkdir+create nếu path không tồn tại; tôi gõ path bằng tay thay vì copy từ kết quả đọc.
 - **Tránh lặp lại**: TRƯỚC mọi lần editor ghi, dùng đúng path copy từ read/ls gần nhất; nếu tạo nhầm → `Remove-Item -Recurse -Force <path nhầm>` ngay trước khi tiếp tục; kiểm tra `git status` không xuất hiện file lạ.
+
+## L-048 (01/09/2026) — `gh pr create --body` multi-line trong PowerShell bị vỡ argument
+- **Triệu chứng**: `gh pr create --body "..."` với body nhiều dòng + dấu ngoặc kép trong PowerShell 5.1 → PowerShell parser nuốt ngoặc kép, body bị cắt cụt (PR vẫn tạo nhưng body thiếu), hoặc lỗi `Missing expression after unary operator` khi chuỗi chứa ký tự đặc biệt.
+- **Nguyên nhân gốc**: PowerShell 5.1 native argument passing không bảo toàn ngoặc kép/không nhận multi-line đúng cách; `--body` inline với markdown nhiều dòng là fragile.
+- **Tránh lặp lại**: với body PR/comment nhiều dòng, LUÔN ghi body vào file tạm (`editor` tool) rồi dùng `gh pr create --body-file <path>` hoặc `gh pr edit <n> --body-file <path>`; xóa file tạm sau khi xong. Với PowerShell, tránh chuỗi multi-line trong argument inline.

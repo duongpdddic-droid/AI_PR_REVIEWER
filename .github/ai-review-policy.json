@@ -77,7 +77,8 @@
     "requirePolicyDigest": true,
     "auditLogPath": "~/.ai-pr-reviewer/audit/gpt-approval-manual.jsonl",
     "auditLogRoot": "~/.ai-pr-reviewer",
-    "note": "enabled=false mặc định — bật khi có nhu cầu vận hành cụ thể (Bố quyết). Audit log nằm ngoài worktree + ngoài memory-bank (GPT amendment 2026-09-01)."
+    "approvedCiWorkflows": ["Verify CI"],
+    "note": "enabled=false mặc định — bật khi có nhu cầu vận hành cụ thể (Bố quyết). Audit log nằm ngoài worktree + ngoài memory-bank (GPT amendment 2026-09-01). approvedCiWorkflows (GPT-REV-131) = workflow display name hợp lệ cho CI evidence."
   },
   "authority": {
     "ciVerification": "AI_PR_REVIEWER local",

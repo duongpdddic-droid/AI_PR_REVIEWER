@@ -215,3 +215,40 @@ PR #20 FREEZE tại HEAD `10c9e278e66b7798fac694550dde710b7d0d8931`. GPT DELTA T
 - **Read-back A**: HEAD `039c721cd34e...` = local = remote = PR head; labels `agent:gpt`+`status:review-requested`; marker đúng HEAD + policy `2026-08-23.7`; CI Verify success @`039c721`; isDraft=false, MERGEABLE, OPEN; remote HEAD=local.
 - **Freeze**: HEAD không đổi, only memory-bank dirty (không commit theo chỉ thị), không squash/force-push/merge/deploy.
 - **B — Issue follow-up**: tạo Issue #22 "HEAD-Lock Lifecycle & Handoff Gate" (labels rỗng, KHÔNG auto-claim; body=AC: approval/pre-review chỉ hiệu lực đúng full HEAD, HEAD-đổi invalidates CI/pre-review/GPT, gate local=remote=PR=marker HEAD, sau handoff chặn push kể cả Memory Bank/docs, unfreeze kèm reason+chạy lại CI&pre, test drift sau pre-review/approval/Memory-Bank-only/CI-marker SHA cũ/valid frozen). Không implement trong PR #21.
+
+---
+
+## Issue #36 — Manual GPT Approval Path (COMPLETED + handoff GPT)
+
+**Trạng thái**: COMPLETED — handoff GPT (PR #37).
+
+### Kế hoạch thực thi
+1. [x] `.github/ai-review-policy.json`: `manualException` schema (`enabled: false` mặc định).
+2. [x] `performManualApproval` (gpt-approval.mjs): 9-step fail-closed.
+3. [x] `enabled` gate: `manualException.enabled !== true` → fail-closed (gpt-approval.mjs + review-contract.mjs).
+4. [x] `isManualApprovalValid` + `isManualApprovalValidPart2` (review-contract.mjs).
+5. [x] `computePolicyDigest` + `stableStringify` (RFC 8785 subset).
+6. [x] Test `scripts/test-gpt-approval-manual-exception.mjs`: 23/23 PASS.
+7. [x] package.json: `test:gpt-approval` script.
+8. [x] Docs: `AGENT_HANDOFF_PROTOCOL.md` §9a, `README.md` row.
+9. [x] Commit `58b0b93` + push + Draft PR #37 (`Ref #36`).
+10. [x] Handoff: Issue #36 → `status:review-requested` + `agent:gpt`.
+
+### Bằng chứng thực thi
+- **Test**: `pnpm test:gpt-approval` → 23/23 PASS (happy + idempotent + fail-closed + enabled:false + drift + actor).
+- **Regression**: `pnpm test` → 24/24 PASS; `pnpm verify` → full-verify 151/151 PASS + test-evidence-e2e 23 assertions 0 failures.
+- **Commit**: `58b0b93` (7 files, +836 -3), branch `feat/issue-36-gpt-approval-manual-exception`.
+- **PR**: #37 Draft, `Ref #36` (không `Closes`).
+- **Handoff**: Issue #36 labels `agent:cline`, `agent:gpt`, `status:review-requested`.
+
+### Quyết định
+- `enabled` semantics: gate `enabled === true` ở cả 2 nơi (performManualApproval + isManualApprovalValid) — fail-closed; policy mặc định `false` → manual path tắt, chỉ Bố bật khi có nhu cầu vận hành.
+
+### Deferred Issues
+- [ ] `docs/AGENTS.md` missing — pre-existing trên `main`, không blocking (ngoài scope Issue #36).
+- [ ] `task_handoff` MCP contract chưa dùng cho Issue #36 (contract code nằm trên nhánh issue-32/PR #33 chưa merge); handoff làm trực tiếp qua `gh issue edit`.
+
+### Bước tiếp theo
+- Chờ GPT review PR #37 (theo dõi `[GPT-REV-NNN]`).
+- Nếu request changes → sửa theo review, commit, push.
+- Merge/deploy do người dùng quyết định.
