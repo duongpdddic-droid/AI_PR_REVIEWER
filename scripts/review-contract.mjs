@@ -1121,15 +1121,21 @@ function isManualApprovalValidPart2(record, ctx) {
   if (uCommentId !== gptCommentId) {
     return { valid: false, reason: 'MANUAL_GPT_URL_COMMENTID_MISMATCH: URL commentId=' + uCommentId + ' không khớp gptEvidence.commentId=' + gptCommentId };
   }
-  const gptApprovers = Array.isArray(ctx.gptApprovers) ? ctx.gptApprovers.map(String) : [];
-  if (gptApprovers.length === 0) {
-    return { valid: false, reason: 'MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: ctx.gptApprovers rỗng' };
+  // [Issue #38] Evidence author phải thuộc REVIEWER AUTHORITY allowlist (tách biệt operator).
+  // Reviewer principal (GitHub App/bot) là author của evidence comment; operator/transport là
+  // account chạy script. Fallback sang gptApprovers chỉ để tương thích downstream drift/effective
+  // (bản thân creation path luôn có ctx.reviewerAuthorities qua performManualApproval).
+  const gptAuthorities = Array.isArray(ctx.reviewerAuthorities) && ctx.reviewerAuthorities.length > 0
+    ? ctx.reviewerAuthorities.map(String)
+    : (Array.isArray(ctx.gptApprovers) ? ctx.gptApprovers.map(String) : []);
+  if (gptAuthorities.length === 0) {
+    return { valid: false, reason: 'MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: ctx.reviewerAuthorities/gptApprovers rỗng — chưa cấu hình reviewer principal (Issue #38, fail-closed)' };
   }
-  if (!gptApprovers.includes(gptAuthor)) {
-    return { valid: false, reason: 'MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: "' + gptAuthor + '" không thuộc gptApprovalCommentAuthors' };
+  if (!gptAuthorities.includes(gptAuthor)) {
+    return { valid: false, reason: 'MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: "' + gptAuthor + '" không thuộc reviewerAuthorityAllowlist (reviewer principal, Issue #38)' };
   }
   if (ctx.actorSelf && ctx.actorSelf === gptAuthor) {
-    return { valid: false, reason: 'MANUAL_GPT_SELF_AUTHORED: GPT evidence không được đăng bởi chính actor đang ghi approval' };
+    return { valid: false, reason: 'MANUAL_GPT_SELF_AUTHORED: GPT evidence không được đăng bởi chính actor đang ghi approval (operator ≠ reviewer principal)' };
   }
   if (ctx.verifiedGptEvidence === undefined) {
     return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_NOT_VERIFIED: ctx.verifiedGptEvidence không được truyền' };
@@ -1142,6 +1148,14 @@ function isManualApprovalValidPart2(record, ctx) {
   }
   if (String(ctx.verifiedGptEvidence.policyVersion || '') !== String(record.policyVersion || '')) {
     return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_POLICY_MISMATCH: GPT evidence tham chiếu policyVersion "' + ctx.verifiedGptEvidence.policyVersion + '" khác marker "' + record.policyVersion + '"' };
+  }
+  // [Issue #38] Exact-bind: evidence artifact phải khóa policyDigest + decisionId giống marker.
+  if (ctx.verifiedGptEvidence.policyDigest
+    && String(record.policyDigest || '').toLowerCase() !== String(ctx.verifiedGptEvidence.policyDigest).toLowerCase()) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_POLICY_DIGEST_MISMATCH: GPT evidence policyDigest "' + ctx.verifiedGptEvidence.policyDigest + '" khác marker "' + record.policyDigest + '"' };
+  }
+  if (String(ctx.verifiedGptEvidence.decisionId || '') !== String(record.decisionId || '')) {
+    return { valid: false, reason: 'MANUAL_GPT_EVIDENCE_DECISION_MISMATCH: GPT evidence decisionId "' + ctx.verifiedGptEvidence.decisionId + '" khác marker "' + record.decisionId + '"' };
   }
 
   // operatorAck
@@ -1199,4 +1213,97 @@ export function stableStringify(value) {
     return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
   }
   throw new Error('stableStringify: type không hỗ trợ: ' + typeof value);
+}
+
+// ---------------------------------------------------------------- evidence artifact (Issue #38)
+// Evidence comment do REVIEWER PRINCIPAL (GitHub App/bot hoặc trusted service principal, GitHub
+// login riêng) đăng — TÁCH BIỆT khỏi operator/transport. Artifact structured JSON, prefix cố định.
+// Schema: schemaVersion, repository, prNumber, headSha, policyVersion, policyDigest, decision,
+// reviewDigest, issuer, issuedAt, decisionId, nonce. Parse + validate ở đây (pure, testable).
+export const GPT_EVIDENCE_PREFIX = 'ai-pr-reviewer:gpt-evidence:';
+
+// Parse artifact JSON từ comment body. Trả object đã parse hoặc null (không phải artifact hợp lệ).
+export function parseGptEvidenceArtifact(body) {
+  const s = String(body || '');
+  const m = s.match(/<!--\s*ai-pr-reviewer:gpt-evidence:(\{.*?\})\s*-->/s);
+  if (!m) return null;
+  try {
+    const parsed = JSON.parse(m[1]);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Validate EXACT-BIND của evidence artifact so với request. Fail-closed trả {ok, error}.
+// expected: { repository, prNumber, headSha, policyVersion, policyDigest, decisionId }.
+export function validateGptEvidenceBind(parsed, expected) {
+  if (!parsed || typeof parsed !== 'object') return { ok: false, error: 'evidence artifact rỗng/không parse được' };
+  const req = ['schemaVersion', 'repository', 'prNumber', 'headSha', 'policyVersion',
+    'policyDigest', 'decision', 'reviewDigest', 'issuer', 'issuedAt', 'decisionId', 'nonce'];
+  for (const k of req) {
+    if (parsed[k] === undefined || parsed[k] === null || String(parsed[k]).trim() === '') {
+      return { ok: false, error: `evidence artifact thiếu trường ${k}` };
+    }
+  }
+  if (String(parsed.decision) !== 'approve') {
+    return { ok: false, error: `evidence artifact decision="${String(parsed.decision)}" — cần "approve"` };
+  }
+  if (!/^[0-9a-f]{40}$/i.test(String(parsed.headSha))) {
+    return { ok: false, error: 'evidence artifact headSha không phải full 40-hex' };
+  }
+  if (!/^[0-9a-f]{64}$/i.test(String(parsed.policyDigest))) {
+    return { ok: false, error: 'evidence artifact policyDigest không phải SHA-256 hex (64 ký tự)' };
+  }
+  if (!/^[0-9a-f]{64}$/i.test(String(parsed.reviewDigest))) {
+    return { ok: false, error: 'evidence artifact reviewDigest không phải SHA-256 hex (64 ký tự)' };
+  }
+  if (!/^\S+$/.test(String(parsed.decisionId))) {
+    return { ok: false, error: 'evidence artifact decisionId không được chứa khoảng trắng' };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(parsed.issuedAt))) {
+    return { ok: false, error: 'evidence artifact issuedAt không phải ISO8601' };
+  }
+  if (expected) {
+    if (String(parsed.repository) !== String(expected.repository)) {
+      return { ok: false, error: `evidence repository="${parsed.repository}" != expected "${expected.repository}"` };
+    }
+    if (Number(parsed.prNumber) !== Number(expected.prNumber)) {
+      return { ok: false, error: `evidence prNumber=${parsed.prNumber} != expected ${expected.prNumber}` };
+    }
+    if (String(parsed.headSha).toLowerCase() !== String(expected.headSha).toLowerCase()) {
+      return { ok: false, error: 'evidence headSha khác HEAD' };
+    }
+    if (String(parsed.policyVersion) !== String(expected.policyVersion)) {
+      return { ok: false, error: `evidence policyVersion="${parsed.policyVersion}" != expected "${expected.policyVersion}"` };
+    }
+    if (String(parsed.policyDigest).toLowerCase() !== String(expected.policyDigest).toLowerCase()) {
+      return { ok: false, error: 'evidence policyDigest khác policy hiện tại' };
+    }
+    if (String(parsed.decisionId) !== String(expected.decisionId)) {
+      return { ok: false, error: `evidence decisionId="${parsed.decisionId}" != expected "${expected.decisionId}"` };
+    }
+  }
+  return { ok: true, error: null };
+}
+
+// Reviewer-authority authorization: evidence phải do reviewer principal thuộc reviewerAuthorityAllowlist
+// đăng, KHÁC operator (giữ self-author rejection), và issuer (tự khai trong artifact) khớp comment author.
+// Trả { ok, reason }.
+export function isReviewerAuthorized({ authorLogin, issuer, reviewerAuthorities, actorSelf }) {
+  const list = Array.isArray(reviewerAuthorities) ? reviewerAuthorities.map((a) => String(a)) : [];
+  if (!authorLogin) return { ok: false, reason: 'evidence comment thiếu author login' };
+  if (list.length === 0) {
+    return { ok: false, reason: 'MANUAL_REVIEWER_AUTHORITY_UNCONFIGURED: reviewerAuthorityAllowlist rỗng — chưa cấu hình reviewer principal (Issue #38, fail-closed)' };
+  }
+  if (!list.includes(String(authorLogin))) {
+    return { ok: false, reason: `MANUAL_GPT_AUTHOR_NOT_ALLOWLISTED: author "${String(authorLogin)}" không thuộc reviewerAuthorityAllowlist (reviewer principal)` };
+  }
+  if (actorSelf && String(actorSelf) === String(authorLogin)) {
+    return { ok: false, reason: 'MANUAL_GPT_SELF_AUTHORED: operator/actor là author của GPT evidence (operator ≠ reviewer principal)' };
+  }
+  if (issuer && String(issuer) !== String(authorLogin)) {
+    return { ok: false, reason: `evidence issuer="${String(issuer)}" != comment author "${String(authorLogin)}"` };
+  }
+  return { ok: true, reason: null };
 }

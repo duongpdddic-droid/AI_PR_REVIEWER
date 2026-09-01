@@ -357,3 +357,8 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Triệu chứng**: `gh pr create --body "..."` với body nhiều dòng + dấu ngoặc kép trong PowerShell 5.1 → PowerShell parser nuốt ngoặc kép, body bị cắt cụt (PR vẫn tạo nhưng body thiếu), hoặc lỗi `Missing expression after unary operator` khi chuỗi chứa ký tự đặc biệt.
 - **Nguyên nhân gốc**: PowerShell 5.1 native argument passing không bảo toàn ngoặc kép/không nhận multi-line đúng cách; `--body` inline với markdown nhiều dòng là fragile.
 - **Tránh lặp lại**: với body PR/comment nhiều dòng, LUÔN ghi body vào file tạm (`editor` tool) rồi dùng `gh pr create --body-file <path>` hoặc `gh pr edit <n> --body-file <path>`; xóa file tạm sau khi xong. Với PowerShell, tránh chuỗi multi-line trong argument inline.
+
+## L-049 (01/09/2026) — Sửa JSON lồng nhau dễ chèn duplicate key; test C.18 scanDuplicateObjectKeys bắt được
+- **Triệu chứng**: sửa `.github/ai-review-policy.json` (thêm `activationTtlSeconds` + note trong `manualException`) bằng editor append, kết quả full-verify 159/161 với `test-pure-logic C.18 canonical policy thật không có duplicate keys` FAIL và `test-effective-policy` FAIL.
+- **Nguyên nhân gốc**: edit append vô tình chèn thêm `},\n"authority": {` trước object `authority` thật → JSON có 2 key `"authority"` (một rỗng, một thật). `JSON.parse` im lặng giữ key cuối nên không throw; chỉ scanner `scanDuplicateObjectKeys` (C.18) + effective-policy phát hiện.
+- **Tránh lặp lại**: sau mọi edit vào file JSON nested, chạy `JSON.parse` để xác nhận valid + `scanDuplicateObjectKeys` (hoặc rely vào full-verify) trước khi commit; khi edit bằng append, đối chiếu đóng/mở brace quanh vùng đổi — không để sót `}`/key lặp. Kiểm tra `git diff` đọc kỹ vùng cấu trúc (không chỉ nội dung dòng thêm).

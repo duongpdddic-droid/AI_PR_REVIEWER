@@ -78,7 +78,8 @@
     "auditLogPath": "~/.ai-pr-reviewer/audit/gpt-approval-manual.jsonl",
     "auditLogRoot": "~/.ai-pr-reviewer",
     "approvedCiWorkflows": ["Verify CI"],
-    "note": "enabled=false mặc định — bật khi có nhu cầu vận hành cụ thể (Bố quyết). Audit log nằm ngoài worktree + ngoài memory-bank (GPT amendment 2026-09-01). approvedCiWorkflows (GPT-REV-131) = workflow display name hợp lệ cho CI evidence."
+    "activationTtlSeconds": 3600,
+    "note": "enabled=false mặc định — bật khi có nhu cầu vận hành cụ thể (Bố quyết). Audit log nằm ngoài worktree + ngoài memory-bank (GPT amendment 2026-09-01). approvedCiWorkflows (GPT-REV-131) = workflow display name hợp lệ cho CI evidence. activationTtlSeconds (Issue #38) = TTL bounded cho một manual activation: entry audit có expiresAt = timestamp + TTL; quá hạn → fail-closed, không waive. Chống mở ngoại lệ vô thời hạn."
   },
   "authority": {
     "ciVerification": "AI_PR_REVIEWER local",
@@ -90,8 +91,10 @@
 
   },
   "approvalAuthorities": {
+    "note": "Issue #38: gptApprovalCommentAuthors = account được phép CHẠY/RELAY GPT approval (operator/transport). reviewerAuthorityAllowlist = reviewer principal (GitHub App/bot hoặc trusted service principal, GitHub login riêng) la AUTHOR của evidence comment — TÁCH BIỆT khỏi operator và mặc định rỗng cho tới khi reviewer principal được provision (rỗng = fail-closed, chưa có reviewer authority hợp lệ).",
     "gptApprovalCommentAuthors": ["duongpdddic-droid"],
-    "localApprovalCommentAuthors": ["duongpdddic-droid"]
+    "localApprovalCommentAuthors": ["duongpdddic-droid"],
+    "reviewerAuthorityAllowlist": []
   },
   "reviewerPhases": {
     "source": "[USER-DECISION] Mo hinh reviewer muc tieu sau Issue #2 — duongpdddic-droid/AI_PR_REVIEWER#2, comment id 5381416494 (22/08/2026)",

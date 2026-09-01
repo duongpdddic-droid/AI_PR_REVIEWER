@@ -33,7 +33,7 @@ const POLICY = {
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 1500 },
-  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'] },
+  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'], reviewerAuthorityAllowlist: ['gpt-account'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
     auditLogPath: TEST_AUDIT_PATH, auditLogRoot: TEST_AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
@@ -90,9 +90,16 @@ function makeManualIo(opts = {}) {
       if (opts.auditLogState) return opts.auditLogState;
       return s.audit.length ? s.audit[s.audit.length - 1] : null;
     },
-    verifyGptEvidence() {
+    verifyGptEvidence(_repo, _pr, _ev, mockOpts) {
       if (opts.gptEvidenceFails) throw new Error(opts.gptEvidenceFailMsg || 'evidence FAIL');
-      return { headSha: SHA.toLowerCase(), policyVersion: POLICY.policyVersion, authorLogin: 'gpt-account' };
+      const pol = opts.customPolicy || POLICY;
+      const dig = computePolicyDigest(pol);
+      return {
+        headSha: SHA.toLowerCase(), policyVersion: pol.policyVersion, authorLogin: 'gpt-account',
+        issuer: 'gpt-account', policyDigest: dig,
+        decisionId: String((mockOpts && mockOpts.decisionId) || MANUAL_OPTS.decisionId),
+        issuedAt: '2026-09-01T10:00:00Z', reviewDigest: 'a'.repeat(64),
+      };
     },
     readOperatorAck() {
       if (opts.ackFails) throw new Error(opts.ackFailMsg || 'invalid ack');
@@ -106,6 +113,11 @@ function makeManualIo(opts = {}) {
       // không throw khi path cha tồn tại.
       if (opts.realAudit && p) fs.appendFileSync(p, JSON.stringify(entry) + '\n', 'utf8');
     },
+    readAuditEntries() {
+      if (opts.auditLogState) return Array.isArray(opts.auditLogState) ? [...opts.auditLogState] : [{ ...opts.auditLogState }];
+      return [...s.audit];
+    },
+    deleteAuditLog() { if (opts.deleteAuditFails) throw new Error('audit delete FAIL'); s.mutations.push('audit-delete'); s.audit = []; },
     listPrComments() {
       return pr.comments.map((c, i) => {
         if (c && typeof c === 'object' && c.body != null) {
@@ -170,7 +182,7 @@ function makeExistingMarker() {
     const { io, pr, state } = makeManualIo({
       comments: [makeExistingMarker()],
       labels: [LABELS.reviewRequested, LABELS.approved],
-      auditLogState: { decisionId: 'manual-dec-001', result: 'PASS' },
+      auditLogState: { decisionId: 'manual-dec-001', result: 'PASS', repository: 'o/r', prNumber: 7, headSha: SHA, policyDigest: POLICY_DIGEST, gptEvidence: GPT_EVIDENCE.url, expiresAt: null },
     });
     const r = await performManualApproval(io, { ...MANUAL_OPTS });
     eq('idempotent: skipped', r.skipped, 'duplicate');
@@ -366,6 +378,22 @@ function makeExistingMarker() {
       fs.rmSync(wt, { recursive: true, force: true });
     }
   }
+
+  // [Issue #38] Expiry: prior PASS entry đã hết hạn (expiresAt quá khứ) → EXCEPTION_EXPIRED (fail-closed).
+  {
+    const { io } = makeManualIo({ auditLogState: { decisionId: 'manual-dec-001', result: 'PASS', expiresAt: '2020-01-01T00:00:00Z' } });
+    await expectThrow('expiry',
+      async () => performManualApproval(io, { ...MANUAL_OPTS }), 'EXCEPTION_EXPIRED');
+  }
+
+  // [Issue #38] Anti-replay: prior PASS entry khác target (headSha khác) + chưa hết hạn → REPLAY_CONFLICT.
+  {
+    const future = new Date(Date.now() + 3600 * 1000).toISOString();
+    const { io } = makeManualIo({ auditLogState: { decisionId: 'manual-dec-001', result: 'PASS', repository: 'o/r', prNumber: 7, headSha: 'b'.repeat(40), policyDigest: POLICY_DIGEST, gptEvidence: GPT_EVIDENCE.url, expiresAt: future } });
+    await expectThrow('replay',
+      async () => performManualApproval(io, { ...MANUAL_OPTS }), 'REPLAY_CONFLICT');
+  }
+
 
   // Report
   // ================================================================

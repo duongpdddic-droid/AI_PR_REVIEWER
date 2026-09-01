@@ -1,4 +1,16 @@
 # Active Context
+## Issue #38 — Reviewer-principal deployment cho manual GPT approval (15/02/2026) — CODE COMPLETED, READY FOR REVIEW
+- **Nhiệm vụ**: tách reviewer-principal khỏi operator/transport cho manual GPT approval: evidence phải là artifact JSON structured với exact-bind (repo/pr/head/policyVersion/policyDigest/decisionId), do reviewer principal thuộc `reviewerAuthorityAllowlist` đăng, khác operator (self-author reject), có bounded TTL (anti-replay + expiry fail-closed).
+- **Thực hiện**:
+  1. [x] `review-contract.mjs`: thêm `GPT_EVIDENCE_PREFIX`, `parseGptEvidenceArtifact` (JSON parse), `validateGptEvidenceBind` (exact-bind + schema), `isReviewerAuthorized` (allowlist + self-author + issuer). `isManualApprovalValidPart2` ưu tiên `reviewerAuthorities`, fallback `gptApprovers`.
+  2. [x] `gpt-approval.mjs`: `verifyGptEvidence` rewrite (structured artifact, bind exact, authority allowlist, self-author). Thêm `readAuditEntries` (scan full). `performManualApproval` truyền `gptAuthorities`/`policyDigest`/`decisionId` vào verify + `reviewerAuthorities` vào manualCtx. Anti-replay/expiry: `expiresAt` từ `activationTtlSeconds`; scan all entries theo `decisionId`; expired → `EXCEPTION_EXPIRED`; same-target PASS → idempotent skip; different-target PASS → `REPLAY_CONFLICT`. `probeMarker.gptEvidence` mang bind fields.
+  3. [x] Policy `.github/ai-review-policy.json`: thêm `manualException.activationTtlSeconds: 3600` + `approvalAuthorities.reviewerAuthorityAllowlist: []` (fail-closed). Sửa duplicate key `"authority"` do edit trước chèn (C.18 bắt).
+  4. [x] Tests: `test-gpt-approval-evidence.mjs` mới (41 case: contract + real verifyGptEvidence integration); `test-gpt-approval-manual-exception.mjs` sync mock + thêm expiry/replay (40/40); `test-gpt-approval-regress.mjs` sync mock (25/25). Đăng ký evidence suite vào full-verify + `test:gpt-approval`.
+- **Verify**: `node scripts/full-verify.mjs` **161/161 PASS exit 0**.
+- **Deferred**: không đổi policyVersion; không bật policy (`enabled` giữ false); không chạm PR #33/Issue #32; không merge/deploy.
+- **Commit**: chuẩn bị commit + push + PR `Closes #38` + handoff GPT.
+
+
 ## Round 4 — GPT-REV-136..138, PR #37 HEAD 890a5b0 (09/09/2026) — CODE COMPLETED, HANDOFF BLOCKED
 - **Nhiệm vụ**: fix 3 finding GPT-re-review trên PR #37 tại HEAD `9091bdd` (GPT-REV-136/137/138).
 - **Thực hiện**:

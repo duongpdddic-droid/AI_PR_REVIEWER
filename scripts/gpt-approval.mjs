@@ -35,6 +35,7 @@ import {
   buildApprovalMarker, canMutatePr, effectiveApproval, evaluateChecks,
   isApprovalValid, isManualApprovalValid, parseApprovalMarkers,
   validateApprovalPayload, computePolicyDigest,
+  parseGptEvidenceArtifact, validateGptEvidenceBind, isReviewerAuthorized,
 } from './review-contract.mjs';
 import { resolvePolicyForRepo } from './effective-policy.mjs';
 
@@ -203,7 +204,7 @@ export function defaultIo() {
     },
     // [Issue #36] Verify GPT evidence: fetch comment + check author ∈ gptApprovers +
     // body tham chiếu headSha + policyVersion. Trả {headSha, policyVersion} hoặc null.
-    verifyGptEvidence(repo, pr, gptEvidence, { gptApprovers, headSha, policyVersion, actorSelf }) {
+    verifyGptEvidence(repo, pr, gptEvidence, { gptApprovers, gptAuthorities, headSha, policyVersion, actorSelf, policyDigest, decisionId }) {
       if (!gptEvidence || typeof gptEvidence !== 'object' || !gptEvidence.url || !gptEvidence.commentId) {
         throw new Error('gptEvidence phải là object {url, commentId}');
       }
@@ -219,24 +220,36 @@ export function defaultIo() {
       if (!match) throw new Error('commentId không tồn tại trong PR comments');
       const author = String(match.user && match.user.login || '');
       if (!author) throw new Error('comment không có author login');
-      if (!gptApprovers || !gptApprovers.includes(author)) {
-        throw new Error('author "' + author + '" không thuộc gptApprovalCommentAuthors');
+      // [Issue #38] Evidence artifact structured JSON — parse + exact-bind. Không còn phụ thuộc
+      // regex mơ hồ; evidence phải bind repo/pr/head/policyVersion/policyDigest/decisionId.
+      const parsed = parseGptEvidenceArtifact(match.body);
+      if (!parsed) {
+        throw new Error('GPT evidence body không chứa artifact JSON hợp lệ (<!-- ' + 'ai-pr-reviewer:gpt-evidence:' + '... -->)');
       }
-      if (actorSelf && actorSelf === author) {
-        throw new Error('self-authored: actor ' + actorSelf + ' là author của GPT evidence');
+      const bind = validateGptEvidenceBind(parsed, {
+        repository: repo, prNumber: pr, headSha, policyVersion, policyDigest, decisionId,
+      });
+      if (!bind.ok) {
+        throw new Error('GPT evidence bind không hợp lệ: ' + bind.error);
       }
-      const bodyText = String(match.body || '');
-      const bodyRef = bodyText.match(/(?:headSha|SHA|commit)[^\w]([0-9a-f]{40})/i);
-      if (!bodyRef) throw new Error('GPT evidence body không tham chiếu headSha (40-hex)');
-      if (String(bodyRef[1]).toLowerCase() !== String(headSha).toLowerCase()) {
-        throw new Error('GPT evidence body tham chiếu headSha ' + bodyRef[1] + ' khác HEAD ' + headSha);
+      // [Issue #38] Reviewer authority: evidence phải do reviewer principal thuộc
+      // reviewerAuthorityAllowlist đăng; KHÁC operator (self-author rejection); issuer khớp.
+      const auth = isReviewerAuthorized({
+        authorLogin: author, issuer: parsed.issuer, reviewerAuthorities: gptAuthorities, actorSelf,
+      });
+      if (!auth.ok) {
+        throw new Error(auth.reason);
       }
-      const bodyPol = bodyText.match(/(?:policyVersion|policy)[^\w]([\d.]+)/i);
-      if (!bodyPol) throw new Error('GPT evidence body không tham chiếu policyVersion');
-      if (String(bodyPol[1]) !== String(policyVersion)) {
-        throw new Error('GPT evidence body tham chiếu policyVersion ' + bodyPol[1] + ' khác ' + policyVersion);
-      }
-      return { headSha: String(headSha).toLowerCase(), policyVersion: String(policyVersion), authorLogin: String(author) };
+      return {
+        headSha: String(headSha).toLowerCase(),
+        policyVersion: String(policyVersion),
+        authorLogin: String(author),
+        issuer: String(parsed.issuer),
+        policyDigest: String(parsed.policyDigest),
+        decisionId: String(parsed.decisionId),
+        issuedAt: String(parsed.issuedAt),
+        reviewDigest: String(parsed.reviewDigest),
+      };
     },
     // [Issue #36] Read + parse operator ack file. Path phải ngoài worktree + ngoài memory-bank.
     // Trả {operator, reason, ackAt, issueRef} hoặc throw (invalid).
@@ -297,6 +310,14 @@ export function defaultIo() {
       const lines = String(readFileSync(String(logPath), 'utf8')).split(/\r?\n/).filter(Boolean);
       if (!lines.length) return null;
       try { return JSON.parse(lines[lines.length - 1]); } catch { return null; }
+    },
+    // [Issue #38] Đọc TOÀN BỘ audit entries (scan anti-replay/expiry), không chỉ entry cuối.
+    readAuditEntries(logPath) {
+      if (!logPath || !existsSync(String(logPath))) return [];
+      const lines = String(readFileSync(String(logPath), 'utf8')).split(/\r?\n/).filter(Boolean);
+      const out = [];
+      for (const l of lines) { try { out.push(JSON.parse(l)); } catch { /* bỏ qua entry hỏng */ } }
+      return out;
     },
     log(level, msg) { console.error(`[${level}] ${msg}`); },
   };
@@ -596,6 +617,11 @@ export async function performManualApproval(io, {
   if (!Array.isArray(gptApprovers) || gptApprovers.length === 0) {
     throw new Error('TỪ CHỐI: policy thiếu approvalAuthorities.gptApprovalCommentAuthors.');
   }
+  // [Issue #38] Reviewer authority allowlist TÁCH BIỆT khỏi operator/transport: evidence comment
+  // phải do reviewer principal (GitHub App/bot/service principal, login riêng) đăng; operator
+  // (chạy script) phải khác. Rỗng = chưa provision → real verifyGptEvidence fail-closed.
+  const reviewerAuthorities = policy && policy.approvalAuthorities && policy.approvalAuthorities.reviewerAuthorityAllowlist;
+  const reviewerAuthList = Array.isArray(reviewerAuthorities) ? reviewerAuthorities.map(String) : [];
   // [GPT-REV-134] Trusted root từ GIT METADATA (không tin CLI --worktree-root làm nguồn tin cậy).
   // resolveGitRoot suy ra worktree root canonical + đối chiếu origin với repo PR. CLI worktreeRoot
   // (nếu còn) chỉ cho diagnostics và bắt buộc khớp EXACT → sai root = mismatch, fail-closed.
@@ -678,7 +704,11 @@ export async function performManualApproval(io, {
   // --- 3. Verify GPT evidence (canonical artifact, không self-authored) ---
   let verifiedGptEvidence;
   try {
-    verifiedGptEvidence = io.verifyGptEvidence(repo, pr, gptEvidence, { gptApprovers, headSha, policyVersion: policy.policyVersion, actorSelf: actor });
+    verifiedGptEvidence = io.verifyGptEvidence(repo, pr, gptEvidence, {
+      gptApprovers, gptAuthorities: reviewerAuthList, headSha,
+      policyVersion: policy.policyVersion, actorSelf: actor,
+      policyDigest: String(expectedPolicyDigest).toLowerCase(), decisionId: String(decisionId),
+    });
   } catch (e) {
     throw new Error('TỪ CHỐI (GPT_EVIDENCE): ' + String((e && e.message) || e).slice(0, 200));
   }
@@ -737,7 +767,7 @@ export async function performManualApproval(io, {
   const openBlockingFindings = Math.max(0, Number(gate.openBlockingFindings || 0) - 1);
 
   const manualCtx = {
-    manualExceptionPolicy: manualPolicy, gptApprovers, actorSelf: actor,
+    manualExceptionPolicy: manualPolicy, gptApprovers, reviewerAuthorities: reviewerAuthList, actorSelf: actor,
     verifiedCiRun: ciRun, verifiedGptEvidence, verifiedOperatorAck,
     expectedPolicyDigest: String(expectedPolicyDigest).toLowerCase(),
   };
@@ -756,14 +786,38 @@ export async function performManualApproval(io, {
   // Ghi audit trước → nếu audit fail, chưa có marker nào (không orphan). Retry: marker có
   // sẵn + audit PASS → duplicate; marker có sẵn nhưng audit thiếu → repair (ghi audit) rồi
   // tiếp tục labels. effectiveApproval yêu cầu auditVerified + auditWritten (contract đã thêm).
+  // [Issue #38] activationTtlSeconds (bounded) → entry audit có expiresAt = timestamp + TTL.
+  // ttlSeconds <= 0 hoặc missing → không có expiry (giữ tương thích forward cho hạ tầng deploy cũ).
+  const ttlSeconds = Number(manualPolicy.activationTtlSeconds ?? 0);
+  const nowMs = Date.now();
   const auditEntry = {
-    timestamp: new Date().toISOString(), repository: repo, prNumber: pr, headSha, reason, ciRunId,
+    timestamp: new Date(nowMs).toISOString(), repository: repo, prNumber: pr, headSha, reason, ciRunId,
     gptEvidence: String(gptEvidence && gptEvidence.url || ''), operatorAckPath,
     policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest),
     decisionId, result: 'PASS', failureReason: null,
+    expiresAt: ttlSeconds > 0 ? new Date(nowMs + ttlSeconds * 1000).toISOString() : null,
   };
-  const lastAudit = io.readAuditLog ? io.readAuditLog(resolvedAuditPath) : null;
-  const auditPassed = lastAudit && String(lastAudit.decisionId || '') === String(decisionId) && lastAudit.result === 'PASS';
+  // [Issue #38] Anti-replay + expiry: scan TOÀN BỘ audit entries cho decisionId (không chỉ entry cuối).
+  const auditEntries = io.readAuditEntries
+    ? io.readAuditEntries(resolvedAuditPath)
+    : (io.readAuditLog ? [io.readAuditLog(resolvedAuditPath)].filter(Boolean) : []);
+  const priorForDecision = auditEntries.find((e) => e && String(e.decisionId || '') === String(decisionId));
+  let auditPassed = false;
+  if (priorForDecision && String(priorForDecision.result || '') === 'PASS') {
+    const expMs = priorForDecision.expiresAt ? Date.parse(priorForDecision.expiresAt) : NaN;
+    if (!Number.isNaN(expMs) && expMs <= nowMs) {
+      throw new Error('TỪ CHỐI (EXCEPTION_EXPIRED): manual activation decisionId "' + decisionId + '" đã SUCCESS và hết hạn ' + priorForDecision.expiresAt + ' — cần reviewer principal evidence mới (Issue #38).');
+    }
+    const sameTarget = String(priorForDecision.repository || '') === repo
+      && Number(priorForDecision.prNumber) === Number(pr)
+      && String(priorForDecision.headSha || '').toLowerCase() === String(headSha).toLowerCase()
+      && String(priorForDecision.policyDigest || '').toLowerCase() === String(expectedPolicyDigest).toLowerCase()
+      && String(priorForDecision.gptEvidence || '') === String(gptEvidence && gptEvidence.url || '');
+    if (!sameTarget) {
+      throw new Error('TỪ CHỐI (REPLAY_CONFLICT): decisionId "' + decisionId + '" đã SUCCESS cho target khác (repo/pr/head/policy/evidence) — chống replay (Issue #38).');
+    }
+    auditPassed = true; // cùng target + chưa hết hạn → idempotent, skip append.
+  }
   if (!auditPassed) {
     try {
       io.appendAuditLog(resolvedAuditPath, auditEntry);
@@ -798,7 +852,11 @@ export async function performManualApproval(io, {
     repository: repo, prNumber: pr, reviewer: AGENTS.gpt, headSha,
     policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest).toLowerCase(),
     decisionId, kind: 'MANUAL_REVIEW_EXCEPTION_APPROVED', reason: String(reason),
-    ciRunId: String(ciRunId), gptEvidence: { ...gptEvidence, authorLogin: verifiedGptEvidence ? verifiedGptEvidence.authorLogin : '' },
+    ciRunId: String(ciRunId), gptEvidence: verifiedGptEvidence
+      ? { ...gptEvidence, authorLogin: verifiedGptEvidence.authorLogin, issuer: verifiedGptEvidence.issuer,
+          policyDigest: verifiedGptEvidence.policyDigest, decisionId: verifiedGptEvidence.decisionId,
+          issuedAt: verifiedGptEvidence.issuedAt, reviewDigest: verifiedGptEvidence.reviewDigest }
+      : { ...gptEvidence, authorLogin: '' },
     operatorAck: verifiedOperatorAck ? { source: 'local-state', ackPath: operatorAckPath, operator: verifiedOperatorAck.operator, reason: String(reason), ackAt: verifiedOperatorAck.ackAt, issueRef: verifiedOperatorAck.issueRef } : null,
     openBlockingFindings, reviewedAt: new Date().toISOString(),
     auditWritten: true, auditRef: String(decisionId),
