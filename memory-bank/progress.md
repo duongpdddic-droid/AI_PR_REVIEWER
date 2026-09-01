@@ -616,4 +616,13 @@ IN PROGRESS. Dry-run end-to-end đã PASS. Chưa chạy execute thật tới PR 
 - `performManualApproval` 9-step fail-closed + `enabled` gate (`manualException.enabled === true`), `isManualApprovalValid`/Part2, `computePolicyDigest`/`stableStringify`.
 - Policy `manualException` schema (enabled:false mặc định). Test `test-gpt-approval-manual-exception.mjs` 23/23 PASS; `pnpm test` 24/24; `pnpm verify` 151/151 + e2e 23 assertions 0 failures.
 - Commit `58b0b93` push; Draft PR #37 `Ref #36`; Issue #36 -> `agent:gpt` + `status:review-requested`.
+
+## 01/09/2026, 23:55 — Issue #38 reviewer-principal cho manual GPT approval hoàn tất (full-verify 161/161)
+- Commit `a833bff` + PR #39 `Closes #38`; local = remote = PR HEAD. **HANDOFF BLOCKED** tại `mcp-task-server__task_handoff` (REVIEW HANDOFF CONTRACT v1.0.0 strict, running server version ≠ worktree source); KHÔNG bypass label. Bước tiếp: schema contract hoặc orchestrator chuyển `status:review-requested`.
+- Tách reviewer-principal khỏi operator/transport: evidence artifact JSON structured + exact-bind (repo/pr/head/policyVersion/policyDigest/decisionId); `isReviewerAuthorized` thực thi `reviewerAuthorityAllowlist` + self-author reject + issuer match; fail-closed khi allowlist rỗng.
+- Bounded TTL: `manualException.activationTtlSeconds: 3600` → audit entry `expiresAt`; anti-replay (scan all entries theo decisionId); expired → `EXCEPTION_EXPIRED`; same-target PASS → idempotent; different-target PASS → `REPLAY_CONFLICT`.
+- Policy: `approvalAuthorities.reviewerAuthorityAllowlist: []` (fail-closed); `enabled` giữ false; không đổi policyVersion.
+- Tests: `test-gpt-approval-evidence.mjs` mới 41 case (contract + verifyGptEvidence real); manual-exception 40/40; regress 25/25; full-verify 161/161 PASS.
+- Chi tiết: activeContext.md mục `Issue #38`.
+
 - Chi tiết: activeContext.md mục `Issue #36`.

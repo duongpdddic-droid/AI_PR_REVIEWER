@@ -1,5 +1,5 @@
 {
-  "policyVersion": "2026-08-23.7",
+  "policyVersion": "2026-09-02.1",
   "description": "Policy CANONICAL DUY NHAT cho quy trinh AI PR Review (AI_PR_REVIEWER Issue #2 + Issue #5). Repo du an khong giu ban sao; tham chieu + pin version qua projectPolicyContract. Mo hinh reviewer hai giai doan (transition/steadyState) theo [USER-DECISION] tren Issue duongpdddic-droid/AI_PR_REVIEWER#2 (comment id 5381416494); contract reviewer-coder va discovery task fail-closed theo [GPT-REV-036]/[GPT-REV-037].",
   "scope": {
     "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD"],
@@ -70,6 +70,7 @@
   "manualException": {
     "description": "Sanctioned degraded path (Issue #36): cho phép ghi GPT approval khi automated pre-review fail vì PRE_REVIEW_DIFF_LIMIT. KHÔNG phải alternate approval source — chỉ waive đúng reason trong allowedReason; mọi blocker/finding/dependency khác vẫn fail-closed.",
     "enabled": false,
+    "target": null,
     "allowedReason": ["PRE_REVIEW_DIFF_LIMIT"],
     "requireOperatorAck": true,
     "requireCiRun": true,
@@ -78,7 +79,8 @@
     "auditLogPath": "~/.ai-pr-reviewer/audit/gpt-approval-manual.jsonl",
     "auditLogRoot": "~/.ai-pr-reviewer",
     "approvedCiWorkflows": ["Verify CI"],
-    "note": "enabled=false mặc định — bật khi có nhu cầu vận hành cụ thể (Bố quyết). Audit log nằm ngoài worktree + ngoài memory-bank (GPT amendment 2026-09-01). approvedCiWorkflows (GPT-REV-131) = workflow display name hợp lệ cho CI evidence."
+    "activationTtlSeconds": 3600,
+    "note": "enabled=false mặc định — bật khi có nhu cầu vận hành cụ thể (Bố quyết). Audit log nằm ngoài worktree + ngoài memory-bank (GPT amendment 2026-09-01). approvedCiWorkflows (GPT-REV-131) = workflow display name hợp lệ cho CI evidence. activationTtlSeconds (Issue #38) = TTL bounded cho một manual activation: entry audit có expiresAt = timestamp + TTL; quá hạn → fail-closed, không waive. Chống mở ngoại lệ vô thời hạn. target (khi enabled=true) bắt buộc activatedAt + expiresAt ISO (GPT-REV-152): expiresAt > activatedAt, duration ≤ activationTtlSeconds; now và evidence.issuedAt phải nằm trong cửa sổ; evidence mới không thể gia hạn activation."
   },
   "authority": {
     "ciVerification": "AI_PR_REVIEWER local",
@@ -90,8 +92,10 @@
 
   },
   "approvalAuthorities": {
+    "note": "Issue #38: gptApprovalCommentAuthors = account được phép CHẠY/RELAY GPT approval (operator/transport). reviewerAuthorityAllowlist = reviewer principal (GitHub App/bot hoặc trusted service principal, GitHub login riêng) la AUTHOR của evidence comment — TÁCH BIỆT khỏi operator và mặc định rỗng cho tới khi reviewer principal được provision (rỗng = fail-closed, chưa có reviewer authority hợp lệ).",
     "gptApprovalCommentAuthors": ["duongpdddic-droid"],
-    "localApprovalCommentAuthors": ["duongpdddic-droid"]
+    "localApprovalCommentAuthors": ["duongpdddic-droid"],
+    "reviewerAuthorityAllowlist": []
   },
   "reviewerPhases": {
     "source": "[USER-DECISION] Mo hinh reviewer muc tieu sau Issue #2 — duongpdddic-droid/AI_PR_REVIEWER#2, comment id 5381416494 (22/08/2026)",

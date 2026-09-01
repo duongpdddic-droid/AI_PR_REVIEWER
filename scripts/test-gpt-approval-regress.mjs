@@ -39,15 +39,16 @@ writeAck(ACK_IN_WT);
 writeAck(ACK_IN_MB);
 
 const POLICY = {
-  policyVersion: '2026-08-23.7',
+  policyVersion: '2026-09-02.1',
   requiredChecks: ['verify'],
   blockingSeverities: ['critical', 'important'],
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 1500 },
-  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'] },
+  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'], reviewerAuthorityAllowlist: ['gpt-account'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
+    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'regress-dec-001', activatedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
     auditLogPath: AUDIT_PATH, auditLogRoot: AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
   },
 };
@@ -80,10 +81,14 @@ function makeIo(opts = {}) {
         ...(opts.gateStateOverride || {}),
       };
     },
-    verifyGptEvidence() { return { headSha: SHA, policyVersion: POLICY.policyVersion, authorLogin: 'gpt-account' }; },
+    verifyGptEvidence(_repo, _pr, _ev, mockOpts) {
+      const pol = opts.customPolicy || POLICY;
+      return { headSha: SHA, policyVersion: pol.policyVersion, authorLogin: 'gpt-account', issuer: 'gpt-account', policyDigest: computePolicyDigest(pol), decisionId: String((mockOpts && mockOpts.decisionId) || base.decisionId), issuedAt: '2026-09-01T10:00:00Z', reviewDigest: 'a'.repeat(64) };
+    },
     readOperatorAck() { return { operator: 'bo', reason: 'PRE_REVIEW_DIFF_LIMIT', ackAt: '2026-09-01T10:00:00Z', issueRef: '#36' }; },
     appendAuditLog(p, e) { s.mutations.push('audit'); s.audit.push(e); },
     readAuditLog() { return s.audit.length ? s.audit[s.audit.length - 1] : null; },
+    readAuditEntries() { return [...s.audit]; },
     listPrComments() {
       return pr.comments.map((c, i) => ({ id: 'c' + i, user: { login: 'user' }, created_at: '-', body: String(c) }));
     },

@@ -27,15 +27,16 @@ fs.writeFileSync(TEST_ACK_PATH, [
 const SHA = 'c'.repeat(40);
 const SHA2 = 'd'.repeat(40);
 const POLICY = {
-  policyVersion: '2026-08-23.7',
+  policyVersion: '2026-09-02.1',
   requiredChecks: ['verify'],
   blockingSeverities: ['critical', 'important'],
   finalReviewer: 'agent:gpt',
   maxReviewRounds: 3,
   diffLimits: { maxLines: 1500 },
-  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'] },
+  approvalAuthorities: { gptApprovalCommentAuthors: ['user', 'gpt-account'], localApprovalCommentAuthors: ['user'], reviewerAuthorityAllowlist: ['gpt-account'] },
   manualException: {
     enabled: true, allowedReason: ['PRE_REVIEW_DIFF_LIMIT'],
+    target: { repository: 'o/r', prNumber: 7, headSha: SHA, decisionId: 'manual-dec-001', activatedAt: '2026-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' },
     auditLogPath: TEST_AUDIT_PATH, auditLogRoot: TEST_AUDIT_ROOT, approvedCiWorkflows: ['Verify CI'],
   },
 };
@@ -90,9 +91,16 @@ function makeManualIo(opts = {}) {
       if (opts.auditLogState) return opts.auditLogState;
       return s.audit.length ? s.audit[s.audit.length - 1] : null;
     },
-    verifyGptEvidence() {
+    verifyGptEvidence(_repo, _pr, _ev, mockOpts) {
       if (opts.gptEvidenceFails) throw new Error(opts.gptEvidenceFailMsg || 'evidence FAIL');
-      return { headSha: SHA.toLowerCase(), policyVersion: POLICY.policyVersion, authorLogin: 'gpt-account' };
+      const pol = opts.customPolicy || POLICY;
+      const dig = computePolicyDigest(pol);
+      return {
+        headSha: SHA.toLowerCase(), policyVersion: pol.policyVersion, authorLogin: 'gpt-account',
+        issuer: 'gpt-account', policyDigest: dig,
+        decisionId: String((mockOpts && mockOpts.decisionId) || MANUAL_OPTS.decisionId),
+        issuedAt: '2026-09-01T10:00:00Z', reviewDigest: 'a'.repeat(64),
+      };
     },
     readOperatorAck() {
       if (opts.ackFails) throw new Error(opts.ackFailMsg || 'invalid ack');
@@ -106,6 +114,11 @@ function makeManualIo(opts = {}) {
       // không throw khi path cha tồn tại.
       if (opts.realAudit && p) fs.appendFileSync(p, JSON.stringify(entry) + '\n', 'utf8');
     },
+    readAuditEntries() {
+      if (opts.auditLogState) return Array.isArray(opts.auditLogState) ? [...opts.auditLogState] : [{ ...opts.auditLogState }];
+      return [...s.audit];
+    },
+    deleteAuditLog() { if (opts.deleteAuditFails) throw new Error('audit delete FAIL'); s.mutations.push('audit-delete'); s.audit = []; },
     listPrComments() {
       return pr.comments.map((c, i) => {
         if (c && typeof c === 'object' && c.body != null) {
@@ -149,7 +162,7 @@ const MANUAL_OPTS = {
 
 function makeExistingMarker() {
   return '<!-- ai-review-approval:{"repository":"o/r","prNumber":7,"reviewer":"agent:gpt","headSha":"' + SHA +
-    '","policyVersion":"2026-08-23.7","policyDigest":"' + POLICY_DIGEST +
+    '","policyVersion":"2026-09-02.1","policyDigest":"' + POLICY_DIGEST +
     '","decisionId":"manual-dec-001","kind":"MANUAL_REVIEW_EXCEPTION_APPROVED","reason":"PRE_REVIEW_DIFF_LIMIT","ciRunId":"42","gptEvidence":{"url":"https://github.com/o/r/issues/7#issuecomment-12345","commentId":"12345","authorLogin":"gpt-account"},"operatorAck":{"source":"local-state","ackPath":"/tmp/ack.txt","operator":"bo","reason":"PRE_REVIEW_DIFF_LIMIT","ackAt":"2026-09-01T10:00:00Z","issueRef":"#36"},"openBlockingFindings":0,"reviewedAt":"2026-09-01T10:00:00Z","auditWritten":true,"auditRef":"manual-dec-001"} -->';
 }
 
@@ -170,7 +183,7 @@ function makeExistingMarker() {
     const { io, pr, state } = makeManualIo({
       comments: [makeExistingMarker()],
       labels: [LABELS.reviewRequested, LABELS.approved],
-      auditLogState: { decisionId: 'manual-dec-001', result: 'PASS' },
+      auditLogState: { decisionId: 'manual-dec-001', result: 'PASS', repository: 'o/r', prNumber: 7, headSha: SHA, policyDigest: POLICY_DIGEST, gptEvidence: GPT_EVIDENCE.url, expiresAt: null },
     });
     const r = await performManualApproval(io, { ...MANUAL_OPTS });
     eq('idempotent: skipped', r.skipped, 'duplicate');
@@ -366,6 +379,112 @@ function makeExistingMarker() {
       fs.rmSync(wt, { recursive: true, force: true });
     }
   }
+
+  // [Issue #38] Expiry: prior PASS entry đã hết hạn (expiresAt quá khứ) → EXCEPTION_EXPIRED (fail-closed).
+  {
+    const { io } = makeManualIo({ auditLogState: { decisionId: 'manual-dec-001', result: 'PASS', expiresAt: '2020-01-01T00:00:00Z' } });
+    await expectThrow('expiry',
+      async () => performManualApproval(io, { ...MANUAL_OPTS }), 'EXCEPTION_EXPIRED');
+  }
+
+  // [Issue #38] Anti-replay: prior PASS entry khác target (headSha khác) + chưa hết hạn → REPLAY_CONFLICT.
+  {
+    const future = new Date(Date.now() + 3600 * 1000).toISOString();
+    const { io } = makeManualIo({ auditLogState: { decisionId: 'manual-dec-001', result: 'PASS', repository: 'o/r', prNumber: 7, headSha: 'b'.repeat(40), policyDigest: POLICY_DIGEST, gptEvidence: GPT_EVIDENCE.url, expiresAt: future } });
+    await expectThrow('replay',
+      async () => performManualApproval(io, { ...MANUAL_OPTS }), 'REPLAY_CONFLICT');
+  }
+
+  // [GPT-REV-149] Activation target (Issue #38): enabled=true nhưng target:null → MANUAL_TARGET_MISSING.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = null;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-null',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  // [GPT-REV-149] target thiếu field bắt buộc → MANUAL_TARGET_MISSING.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    delete cp.manualException.target.prNumber;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-missing-field',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  // [GPT-REV-149] target repository mismatch → MANUAL_TARGET_REPO_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, repository: 'x/y' };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-repo-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_REPO_MISMATCH');
+  }
+  // [GPT-REV-149] target prNumber mismatch → MANUAL_TARGET_PR_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, prNumber: 99 };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-pr-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_PR_MISMATCH');
+  }
+  // [GPT-REV-149] target headSha mismatch → MANUAL_TARGET_HEAD_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, headSha: 'e'.repeat(40) };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-head-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_HEAD_MISMATCH');
+  }
+  // [GPT-REV-149] target decisionId mismatch → MANUAL_TARGET_DECISION_MISMATCH.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target = { ...cp.manualException.target, decisionId: 'other-dec' };
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-decision-mismatch',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_DECISION_MISMATCH');
+  }
+  // [GPT-REV-152] enabled=true nhưng target thiếu activatedAt/expiresAt, or cửa sổ sai → fail-closed.
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    delete cp.manualException.target.expiresAt;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-missing-expiresAt',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    delete cp.manualException.target.activatedAt;
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-missing-activatedAt',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_MISSING');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target.activatedAt = '2027-01-01T00:00:00Z';
+    cp.manualException.target.expiresAt = '2028-01-01T00:00:00Z';
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-not-activated-yet',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_NOT_ACTIVATED');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.target.activatedAt = '2019-01-01T00:00:00Z';
+    cp.manualException.target.expiresAt = '2019-12-31T00:00:00Z';
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-expired-window',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_EXPIRED');
+  }
+  {
+    const cp = JSON.parse(JSON.stringify(POLICY));
+    cp.manualException.activationTtlSeconds = 3600;
+    cp.manualException.target.activatedAt = '2026-01-01T00:00:00Z';
+    cp.manualException.target.expiresAt = '2026-06-01T00:00:00Z';
+    const { io } = makeManualIo({ customPolicy: cp });
+    await expectThrow('target-ttl-exceeded',
+      async () => performManualApproval(io, { ...MANUAL_OPTS, policyDigest: computePolicyDigest(cp) }), 'MANUAL_TARGET_TTL_EXCEEDED');
+  }
+
+
 
   // Report
   // ================================================================

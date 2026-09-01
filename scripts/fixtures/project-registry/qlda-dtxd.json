@@ -4,7 +4,7 @@
   "repository": "duongpdddic-droid/QLDA_DTXD",
   "projectType": "product",
   "workspace": { "workspaceId": "qlda-dtxd-main" },
-  "policy": { "pin": "ai-review-policy.json", "version": "2026-08-23.7" },
+  "policy": { "pin": "ai-review-policy.json", "version": "2026-09-02.1" },
   "verify": { "adapter": "clasp-verify" },
   "deploy": { "capability": true, "humanAuthorization": true },
   "telegram": { "route": "dm-boss-qlda" },
