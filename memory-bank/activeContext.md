@@ -1,5 +1,5 @@
 # Active Context
-## Issue #38 — Reviewer-principal deployment cho manual GPT approval (15/02/2026) — CODE COMPLETED, READY FOR REVIEW
+## Issue #38 — Reviewer-principal deployment cho manual GPT approval (01/09/2026 23:58) — CODE COMPLETED, HANDOFF BLOCKED (contract gate)
 - **Nhiệm vụ**: tách reviewer-principal khỏi operator/transport cho manual GPT approval: evidence phải là artifact JSON structured với exact-bind (repo/pr/head/policyVersion/policyDigest/decisionId), do reviewer principal thuộc `reviewerAuthorityAllowlist` đăng, khác operator (self-author reject), có bounded TTL (anti-replay + expiry fail-closed).
 - **Thực hiện**:
   1. [x] `review-contract.mjs`: thêm `GPT_EVIDENCE_PREFIX`, `parseGptEvidenceArtifact` (JSON parse), `validateGptEvidenceBind` (exact-bind + schema), `isReviewerAuthorized` (allowlist + self-author + issuer). `isManualApprovalValidPart2` ưu tiên `reviewerAuthorities`, fallback `gptApprovers`.
@@ -8,7 +8,8 @@
   4. [x] Tests: `test-gpt-approval-evidence.mjs` mới (41 case: contract + real verifyGptEvidence integration); `test-gpt-approval-manual-exception.mjs` sync mock + thêm expiry/replay (40/40); `test-gpt-approval-regress.mjs` sync mock (25/25). Đăng ký evidence suite vào full-verify + `test:gpt-approval`.
 - **Verify**: `node scripts/full-verify.mjs` **161/161 PASS exit 0**.
 - **Deferred**: không đổi policyVersion; không bật policy (`enabled` giữ false); không chạm PR #33/Issue #32; không merge/deploy.
-- **Commit**: chuẩn bị commit + push + PR `Closes #38` + handoff GPT.
+- **Commit**: `a833bff3141ab174fa0dd3f1fe067843b6f7c43e` (11 file, +403/-38) push origin `feat/issue-38-reviewer-principal`; PR `https://github.com/duongpdddic-droid/AI_PR_REVIEWER/pull/39` (`Closes #38`). Local = remote = PR HEAD `a833bff`. Worktree sạch.
+- **HANDOFF BLOCKED**: `mcp-task-server__task_handoff` (#38, PR #39, repo `duongpdddic-droid/AI_PR_REVIEWER`) → `HANDOFF_PARTIAL_EVIDENCE`. Registry biết repo (task_list trả Issue #38 `agent:cline`+`status:in-progress`), nhưng REPORT HANDOFF CONTRACT v1.0.0 rất strict (running server version ≠ source worktree `mcp-task-server/server.mjs` — codes như `TESTS_ITEMS_REQUIRED`/`DELIVERY_NO_APPROVAL_CLAIM` không tồn tại trong worktree). Reverse-engineer qua error dump giảm ~28 lỗi → còn `findingResolution` status enum, `tests.items` field names, `delivery.headReadBack/noApprovalClaim` format. KHÔNG bypass label trực tiếp (fail-closed). **Bước tiếp**: cần schema contract hoặc chạy orchestrator để chuyển `status:review-requested`; không tự mutate label/GPT approve/merge/deploy/enable policy.
 
 
 ## Round 4 — GPT-REV-136..138, PR #37 HEAD 890a5b0 (09/09/2026) — CODE COMPLETED, HANDOFF BLOCKED
