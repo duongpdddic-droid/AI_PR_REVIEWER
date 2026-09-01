@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs, loadRegisteredRepos } from "./server.mjs";
+import { checkTransition, extractStatus, parseRepos, validateRepo, validateRef, buildListArgs, loadRegisteredRepos, resolveMutationRepo } from "./server.mjs";
 import { sampleReport, verifyHandoffIdentity } from "../scripts/review-handoff-contract.mjs";
 import { computeRegistryDigest, SUPPORTED_REGISTRY_SCHEMA } from "./soc-registry-consumer.mjs";
 
@@ -311,6 +311,36 @@ ok(body.startsWith("[REVIEW-HANDOFF-REPORT v1.0.0 @ 0000000000000000000000000000
 ok(body.includes("digest: " + d1), "comment chứa digest");
 ok(body.includes('"identity"') && body.includes('"terminalStatus"'),
   "comment chứa đầy đủ report JSON 10 sections");
+
+// ---------------------------------------------------------------------------
+// 2g) GPT-REV-124 — mutation repo fail-closed (KHÔNG silent fallback sang default)
+// Sự cố #29: omit repo → defaultRepos()[0] = MCP_TASK_REPOS (QLDA_DTXD) → mutation nhầm Issue #49.
+// resolveMutationRepo phải fail-closed khi repo không tường minh / không thuộc canonical registry #17.
+// ---------------------------------------------------------------------------
+console.log("[2g] GPT-REV-124 mutation repo fail-closed");
+
+const three = { ok: true, repos: ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD", "duongpdddic-droid/Soc_brain"] };
+ok(resolveMutationRepo("duongpdddic-droid/Soc_brain", { load: () => three }) === "duongpdddic-droid/Soc_brain",
+  "mutation repo tường minh đã registered (Soc_brain) → dùng chính repo đó");
+ok(resolveMutationRepo("duongpdddic-droid/QLDA_DTXD", { load: () => three }) === "duongpdddic-droid/QLDA_DTXD",
+  "repo được khai đúng (QLDA_DTXD) → dùng chính nó");
+function throwsInvalidRepo(repo, load, pat, name) {
+  let threw = null;
+  try { resolveMutationRepo(repo, { load }); } catch (e) { threw = e.message; }
+  ok(threw !== null && pat.test(threw), `${name} → fail-closed (${(threw ?? "").slice(0, 90)})`);
+}
+// Điểm mấu chốt: omit repo khi registry có 3 repo → KHÔNG trả defaultRepos()[0] (QLDA_DTXD) mà REPO_AMBIGUOUS.
+throwsInvalidRepo(undefined, () => three, /REPO_AMBIGUOUS/,
+  "Soc_brain task omit repo + registry đủ 3 repo → REPO_AMBIGUOUS (không silent default)");
+throwsInvalidRepo("duongpdddic-droid/NotRegistered", () => three, /REPO_NOT_REGISTERED/,
+  "repo lạ không thuộc canonical registry → REPO_NOT_REGISTERED");
+throwsInvalidRepo(undefined, () => ({ ok: true, repos: [] }), /REPO_RESOLUTION_FAILED/,
+  "registry rỗng → REPO_RESOLUTION_FAILED");
+throwsInvalidRepo(undefined, () => ({ ok: false, errors: ["REGISTRY_MISSING: x"] }), /REPO_RESOLUTION_FAILED/,
+  "registry unavailable → REPO_RESOLUTION_FAILED");
+ok(resolveMutationRepo(undefined, { load: () => ({ ok: true, repos: ["duongpdddic-droid/Soc_brain"] }) }) === "duongpdddic-droid/Soc_brain",
+  "registry chỉ 1 repo → dùng repo đó (unambiguous, không phải silent default)");
+
 // 3) Protocol e2e — spawn server thật qua stdio
 // ---------------------------------------------------------------------------
 console.log("[3] Protocol e2e (stdio NDJSON)");
@@ -407,6 +437,16 @@ try {
     (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
   ok(after.status === issue35.status && after.agent === issue35.agent,
     "label #35 KHÔNG đổi sau claim bị chặn (không mutation rò rỉ)");
+
+  // GPT-REV-124: mutation thiếu repo tường minh → fail-closed, KHÔNG silent fallback sang default.
+  const noRepo = await rpc("tools/call", { name: "task_comment", arguments: { number: 35, body: "x" } });
+  ok(noRepo.result?.isError === true, "task_comment thiếu repo → isError (fail-closed)");
+  ok(/REPO_AMBIGUOUS|REPO_RESOLUTION_FAILED|REPO_NOT_REGISTERED/.test(noRepo.result.content[0].text),
+    "lỗi nêu rõ repo unresolved/ambiguous — không silent default");
+  const afterNoRepo = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(afterNoRepo.status === issue35.status && afterNoRepo.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau mutation thiếu repo (không mutation rò rỉ sang default)");
 
   // Issue #32: canonical REVIEW HANDOFF CONTRACT gate — handoffReport PARTIAL_EVIDENCE
   // phải bị chặn fail-closed TRƯỚC mọi mutation (kể cả khi transition lẽ ra hợp lệ).
