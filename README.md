@@ -27,6 +27,7 @@ configs CLI agent) nhưng không chứa mã nguồn và dữ liệu nghiệp v�
 pnpm install        # dependencies dev
 pnpm verify         # node --check + BOM + dup fn + test-runner + behavior map
 pnpm test           # tests pure-logic
+pnpm test:gpt-approval  # manual GPT approval path (Issue #36) — gate manualException.enabled
 ```
 
 Repo GitHub canonical (`duongpdddic-droid/AI_PR_REVIEWER`) cần điều chỉnh về

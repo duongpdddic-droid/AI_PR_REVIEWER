@@ -20,6 +20,8 @@ jobs:
         run: pnpm test:evidence
       - name: Run tests
         run: pnpm test
+      - name: Run gpt-approval tests
+        run: pnpm test:gpt-approval
       - name: Smoke unified-orchestrator (dry-run)
         run: node scripts/unified-orchestrator.mjs
         env:

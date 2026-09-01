@@ -253,6 +253,58 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Nguyên nhân gốc**: editor để lại newline kép cuối file; `git diff --check` coi blank line at EOF là lỗi whitespace.
 - **Tránh lặp lại**: trước commit chạy `git diff --check` trên mọi file đã sửa; cắt dòng trắng thừa ở cuối (file kết thúc bằng ký tự cuối của code, không có blank line). Lỗi này full-verify bắt được nhưng chỉ hiện khi chạy thực tế (pipe/Select-String có thể không in).
 
+## L-049 (01/09/2026) — Shell integration của môi trường không capture stdout đáng tin cậy; dùng file redirect + read
+
+**Triệu chứng**: nhiều lệnh `node scripts/*.mjs` / `Select-String` chạy trong PowerShell không trả output qua kênh shell; terminal chỉ hiển thị prompt đã gõ + dòng chào của PowerShell, còn stdout bị nuốt (exit code vẫn đúng, lệnh chạy xong).
+
+**Nguyên nhân gốc**: shell integration của VS Code Cline không ổn định với các lệnh có output dài/đa dòng hoặc pipeline `| Select-Object`; kết quả "không có output" là do capture fail, KHÔNG phải lệnh fail.
+
+**Tránh lặp lại**: khi cần đọc output dài, redirect ra file tạm (`cmd /c "node scripts\\x.mjs > out.txt 2>&1"`) rồi `read_files` file đó; không kết luận "chạy xong nhưng rỗng" từ kênh shell. Dọn file tạm sau khi đọc.
+
+## L-050 (01/09/2026) — Editor replace không match khi old_text chứa Unicode/Vietnamese hoặc mất dòng header liền kề
+
+**Triệu chứng**: editor replace trả "No replacement performed: text not found" dù old_text đọc từ chính file; và khi replace dòng header, kết quả chèn kèm tool-markup lạ xuống file.
+
+**Nguyên nhân gốc**: (1) ký tự Unicode/Vietnamese (tiếng Việt có dấu) trong old_text dễ lệch byte/white-space khi so khớp — nhất là khi old_text do ta gõ lại thay vì copy nguyên văn từ read; (2) replace một khối lớn có thể chèn nhầm markup nếu new_text được dán lẫn nội dung bất thường.
+
+**Tránh lặp lại**: copy-old_text NGUYÊN VĂN từ output read gần nhất; với khối lớn chia nhỏ, replace bằng tham chiếu không chứa Unicode (nếu được); sau replace READ LẠI vùng đó để xác nhận không chèn markup/tool-call lạ.
+
+## L-051 (01/09/2026) — Splice script tìm marker revoke nhầm comment usage ở đầu file
+
+**Triệu chứng**: splice script findIndex 'revoke' bắt được dòng '--revoke \"lý do\"' (dòng 23) trước cả function start.
+
+**Nguyên nhân gốc**: findIndex scan toàn file không giới hạn vị trí sau start.
+
+**Tránh lặp lại**: Tìm marker revoke với loop từ start+1 trở đi; không dùng findIndex toàn file.
+
+## L-052 (01/09/2026) — Bump policyVersion trên branch feature gây test fail (project-registry)
+
+**Triệu chứng**: test-project-registry AC11 fail vì canonical policy từ remote (main .7) ≠ local constant (.8).
+
+**Nguyên nhân gốc**: Bump policyVersion trên branch feature chưa merge; remote main vẫn version cũ.
+
+**Tránh lặp lại**: Không bump policyVersion khi canonical repo remote chưa merge; hoặc coordinate bump với merge main. Thêm field additive (approvedCiWorkflows) vẫn OK với old version — chỉ digest thay đổi.
+
+## L-054 (09/09/2026) — `const` redeclare trong try shadowing biến `let` khai báo ngoài → catch thấy giá trị stale
+- **Triệu chứng**: mở rộng audit boundary bằng cách khai báo `let resolvedAuditPath = ''` ở ngoài try, trong try lại `const resolvedAuditPath = auditDest.path;` → mọi lỗi trong try throw, nhưng catch nhìn biến ngoài vẫn `''` → wrap thành `NonAuditableBootstrapFailure` thay vì ghi FAIL audit; test cũ `fail-audit-records` bị `bad.state.audit[-1]` → TypeError `Cannot read properties of undefined (reading 'result')`.
+- **Nguyên nhân gốc**: biến đã khai báo ở scope ngoài để catch dùng lại, nhưng bên trong lại `const` redeclare cùng tên → JS tạo binding mới shadowing binding ngoài; catch (scope ngoài) không thấy binding trong.
+- **Tránh lặp lại**: state cần chia sẻ giữa try và catch PHẢI khai báo 1 lần ở scope bao ngoài và **gán** (`resolvedAuditPath = x;`) trong try, KHÔNG `const/let redeclare`. Khi test báo `Cannot read properties of undefined (reading 'result')` trên mảng audit → kiểm tra biến audit destination có bị shadow không.
+
+## L-055 (09/09/2026) — Mock policy dùng path lexical không tồn tại khi production resolve realpath → fail-closed
+- **Triệu chứng**: test-gpt-approval-manual-exception mock `manualException.auditLogPath: '/tmp/audit.jsonl'` (path không tồn tại trên Windows) + production `resolveTrustedAuditDestination` gọi `realExisting()` (realpathSync) → throw `AUDIT_PATH_UNRESOLVABLE` → `NonAuditableBootstrapFailure`, `fail-audit-records` audit mảng rỗng → test fail.
+- **Nguyên nhân gốc**: test dùng path lexical giả `'/tmp/...'`; production resolve realpath fail-closed với path không tồn tại; mock io `readOperatorAck`/`appendAuditLog` bypass I/O thật nên test cũ không phát hiện.
+- **Tránh lặp lại**: khi production dùng `realpathSync`/containment realpath, mock policy/ack phải dùng **real temp dir** (`fs.mkdtempSync(path.join(os.tmpdir(), ...))`) — `realpathSync` cần ancestor tồn tại; đặt ack/audit path ngoài worktree + ngoài memory-bank (2 temp dir khác nhau). Nếu mock bypass của IO không đủ → dùng `defaultIo()` thật cho test real-FS (như test-gpt-approval-regress).
+
+## L-053 (01/09/2026) — Test real-FS với policy override: digest đổi + mock bypass I/O thật
+
+**Triệu chứng**: test real-FS (gpt-approval manual) fail hai lần: lần 1 `POLICY_DIGEST_MISMATCH`, lần 2 `ENOENT` mở file audit không tồn tại.
+
+**Nguyên nhân gốc**:
+- Khi test dùng `customPolicy` đổi field (vd `manualException.auditLogPath`) thì `computePolicyDigest(customPolicy)` KHÁC digest của policy base. PASS tới `MANUAL_OPTS.policyDigest = POLICY_DIGEST` (base) → mismatch. Phải tự tính digest của override rồi truyền vào.
+- Mock `io.appendAuditLog`/`readAuditLog` KHÔNG chạm filesystem thật — chỉ đẩy vào array. Assert trên file thật (`fs.existsSync`/`readFileSync`) vô nghĩa vì chưa có gì được ghi. Muốn chứng minh real-FS (realpathSync/append) phải cho mock ghi thật khi cờ `realAudit` bật.
+
+**Tránh lặp lại**: khi test override policy, tính `computePolicyDigest(customPolicy)` và truyền `policyDigest` đó. Khi cần assert side-effect real-FS, mock method phải thực sự gọi FS (appendFileSync) thay vì chỉ ghi vào state — nếu không assertion nói dối.
+
 ## L-039 (26/08/2026) — Stale-lock takeover race: không bao giờ ghi đè lock của instance đang sống
 - **Triệu chứng**: 2 contender cùng thấy lock cũ STALE, cả 2 `unlinkSync` rồi `writeFileSync` (overwrite) → 1 process ghi đè lock mới của process thắng; hoặc unlink luôn lock TƯƠI của process khác đang alive → 2 instance chạy song song (409 conflict / gửi Telegram trùng). GPT-REV-078 Critical.
 - **Nguyên nhân gốc**: takeover dùng `unlinkSync`+`writeFileSync` (không atomic), không serialize contenders, không re-check staleness sau khi giành quyền; `writeFileSync` overwrite vô điều kiện nên xóa được lock của process khác.
@@ -300,3 +352,8 @@ Bài học tái sử dụng — mỗi entry: triệu chứng → nguyên nhân g
 - **Triệu chứng**: gọi editor sửa file nhưng path gõ sai (vd `...\VA_PR_REVIEWER\...`, `...\.clinem\...`) → tool tạo FILE MỚI ở thư mục không tồn tại đó (x2 lần trong phiên), gây thêm bước dọn.
 - **Nguyên nhân gốc**: editor tool tự mkdir+create nếu path không tồn tại; tôi gõ path bằng tay thay vì copy từ kết quả đọc.
 - **Tránh lặp lại**: TRƯỚC mọi lần editor ghi, dùng đúng path copy từ read/ls gần nhất; nếu tạo nhầm → `Remove-Item -Recurse -Force <path nhầm>` ngay trước khi tiếp tục; kiểm tra `git status` không xuất hiện file lạ.
+
+## L-048 (01/09/2026) — `gh pr create --body` multi-line trong PowerShell bị vỡ argument
+- **Triệu chứng**: `gh pr create --body "..."` với body nhiều dòng + dấu ngoặc kép trong PowerShell 5.1 → PowerShell parser nuốt ngoặc kép, body bị cắt cụt (PR vẫn tạo nhưng body thiếu), hoặc lỗi `Missing expression after unary operator` khi chuỗi chứa ký tự đặc biệt.
+- **Nguyên nhân gốc**: PowerShell 5.1 native argument passing không bảo toàn ngoặc kép/không nhận multi-line đúng cách; `--body` inline với markdown nhiều dòng là fragile.
+- **Tránh lặp lại**: với body PR/comment nhiều dòng, LUÔN ghi body vào file tạm (`editor` tool) rồi dùng `gh pr create --body-file <path>` hoặc `gh pr edit <n> --body-file <path>`; xóa file tạm sau khi xong. Với PowerShell, tránh chuỗi multi-line trong argument inline.
