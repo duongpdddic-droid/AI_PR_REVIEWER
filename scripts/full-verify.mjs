@@ -110,6 +110,7 @@ try {
     'test-tg-notify.mjs',
     'test-protocol-drift.mjs',
     'test-project-registry.mjs',
+    'test-canonical-identity.mjs',
     'test-test-evidence.mjs',
     'test-temp-hygiene.mjs',
   ];
