@@ -667,6 +667,25 @@ try {
   // (10) Split-brain (compareCanonical + policyRoot ≠ canonical, digest khác) → POLICY_SPLIT_BRAIN fail-closed.
   ok(loadPolicyAuthority({ policyRoot: sinRoot, compareCanonical: true, requireVersion: true }).errors?.[0]?.code === "POLICY_SPLIT_BRAIN",
     "(10) 2 nguồn policy khác digest → POLICY_SPLIT_BRAIN fail-closed");
+  // GPT-REV-130 — deterministic scope-gate: policy resolution chấp nhận đúng repo đã đăng ký
+  // (AI_PR_REVIEWER / QLDA_DTXD / Soc_brain) và từ chối repo lạ bằng POLICY_REPO_MISMATCH.
+  // Soc_brain là registered sole control plane + target thực tế của Issue #35; dùng fixture policy
+  // (cấu trúc y hệt canonical) — KHÔNG mutation Soc_brain PR #36, KHÔNG phụ thuộc cwd/env override.
+  const AIPR_REPO = "duongpdddic-droid/AI_PR_REVIEWER";
+  const SOC_REPO = "duongpdddic-droid/Soc_brain";
+  const socGateRoot = path.join(polDir, "soc-gate-root");
+  writePol(socGateRoot, { policyVersion: "2026-09-02.1", scope: { appliesTo: [REPO, AIPR_REPO, SOC_REPO] }, approvalAuthorities: { gptApprovalCommentAuthors: [GPT_REVIEWER], localApprovalCommentAuthors: ["human-admin"] } });
+  for (const r of [REPO, AIPR_REPO, SOC_REPO]) {
+    const a = loadPolicyAuthority({ policyRoot: socGateRoot, expectedRepo: r, requireVersion: true });
+    ok(a.ok === true, `GPT-REV-130: policy chấp nhận repo đã đăng ký ${r} (scope gate PASS)`);
+  }
+  ok(loadPolicyAuthority({ policyRoot: socGateRoot, expectedRepo: "duongpdddic-droid/unknown-repo", requireVersion: true }).errors?.[0]?.code === "POLICY_REPO_MISMATCH",
+    "GPT-REV-130: repo chưa đăng ký (unknown) → POLICY_REPO_MISMATCH fail-closed");
+  // Canonical policy thật (module-anchored, không policyRoot) phải bind được Soc_brain: nếu canonical
+  // chưa liệt kê Soc_brain trong scope.appliesTo thì production fail-closed HANDOFF_FINDINGS_AUTHORITY_UNAVAILABLE.
+  const authSocCanon = loadPolicyAuthority({ expectedRepo: SOC_REPO, requireVersion: true });
+  ok(authSocCanon.ok === true, "GPT-REV-130: canonical policy bind được Soc_brain (scope.appliesTo có Soc_brain)");
+
 
     const fixture = JSON.stringify([
       { id: 1, author: GPT_REVIEWER,

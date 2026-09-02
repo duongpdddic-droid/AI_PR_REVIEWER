@@ -2,7 +2,7 @@
   "policyVersion": "2026-08-23.7",
   "description": "Policy CANONICAL DUY NHAT cho quy trinh AI PR Review (AI_PR_REVIEWER Issue #2 + Issue #5). Repo du an khong giu ban sao; tham chieu + pin version qua projectPolicyContract. Mo hinh reviewer hai giai doan (transition/steadyState) theo [USER-DECISION] tren Issue duongpdddic-droid/AI_PR_REVIEWER#2 (comment id 5381416494); contract reviewer-coder va discovery task fail-closed theo [GPT-REV-036]/[GPT-REV-037].",
   "scope": {
-    "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD"],
+    "appliesTo": ["duongpdddic-droid/AI_PR_REVIEWER", "duongpdddic-droid/QLDA_DTXD", "duongpdddic-droid/Soc_brain"],
     "note": "Ban canonical duy nhat nam tai repo nay (.github/ai-review-policy.json). Repo du an (vd QLDA_DTXD) KHONG mirror file nay; chi giu .github/project-review-policy.json khai bao policySource + pinnedVersion + projectOverrides. Effective policy = global (canonical) + project overrides CHI tren allowedProjectOverrides."
   },
   "projectPolicyContract": {
