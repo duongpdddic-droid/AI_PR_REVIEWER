@@ -77,7 +77,7 @@ for (const bad of [{ state: "weird" }, { limit: 0 }, { limit: 2000 }, { limit: 1
 
 // GPT-REV-123: registered repos phải đọc từ canonical Soc_brain #17 Project Registry
 // (schema v1.0.0) — consumer-only; KHÔNG dùng .agent/config.json hay legacy registry làm allowlist.
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -331,8 +331,14 @@ const e2eRegData = {
 e2eRegData.contentDigest = computeRegistryDigest(e2eRegData);
 writeFileSync(e2eRegPath, JSON.stringify(e2eRegData, null, 2), "utf8");
 
+// Fixture review-state cho GPT-REV-125 (test-only): derive authoritative deterministically.
+// Trong child, khi AI_PR_REVIEWER_FIXTURE_REVIEW_STATE set → resolveReviewState không gọi gh.
+const FIXTURE_STATE = JSON.stringify([
+  { id: 1, author: "duongpdddic-droid", body: "[GPT-REV-000]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T00:00:00Z" },
+]);
+
 const child = spawn(process.execPath, [fileURLToPath(new URL("./server.mjs", import.meta.url))], {
-  env: { ...process.env, MCP_TASK_REPOS: REPO, SOC_PROJECT_REGISTRY_PATH: e2eRegPath },
+  env: { ...process.env, MCP_TASK_REPOS: REPO, SOC_PROJECT_REGISTRY_PATH: e2eRegPath, AI_PR_REVIEWER_FIXTURE_REVIEW_STATE: FIXTURE_STATE },
   stdio: ["pipe", "pipe", "pipe"],
 });
 let lineBuf = "";
@@ -410,8 +416,12 @@ try {
 
   // Issue #32: canonical REVIEW HANDOFF CONTRACT gate — handoffReport PARTIAL_EVIDENCE
   // phải bị chặn fail-closed TRƯỚC mọi mutation (kể cả khi transition lẽ ra hợp lệ).
-  const badReport = { contractVersion: "9.9.9", identity: {}, terminalStatus: { status: "DONE" } };
-  const badHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: badReport } });
+  // Gate order (GPT-REV-125): registry → identity → PR HEAD read → policy → derive → caller-assert → validate.
+  // Để chạm được validate gate, cần report identity đúng + exact PR HEAD (PR #47 thật của QLDA_DTXD).
+  const badReport = { contractVersion: "9.9.9",
+    identity: { repository: REPO, issue: 35, pullRequest: 47, branch: "feat/e2e", headSha: "e7431244cac7484ceda6b4706fbeef97e4629d4d", baseSha: "0123456789abcdef0123456789abcdef01234566", prState: "Open", noForcePushMergeDeploy: true },
+    terminalStatus: { status: "DONE" } };
+  const badHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 47, handoffReport: badReport } });
   ok(badHandoff.result?.isError === true, "task_handoff với report PARTIAL_EVIDENCE → isError (fail-closed)");
   ok(/HANDOFF_PARTIAL_EVIDENCE/.test(badHandoff.result.content[0].text),
     "lỗi bàn giao nêu rõ HANDOFF_PARTIAL_EVIDENCE");
@@ -429,20 +439,22 @@ try {
   ok(afterOmit.status === issue35.status && afterOmit.agent === issue35.agent,
     "label #35 KHÔNG đổi sau handoff thiếu report (không mutation rò rỉ)");
 
-  // GPT-REV-116: unknown repo self-declared → HANDOFF_PARTIAL_EVIDENCE, no mutation
+  // GPT-REV-116: unknown repo self-declared → giờ bị chặn sớm ở identity binding
+  // (gate order GPT-REV-125: identity trước validate). → HANDOFF_IDENTITY_MISMATCH, no mutation.
   const unknownRepoReport = sampleReport({ identity: { repository: "evil/repo" } });
   const unknownHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: unknownRepoReport } });
   ok(unknownHandoff.result?.isError === true, "task_handoff unknown repo → isError (fail-closed)");
-  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(unknownHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PARTIAL_EVIDENCE");
-  ok(/UNKNOWN_REPOSITORY/.test(unknownHandoff.result.content[0].text), "lỗi nêu rõ UNKNOWN_REPOSITORY");
+  ok(/HANDOFF_IDENTITY_MISMATCH/.test(unknownHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_IDENTITY_MISMATCH");
+  ok(/IDENTITY_REPOSITORY_MISMATCH/.test(unknownHandoff.result.content[0].text), "lỗi nêu rõ IDENTITY_REPOSITORY_MISMATCH");
   const afterUnknown = JSON.parse(
     (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
   ok(afterUnknown.status === issue35.status && afterUnknown.agent === issue35.agent,
     "label #35 KHÔNG đổi sau handoff unknown repo (không mutation rò rỉ)");
 
-  // GPT-REV-117: BLOCKED terminal status → HANDOFF_PARTIAL_EVIDENCE, no mutation
-  const blockedReport = sampleReport({ terminalStatus: { status: "BLOCKED" } });
-  const blockedHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: blockedReport } });
+  // GPT-REV-117: BLOCKED terminal status → vẫn bị chặn fail-closed (canRequestReview=false).
+  // Cần identity đúng QLDA + exact PR HEAD (PR #47) để vượt được identity/PR-HEAD gate và chạm validate.
+  const blockedReport = sampleReport({ identity: { repository: REPO, issue: 35, pullRequest: 47, branch: "feat/e2e", headSha: "e7431244cac7484ceda6b4706fbeef97e4629d4d", baseSha: "0123456789abcdef0123456789abcdef01234566", prState: "Open", noForcePushMergeDeploy: true }, terminalStatus: { status: "BLOCKED" } });
+  const blockedHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 47, handoffReport: blockedReport } });
   ok(blockedHandoff.result?.isError === true, "task_handoff BLOCKED report → isError (fail-closed)");
   ok(/HANDOFF_PARTIAL_EVIDENCE/.test(blockedHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PARTIAL_EVIDENCE");
   const afterBlocked = JSON.parse(
@@ -499,22 +511,27 @@ try {
   ok(after118.status === issue35.status && after118.agent === issue35.agent,
     "label #35 KHÔNG đổi sau mọi handoff identity-mismatch (không mutation rò rỉ)");
 
-  // GPT-REV-124: expectedFindings (review/finding context) — report đủ semantic nhưng thiếu
-  // finding bắt buộc trong chain → HANDOFF_PARTIAL_EVIDENCE TRƯỚC mọi mutation (không đọc PR).
-  const missingFindingsHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: validQlda(), expectedFindings: ["GPT-REV-118", "GPT-REV-119"] } });
-  ok(missingFindingsHandoff.result?.isError === true, "task_handoff expectedFindings thiếu → isError (fail-closed)");
-  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(missingFindingsHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PARTIAL_EVIDENCE");
-  ok(/UNRESOLVED_FINDING_IN_CHAIN/.test(missingFindingsHandoff.result.content[0].text), "lỗi nêu rõ UNRESOLVED_FINDING_IN_CHAIN");
+  // GPT-REV-125: caller expectedFindings là assertion vs derived authoritative (fixture=['GPT-REV-000']),
+  // KHÔNG còn là input cho validateHandoff (thay thế GPT-REV-124).
+  // (g) Caller mismatch → HANDOFF_FINDINGS_CALLER_MISMATCH (fail-closed, TRƯỚC validate/mutation).
+  //     Dùng PR #47 thật (PR HEAD readable) + identity đúng exact HEAD để chạm được caller-assert gate.
+  const pr47Head = "e7431244cac7484ceda6b4706fbeef97e4629d4d";
+  const mismatchReport = sampleReport({ identity: { ...qldaIdentity, pullRequest: 47, headSha: pr47Head } });
+  const mismatchHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 47, handoffReport: mismatchReport, expectedFindings: ["GPT-REV-118", "GPT-REV-119"] } });
+  ok(mismatchHandoff.result?.isError === true, "task_handoff caller expectedFindings mismatch → isError (fail-closed)");
+  ok(/HANDOFF_FINDINGS_CALLER_MISMATCH/.test(mismatchHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_FINDINGS_CALLER_MISMATCH");
   const afterFindings = JSON.parse(
     (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
   ok(afterFindings.status === issue35.status && afterFindings.agent === issue35.agent,
-    "label #35 KHÔNG đổi sau handoff expectedFindings thiếu (không mutation rò rỉ)");
+    "label #35 KHÔNG đổi sau handoff caller-mismatch (không mutation rò rỉ)");
 
-  // GPT-REV-124: expectedFindings đủ → qua gate seal → tiến tới đọc PR (PR #999 không tồn tại →
-  // HANDOFF_PR_HEAD_READ_FAILED chứng minh expectedFindings đã được chấp nhận, không reject).
-  const okFindingsHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: validQlda(), expectedFindings: ["GPT-REV-000"] } });
-  ok(okFindingsHandoff.result?.isError === true, "task_handoff expectedFindings đủ → không reject ở gate");
-  ok(/HANDOFF_PR_HEAD_READ_FAILED/.test(okFindingsHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PR_HEAD_READ_FAILED (đã qua gate expectedFindings)");
+  // (h) Caller expectedFindings KHỚP authoritative (fixture=['GPT-REV-000']) → qua caller-assert,
+  //     tiến tới validate → report contractVersion sai → HANDOFF_PARTIAL_EVIDENCE (không mutation).
+  //     Dùng PR #47 thật (readable) để derive/caller-assert chạy được.
+  const okFindingsReport = sampleReport({ identity: { ...qldaIdentity, pullRequest: 47, headSha: pr47Head }, contractVersion: "9.9.9" });
+  const okFindingsHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 47, handoffReport: okFindingsReport, expectedFindings: ["GPT-REV-000"] } });
+  ok(okFindingsHandoff.result?.isError === true, "task_handoff caller expectedFindings khớp → qua caller-assert → validate chặn PARTIAL");
+  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(okFindingsHandoff.result.content[0].text), "đã qua caller-assert → chặn ở HANDOFF_PARTIAL_EVIDENCE");
 
 
   // Repo bẩn bị chặn bởi validateRepo
@@ -529,6 +546,98 @@ try {
   child.kill();
   rmSync(e2eDir, { recursive: true, force: true });
   rmSync(fxDir, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// 2g) GPT-REV-125 — server derive authoritative finding set + caller assertion
+//     (pure helpers, không cần gh) — fixture qua AI_PR_REVIEWER_FIXTURE_REVIEW_STATE.
+// ---------------------------------------------------------------------------
+console.log("[2g] GPT-REV-125 derive authoritative findings (pure helpers)");
+
+const GPT_REVIEWER = "gpt-reviewer-bot-125";
+import {
+  loadPolicyAuthority, resolveReviewState, deriveAuthoritativeFindings,
+} from "./server.mjs";
+
+const polDir = mkdtempSync(path.join(tmpdir(), "mcp-pol-"));
+try {
+  mkdirSync(path.join(polDir, ".github"), { recursive: true });
+  writeFileSync(path.join(polDir, ".github", "ai-review-policy.json"),
+    JSON.stringify({ approvalAuthorities: {
+      gptApprovalCommentAuthors: [GPT_REVIEWER],
+      localApprovalCommentAuthors: [],
+    } }),
+    { encoding: "utf8" });
+  const prevCwd = process.cwd();
+  process.chdir(polDir);
+  try {
+    const auth = loadPolicyAuthority();
+    ok(auth.ok === true && auth.gpt.includes(GPT_REVIEWER),
+      "loadPolicyAuthority: cwd=.github/ → đọc được allowlist gptApprovalCommentAuthors");
+
+    const fixture = JSON.stringify([
+      { id: 1, author: GPT_REVIEWER,
+        body: "[GPT-REV-118]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T01:00:00Z" },
+      { id: 2, author: GPT_REVIEWER,
+        body: "[GPT-REV-119]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T02:00:00Z" },
+      { id: 3, author: GPT_REVIEWER,
+        body: "[GPT-REV-120]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: withdrawn", ts: "2026-09-02T03:00:00Z" },
+    ]);
+    const prevEnv = process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE;
+    process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = fixture;
+    try {
+      const st = resolveReviewState("duongpdddic-droid/QLDA_DTXD", 35);
+      ok(st.ok === true && Array.isArray(st.comments) && st.comments.length === 3,
+        "resolveReviewState(.fixture) → trả 3 comments (không gọi gh)");
+
+      const derived = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth });
+      ok(derived.ok === true && derived.findings.length === 2 &&
+         derived.findings.includes("GPT-REV-118") && derived.findings.includes("GPT-REV-119"),
+        `deriveAuthoritativeFindings: active 118,119 / withdrawn 120 (got ${JSON.stringify(derived.findings)})`);
+      const { sameFindingSet } = await import("../scripts/review-handoff-contract.mjs");
+      ok(sameFindingSet(derived.findings, ["GPT-REV-119", "GPT-REV-118"]) === true,
+        "sameFindingSet authoritative vs caller exact set (khác thứ tự) → true");
+      ok(sameFindingSet(derived.findings, ["GPT-REV-118"]) === false,
+        "sameFindingSet authoritative vs caller subset → false");
+
+      // Non-authority actor: comment từ actor không có authority → bị bỏ qua → authoritative rỗng.
+      process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = JSON.stringify([
+        { id: 9, author: "imposter-bot",
+          body: "[GPT-REV-200]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T01:00:00Z" },
+      ]);
+      const derivedNA = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth });
+      ok(derivedNA.ok === true && derivedNA.findings.length === 0,
+        "actor không có authority → authoritative rỗng (không scrape comment tùy ý)");
+
+      // Malformed marker: comment thiếu FINDING_REQUIRED_FIELDS → parser bỏ qua (không authoritative).
+      process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = JSON.stringify([
+        { id: 7, author: GPT_REVIEWER, body: "xem thêm GPT-REV-118 ở đâu đó", ts: "2026-09-02T01:00:00Z" },
+      ]);
+      const derivedMal = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth });
+      ok(derivedMal.ok === true && derivedMal.findings.length === 0,
+        "comment không có marker đầy đủ → parser skip → authoritative rỗng");
+
+      // Empty authority allowlist (arrays present nhưng rỗng) → KHÔNG reviewer principal có quyền
+      // → mọi finding bị bỏ qua → authoritative rỗng (không phải AUTHORITY_UNAVAILABLE).
+      process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = fixture;
+      const derivedEmptyAuth = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: { gpt: [], local: [] } });
+      ok(derivedEmptyAuth.ok === true && derivedEmptyAuth.findings.length === 0,
+        "empty authority allowlist → mọi finding dropped → authoritative rỗng");
+
+      // Missing authority (null) khi có finding → AUTHORITY_UNAVAILABLE fail-closed.
+      const derivedNoAuth = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: null });
+      ok(derivedNoAuth.ok === false && derivedNoAuth.errors.some((e) => e.code === "AUTHORITY_UNAVAILABLE"),
+        "missing authority + có finding → AUTHORITY_UNAVAILABLE");
+      // GPT-REV-125-B
+    } finally {
+      if (prevEnv === undefined) delete process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE;
+      else process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = prevEnv;
+    }
+  } finally {
+    process.chdir(prevCwd);
+  }
+} finally {
+  rmSync(polDir, { recursive: true, force: true });
 }
 
 console.log(`\nTổng: ${passed} assertions PASS`);

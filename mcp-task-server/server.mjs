@@ -9,8 +9,10 @@
  * Chạy: node mcp-task-server/server.mjs
  */
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { validateHandoff, canRequestReview, verifyHandoffIdentity, verifyPreviousReportRef, CONTRACT_VERSION, reportDigest } from "../scripts/review-handoff-contract.mjs";
+import { validateHandoff, canRequestReview, verifyHandoffIdentity, verifyPreviousReportRef, CONTRACT_VERSION, reportDigest, parseReviewComment, canonicalActiveFindings, sameFindingSet } from "../scripts/review-handoff-contract.mjs";
 import { scanForSecrets, scanForAbsolutePaths } from "../scripts/project-registry.mjs";
 import { loadRegistryRepos, resolveCanonicalRegistryPath } from "./soc-registry-consumer.mjs";
 
@@ -217,6 +219,76 @@ export function buildListArgs({ state = "open", status, agent, limit = 100 } = {
   return args;
 }
 
+// ---------------------------------------------------------------------------
+// GPT-REV-125 — derive authoritative finding set từ canonical review state.
+// Authority = allowlist reviewer principal từ policy approvalAuthorities (không hard-code login).
+// Reader review-state: test-only fixture env (AI_PR_REVIEWER_FIXTURE_REVIEW_STATE) hoặc gh thật.
+// Fail-closed: policy missing / review-state unreadable / ambiguous → từ chối task_handoff trước mutation.
+// ---------------------------------------------------------------------------
+export function loadPolicyAuthority() {
+  const p = path.join(process.cwd(), ".github", "ai-review-policy.json");
+  try {
+    const pol = JSON.parse(readFileSync(p, "utf8"));
+    const aa = pol && pol.approvalAuthorities;
+    if (!aa || !Array.isArray(aa.gptApprovalCommentAuthors) || !Array.isArray(aa.localApprovalCommentAuthors)) {
+      return { ok: false, errors: ["policy.approvalAuthorities thiếu gptApprovalCommentAuthors/localApprovalCommentAuthors"] };
+    }
+    return {
+      ok: true,
+      gpt: aa.gptApprovalCommentAuthors,
+      local: aa.localApprovalCommentAuthors,
+    };
+  } catch (err) {
+    return { ok: false, errors: [`policy read thất bại: ${err.message}`] };
+  }
+}
+
+export function resolveReviewState(repo, pr) {
+  // Test-only fixture (JSON array of { author, body, ts }) — không dùng trong production.
+  const fixture = process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE;
+  if (fixture) {
+    try {
+      const arr = JSON.parse(fixture);
+      if (!Array.isArray(arr)) return { ok: false, errors: ["fixture review-state không phải array"] };
+      return {
+        ok: true,
+        comments: arr.map((c) => ({
+          id: c.id ?? null,
+          author: c.author ?? null,
+          body: String(c.body ?? ""),
+          ts: c.ts ?? null,
+        })),
+      };
+    } catch (err) {
+      return { ok: false, errors: [`fixture review-state parse: ${err.message}`] };
+    }
+  }
+  try {
+    const raw = gh(["api", `repos/${validateRepo(repo)}/issues/${pr}/comments`]);
+    const arr = JSON.parse(raw);
+    return {
+      ok: true,
+      comments: arr.map((c) => ({
+        id: c.id ?? null,
+        author: c.user?.login ?? null,
+        body: c.body ?? "",
+        ts: c.created_at ?? null,
+      })),
+    };
+  } catch (err) {
+    return { ok: false, errors: [err.message] };
+  }
+}
+
+// Ghép resolveReviewState + parseReviewComment + canonicalActiveFindings → authoritative set
+// (hoặc fail-closed nếu review-state unreadable / authority thiếu / finding ID unknown).
+export function deriveAuthoritativeFindings(repo, pr, { authority } = {}) {
+  const st = resolveReviewState(repo, pr);
+  if (!st.ok) return { ok: false, findings: [], errors: st.errors };
+  const entries = st.comments.flatMap((c) => parseReviewComment(c.body, { author: c.author, ts: c.ts, commentId: c.id }).findings);
+  return canonicalActiveFindings(entries, { authority });
+}
+
 export const ops = {
   async task_list({ repo, repos, state, status, agent, limit } = {}) {
     const targets = repo ? [validateRepo(repo)] : (repos?.length ? repos : defaultRepos());
@@ -294,17 +366,6 @@ export const ops = {
         return { resolved: false };
       }
     };
-    // GPT-REV-117: gate — chỉ report canRequestReview===true mới được transition;
-    // BLOCKED / PARTIAL_EVIDENCE / invalid / exception đều chặn fail-closed.
-    let v;
-    try {
-      v = validateHandoff(handoffReport, { registeredRepos: reg.repos, expectedFindings, resolvePreviousReport });
-    } catch (err) {
-      throw new Error(`HANDOFF_PARTIAL_EVIDENCE: report không hợp lệ (exception khi validate) — ${err.message}`);
-    }
-    if (canRequestReview(v) !== true) {
-      throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. status=${v.status}, errors=${JSON.stringify(v.errors)}`);
-    }
     // GPT-REV-118: identity binding với dữ liệu SERVER kiểm soát, fail-closed TRƯỚC mutation.
     // PR bắt buộc (thiếu → không thể bind PR HEAD).
     if (pr === undefined || pr === null) {
@@ -327,6 +388,32 @@ export const ops = {
     const hv = verifyHandoffIdentity(handoffReport, { repo: r, number, pr, prHeadSha });
     if (hv.ok !== true) {
       throw new Error(`HANDOFF_IDENTITY_MISMATCH: ${JSON.stringify(hv.errors)}`);
+    }
+    // GPT-REV-125 — derive authoritative finding set cho exact repo/PR/HEAD từ canonical review state
+    // (structured reviewer markers + reviewer-authority allowlist từ policy approvalAuthorities), KHÔNG tin caller.
+    const auth = loadPolicyAuthority();
+    if (auth.ok !== true) {
+      throw new Error(`HANDOFF_FINDINGS_AUTHORITY_UNAVAILABLE: ${auth.errors.join("; ")}`);
+    }
+    const derived = deriveAuthoritativeFindings(r, pr, { authority: auth });
+    if (derived.ok !== true) {
+      throw new Error(`HANDOFF_REVIEW_STATE_UNAVAILABLE: ${derived.errors.join("; ")} (review-state missing/unreadable/ambiguous → fail-closed)`);
+    }
+    const authoritativeFindings = derived.findings;
+    // Caller expectedFindings (nếu có) chỉ là assertion: phải khớp TUYỆT ĐỐI authoritative set.
+    if (Array.isArray(expectedFindings) && !sameFindingSet(expectedFindings, authoritativeFindings)) {
+      throw new Error(`HANDOFF_FINDINGS_CALLER_MISMATCH: caller expectedFindings ${JSON.stringify(expectedFindings)} != derived authoritative ${JSON.stringify(authoritativeFindings)}`);
+    }
+    // GPT-REV-117: gate — chỉ report canRequestReview===true mới được transition;
+    // BLOCKED / PARTIAL_EVIDENCE / invalid / exception đều chặn fail-closed.
+    let v;
+    try {
+      v = validateHandoff(handoffReport, { registeredRepos: reg.repos, authoritativeFindings, resolvePreviousReport });
+    } catch (err) {
+      throw new Error(`HANDOFF_PARTIAL_EVIDENCE: report không hợp lệ (exception khi validate) — ${err.message}`);
+    }
+    if (canRequestReview(v) !== true) {
+      throw new Error(`HANDOFF_PARTIAL_EVIDENCE: chỉ report READY_FOR_REVIEW (contract v${CONTRACT_VERSION}) mới được bàn giao. status=${v.status}, errors=${JSON.stringify(v.errors)}`);
     }
     // GPT-REV-122 — persist report canonical lên PR comment (bind version + exact HEAD + digest).
     // Scan secret / absolute machine path trong report → fail-closed TRƯỚC mọi mutation.
@@ -452,7 +539,7 @@ export const TOOLS = [
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       pr: { type: "number", description: "Số PR bàn giao (tùy chọn, sẽ comment lên Issue)" },
       handoffReport: { type: "object", description: "Handoff report theo REVIEW HANDOFF CONTRACT v1.0.0 (bắt buộc, phải READY_FOR_REVIEW)" },
-      expectedFindings: { type: "array", items: { type: "string" }, description: "Review/finding context hiện hành: mọi finding ID này bắt buộc phải có resolution trong findingResolution (GPT-REV-124)" } }, required: ["number", "handoffReport"] } },
+      expectedFindings: { type: "array", items: { type: "string" }, description: "Asserción ONLY (GPT-REV-125): nếu caller gửi, phải khớp TUYỆT ĐỐI set authoritative do server derive từ canonical review state; mismatch/subset/superset → fail-closed. Bỏ qua → server tự derive." } }, required: ["number", "handoffReport"] } },
   { name: "task_review", description: "Reviewer chấm: review-requested → approved | changes-requested (+agent:cline)",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       verdict: { type: "string", enum: ["approve", "request-changes"] },

@@ -458,6 +458,110 @@ export function mergeIncrementalEvidence(report, previousReport) {
 }
 
 // ---------------------------------------------------------------------------
+// GPT-REV-125 — finding marker schema + authoritative finding set (pure, IO-injected).
+// Server derive authoritative expected findings cho exact repo/PR/HEAD từ canonical review state
+// (structured review markers do reviewer authority hợp lệ tạo); caller KHÔNG quyết định tập finding.
+// ---------------------------------------------------------------------------
+
+// Finding code format theo policy reviewerCoderContract.findingCodeFormat: (GPT|LOCAL)-REV-NNN
+// hoặc (GPT|LOCAL)-RULE-NNN. Không hard-code ID cụ thể.
+export const FINDING_ID_RE = /^\[?(GPT|LOCAL)-(REV|RULE)-\d{3}\]?$/;
+
+// Policy findingRequiredFields: severity/evidence/risk/expectedOutcome. Marker thiếu → malformed,
+// KHÔNG được coi là finding authoritative (không scrape chuỗi GPT-REV-* tùy ý).
+export const FINDING_REQUIRED_FIELDS = Object.freeze(['severity', 'evidence', 'risk', 'expectedOutcome']);
+
+// Trạng thái đóng/withdraw — finding ở trạng thái này KHÔNG còn là mục tiêu bắt buộc resolve.
+// By-authority chỉ có thể hạ finding bằng trạng thái này, không tự biến mất.
+export const FINDING_TERMINAL_STATES = Object.freeze(['withdrawn', 'superseded', 'resolved', 'closed', 'accepted']);
+
+// 'GPT-REV-118' → 'gpt' (authority key trong policy approvalAuthorities).
+export function findingType(id) {
+  const m = String(id).match(FINDING_ID_RE);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Parse một review comment body → danh sách finding structured (VALID) + error.
+// Chỉ chấp nhận block có header [XX-REV-NNN] + đủ FINDING_REQUIRED_FIELDS. Chuỗi GPT-REV-* lẻ loi
+// (không đủ schema) → malformed → KHÔNG authoritative. Không scrape tùy ý.
+export function parseReviewComment(body, { commentId = null, author = null, ts = null } = {}) {
+  const findings = [];
+  const errors = [];
+  if (typeof body !== 'string') return { findings, errors: [{ code: 'REVIEW_COMMENT_NOT_STRING' }] };
+  // Tách comment thành block bằng dòng heading [XX-REV-NNN] / [XX-RULE-NNN].
+  const blocks = body.split(/\r?\n(?=\[(?:GPT|LOCAL)-(?:REV|RULE)-\d{3}\])/);
+  for (const block of blocks) {
+    const header = block.match(/\[(GPT|LOCAL)-(REV|RULE)-\d{3}\]/);
+    if (!header) continue;
+    const id = header[0].replace(/^\[|\]$/g, '');
+    const fields = {};
+    for (const line of block.split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z][A-Za-z ]*):\s*(.*?)\s*$/);
+      if (m) fields[m[1].trim().toLowerCase().replace(/\s+/g, '')] = m[2].trim();
+    }
+    const severity = fields['severity'];
+    const evidence = fields['evidence'];
+    const risk = fields['risk'];
+    const expectedOutcome = fields['expectedoutcome'];
+    const status = (fields['status'] || 'open').toLowerCase();
+    if (severity === undefined || evidence === undefined || risk === undefined || expectedOutcome === undefined) {
+      errors.push({ code: 'MALFORMED_FINDING_MARKER', findingId: id });
+      continue; // malformed → không authoritative
+    }
+    findings.push({
+      id, type: header[1].toLowerCase(),
+      severity, evidence, risk, expectedOutcome, status,
+      author, ts, commentId,
+    });
+  }
+  return { findings, errors };
+}
+
+// Derive tập finding ID đang ACTIVE (bắt buộc resolve) từ list finding parsed + authority allowlist.
+// authority = { gpt:[login], local:[login] } (từ policy approvalAuthorities) — reviewer principal có
+// quyền tạo finding. Finding do actor KHÔNG có authority → bị bỏ qua (không authoritative).
+// Finding ở FINDING_TERMINAL_STATES → loại khỏi active set (withdraw/superseded có authority).
+// entries có finding nhưng thiếu authority → fail-closed (không đoán reviewer principal).
+export function canonicalActiveFindings(entries, { authority = null } = {}) {
+  const errors = [];
+  const typed = [];
+  for (const e of entries) {
+    if (!e || typeof e !== 'object' || !e.id) continue;
+    const t = findingType(e.id);
+    if (!t) { errors.push({ code: 'FINDING_ID_UNKNOWN', findingId: String(e.id) }); continue; }
+    typed.push({ ...e, type: t });
+  }
+  if (typed.length > 0) {
+    if (!authority || typeof authority !== 'object' || !Array.isArray(authority.gpt) || !Array.isArray(authority.local)) {
+      return { ok: false, findings: [], errors: [{ code: 'AUTHORITY_UNAVAILABLE', message: 'Không có authority allowlist để xác định reviewer principal của finding (fail-closed)' }] };
+    }
+  }
+  // Sắp theo thứ tự xuất hiện (comments theo thời gian) → trạng thái cuối cùng (withdraw) thắng.
+  const latest = new Map();
+  for (const e of typed) {
+    const allow = authority ? (e.type === 'gpt' ? authority.gpt : authority.local) : [];
+    if (allow && Array.isArray(allow) && !allow.includes(e.author)) {
+      continue; // actor không có reviewer authority → không authoritative
+    }
+    latest.set(e.id, e.status); // giữ trạng thái cuối
+  }
+  const active = [];
+  for (const [id, status] of latest) {
+    if (!FINDING_TERMINAL_STATES.includes(status)) active.push(id);
+  }
+  return { ok: true, findings: active.sort(), errors };
+}
+
+// So sánh 2 tập finding ID bằng nhau (không quan tâm thứ tự, dedupe) — dùng cho caller assertion.
+export function sameFindingSet(a, b) {
+  const sa = new Set((Array.isArray(a) ? a : []).map(String));
+  const sb = new Set((Array.isArray(b) ? b : []).map(String));
+  if (sa.size !== sb.size) return false;
+  for (const x of sa) if (!sb.has(x)) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Validator — trả { ok, status, errors: [{ code, section, field, message }] }.
 // Fail-closed: bất kỳ lỗi nào → status PARTIAL_EVIDENCE (không bao giờ READY_FOR_REVIEW).
 // GPT-REV-124: nếu report khai previousReportRef và resolvePreviousReport được cấp → resolve +
@@ -465,7 +569,7 @@ export function mergeIncrementalEvidence(report, previousReport) {
 // expectedFindings (array findingId) = review/finding context hiện hành: mọi finding bắt buộc phải
 // có resolution trong chain (không hard-code ID).
 // ---------------------------------------------------------------------------
-export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, registeredRepos = null, expectedFindings = null, resolvePreviousReport = null } = {}) {
+export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, registeredRepos = null, authoritativeFindings = null, resolvePreviousReport = null } = {}) {
   const errors = [];
   if (report === null || typeof report !== 'object' || Array.isArray(report)) {
     return { ok: false, status: 'PARTIAL_EVIDENCE', errors: [{ code: 'INVALID_REPORT', section: null, field: null, message: 'Report không phải object' }] };
@@ -519,14 +623,36 @@ export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, re
       errors.push({ code: rule.code, section: rule.section, field: rule.section, message: `${rule.message} (exception khi check)` });
     }
   }
-  // GPT-REV-124 — review/finding context hiện hành: mọi finding trong expectedFindings bắt buộc
-  // phải được resolve trong findingResolution (consolidated hoặc sau khi hợp nhất chain).
-  if (Array.isArray(expectedFindings)) {
+  // GPT-REV-125 — authoritative finding set (server derive từ canonical review state, KHÔNG tin caller):
+  // mọi finding bắt buộc phải được resolve ĐÚNG tập authoritative (không subset/superset/duplicate/unknown).
+  if (Array.isArray(authoritativeFindings)) {
     const items = working.findingResolution?.items ?? [];
-    const resolved = new Set(items.map((it) => it && it.findingId));
-    for (const fid of expectedFindings) {
-      if (!resolved.has(fid)) {
-        errors.push({ code: 'UNRESOLVED_FINDING_IN_CHAIN', section: 'findingResolution', field: 'findingId', message: `Finding ${fid} chưa được resolve trong findingResolution (bắt buộc thuộc review chain hiện hành)` });
+    const ids = items.map((it) => it && it.findingId).filter((x) => typeof x === 'string' && x !== '');
+    // ID-shape gate: mọi findingId trong authoritative set phải khớp FINDING_ID_RE
+    // (GPT-REV-125) — caller KHÔNG được nhét finding tùy ý vào authoritative chain.
+    for (const fid of authoritativeFindings) {
+      if (typeof fid !== 'string' || !FINDING_ID_RE.test(fid)) {
+        errors.push({ code: 'FINDING_ID_UNKNOWN', section: 'findingResolution', field: 'findingId', message: `Finding ${fid} trong authoritative set không khớp FINDING_ID_RE (GPT|LOCAL)-(REV|RULE)-\\d{3}` });
+      }
+    }
+    for (const id of ids) {
+      if (typeof id !== 'string' || !FINDING_ID_RE.test(id)) {
+        errors.push({ code: 'FINDING_ID_UNKNOWN', section: 'findingResolution', field: 'findingId', message: `Finding ${id} trong findingResolution không khớp FINDING_ID_RE (GPT|LOCAL)-(REV|RULE)-\\d{3}` });
+      }
+    }
+    const authSet = new Set(authoritativeFindings);
+    const dup = [...new Set(ids.filter((x, i) => ids.indexOf(x) !== i))];
+    for (const d of dup) {
+      errors.push({ code: 'FINDING_RESOLUTION_DUPLICATE', section: 'findingResolution', field: 'findingId', message: `Finding ${d} xuất hiện nhiều lần trong findingResolution (duplicate → fail-closed)` });
+    }
+    for (const fid of authoritativeFindings) {
+      if (!ids.includes(fid)) {
+        errors.push({ code: 'UNRESOLVED_FINDING_IN_CHAIN', section: 'findingResolution', field: 'findingId', message: `Finding ${fid} (authoritative) chưa được resolve trong findingResolution (bắt buộc thuộc review chain hiện hành)` });
+      }
+    }
+    for (const id of ids) {
+      if (!authSet.has(id)) {
+        errors.push({ code: 'UNRESOLVED_EXTRA_FINDING', section: 'findingResolution', field: 'findingId', message: `Finding ${id} nằm ngoài authoritative set (superset → fail-closed)` });
       }
     }
   }

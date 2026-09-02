@@ -8,6 +8,8 @@ import {
   verifyHandoffIdentity, validateCanonicalRef, contractContentHash, reportDigest,
   verifyPreviousReportRef, mergeIncrementalEvidence,
   CANONICAL_CONTRACT_PATH, CANONICAL_CONTRACT_REPO,
+  FINDING_ID_RE, FINDING_REQUIRED_FIELDS, FINDING_TERMINAL_STATES,
+  findingType, parseReviewComment, canonicalActiveFindings, sameFindingSet,
 } from './review-handoff-contract.mjs';
 
 const cases = [];
@@ -435,7 +437,7 @@ const weakReport = () => sampleReport({
 });
 
 test('GPT-REV-124: report như comment 5486779460 (thiếu 118-121 + docs-only + aggregate count) → PARTIAL_EVIDENCE', () => {
-  const r = validateHandoff(weakReport(), { expectedFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121'] });
+  const r = validateHandoff(weakReport(), { authoritativeFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121'] });
   assert.equal(r.ok, false);
   assert.equal(r.status, 'PARTIAL_EVIDENCE');
   const codes = r.errors.map((e) => e.code);
@@ -498,7 +500,7 @@ const mkCurReport = (overrides = {}) => sampleReport({
 const resolveTo = (rep) => () => ({ resolved: true, report: rep });
 
 test('GPT-REV-124: incremental resolve đúng previous (cùng HEAD + digest) + merge → READY_FOR_REVIEW cho 118-124', () => {
-  const r = validateHandoff(mkCurReport(), { resolvePreviousReport: resolveTo(mkPrevReport()), expectedFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121', 'GPT-REV-122', 'GPT-REV-123', 'GPT-REV-124'] });
+  const r = validateHandoff(mkCurReport(), { resolvePreviousReport: resolveTo(mkPrevReport()), authoritativeFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121', 'GPT-REV-122', 'GPT-REV-123', 'GPT-REV-124'] });
   assert.equal(r.ok, true);
   assert.equal(r.status, 'READY_FOR_REVIEW');
 });
@@ -552,6 +554,133 @@ test('GPT-REV-124: mergeIncrementalEvidence hợp nhất finding/code/test (curr
   assert.deepEqual(ids, ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121', 'GPT-REV-122', 'GPT-REV-123', 'GPT-REV-124']);
   assert.ok(merged.codeEvidence.items.length > 0);
   assert.ok(merged.tests.items.length > 0);
+});
+
+
+// ---------------------------------------------------------------------------
+// GPT-REV-125 — derive authoritative finding set; caller expectedFindings
+// chỉ là assertion; fail-closed trên subset/superset/duplicate/unknown/missing authority.
+// ---------------------------------------------------------------------------
+const AUTHORITY = { gpt: ['gpt-reviewer-bot'], local: ['local-reviewer-bot'] };
+const parseSample = (i, status = 'open') => parseReviewComment(
+  `[GPT-REV-${String(i).padStart(3, '0')}]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: ${status}`,
+  { author: 'gpt-reviewer-bot', ts: `2026-09-02T0${i}:00:00Z`, commentId: i },
+);
+
+test('GPT-REV-125: findingType map (GPT|LOCAL)-REV-NNN → gpt|local', () => {
+  assert.equal(findingType('GPT-REV-118'), 'gpt');
+  assert.equal(findingType('LOCAL-REV-001'), 'local');
+  assert.equal(findingType('LOCAL-RULE-042'), 'local');
+  assert.equal(findingType('bogus'), null);
+});
+
+test('GPT-REV-125: FINDING_REQUIRED_FIELDS đúng 4 field (severity/evidence/risk/expectedOutcome)', () => {
+  assert.deepEqual([...FINDING_REQUIRED_FIELDS].sort(), ['evidence', 'expectedOutcome', 'risk', 'severity']);
+});
+
+test('GPT-REV-125: parseReviewComment — plain body có chuỗi GPT-REV-* không marker → rỗng', () => {
+  const r = parseReviewComment('xem thêm GPT-REV-118 ở đâu đó\n[GPT-REV-119]\nseverity: low');
+  assert.equal(r.findings.length, 0);
+  assert.ok(r.errors.some((e) => e.code === 'MALFORMED_FINDING_MARKER'));
+});
+
+test('GPT-REV-125: parseReviewComment — marker đủ schema → 1 finding', () => {
+  const r = parseReviewComment('[GPT-REV-118]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open');
+  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].id, 'GPT-REV-118');
+});
+
+test('GPT-REV-125: canonicalActiveFindings — actor không có authority → bỏ qua', () => {
+  const entries = [parseSample(118).findings[0], parseSample(119).findings[0]];
+  entries[1].author = 'imposter';
+  const r = canonicalActiveFindings(entries, { authority: AUTHORITY });
+  assert.deepEqual(r.findings, ['GPT-REV-118']);
+});
+
+test('GPT-REV-125: canonicalActiveFindings — missing authority khi có finding → fail-closed', () => {
+  const r = canonicalActiveFindings([parseSample(118).findings[0]], { authority: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.errors[0].code, 'AUTHORITY_UNAVAILABLE');
+});
+
+test('GPT-REV-125: canonicalActiveFindings — terminal state (withdrawn/superseded/resolved) → loại khỏi active', () => {
+  const entries = [
+    parseSample(118).findings[0],
+    parseSample(119, 'withdrawn').findings[0],
+    parseSample(120, 'superseded').findings[0],
+    parseSample(121, 'resolved').findings[0],
+  ];
+  const r = canonicalActiveFindings(entries, { authority: AUTHORITY });
+  assert.deepEqual(r.findings, ['GPT-REV-118']);
+});
+
+test('GPT-REV-125: sameFindingSet — order/dup bỏ qua, khác tỷ lệ → false', () => {
+  assert.equal(sameFindingSet(['GPT-REV-118', 'GPT-REV-119'], ['GPT-REV-119', 'GPT-REV-118']), true);
+  assert.equal(sameFindingSet(['GPT-REV-118', 'GPT-REV-118'], ['GPT-REV-118']), true);
+  assert.equal(sameFindingSet(['GPT-REV-118'], ['GPT-REV-119']), false);
+  assert.equal(sameFindingSet([], []), true);
+});
+
+test('GPT-REV-125: validateHandoff — authoritativeFindings vắng → không check (back-compat)', () => {
+  const r = validateHandoff(sampleReport());
+  assert.equal(r.ok, true);
+});
+
+test('GPT-REV-125: validateHandoff — caller báo `[]` trong khi authoritative có finding → UNRESOLVED_FINDING_IN_CHAIN', () => {
+  const r = validateHandoff(sampleReport(), { authoritativeFindings: ['GPT-REV-118'] });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'UNRESOLVED_FINDING_IN_CHAIN' && e.message.includes('GPT-REV-118')));
+});
+
+test('GPT-REV-125: validateHandoff — caller subset (thiếu 120 trong authoritative) → UNRESOLVED_FINDING_IN_CHAIN', () => {
+  // items chỉ resolve 118,119; authoritative yêu cầu 118,119,120 → thiếu 120.
+  const items = [
+    { findingId: 'GPT-REV-118', severity: 'high', status: 'fixed', rootCause: 'r', fix: 'f', category: 'failClosed',
+      evidence: { codeEvidence: [{ file: 'server.mjs', symbol: 'task_handoff' }], testEvidence: [{ name: 't', location: 'l', negativeAssertion: 'caller expectedFindings từ chối thiếu 120' }] } },
+    { findingId: 'GPT-REV-119', severity: 'high', status: 'fixed', rootCause: 'r', fix: 'f', category: 'failClosed',
+      evidence: { codeEvidence: [{ file: 'server.mjs', symbol: 'task_handoff' }], testEvidence: [{ name: 't', location: 'l', negativeAssertion: 'caller expectedFindings từ chối thiếu 120' }] } },
+  ];
+  const r = validateHandoff(sampleReport({ findingResolution: { items } }), { authoritativeFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120'] });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'UNRESOLVED_FINDING_IN_CHAIN' && e.message.includes('GPT-REV-120')));
+  assert.ok(!r.errors.some((e) => e.code === 'UNRESOLVED_EXTRA_FINDING'), 'subset caller không phạm superset');
+});
+
+
+test('GPT-REV-125: validateHandoff — caller superset thêm 120 → UNRESOLVED_EXTRA_FINDING', () => {
+  const items = [IDX('GPT-REV-118'), IDX('GPT-REV-119'), IDX('GPT-REV-120')];
+  const r = validateHandoff(sampleReport({ findingResolution: { items } }), { authoritativeFindings: ['GPT-REV-118', 'GPT-REV-119'] });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'UNRESOLVED_EXTRA_FINDING' && e.message.includes('GPT-REV-120')));
+});
+
+test('GPT-REV-125: validateHandoff — duplicate findingId → FINDING_RESOLUTION_DUPLICATE', () => {
+  const items = [IDX('GPT-REV-118'), IDX('GPT-REV-118')];
+  const r = validateHandoff(sampleReport({ findingResolution: { items } }), { authoritativeFindings: ['GPT-REV-118'] });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'FINDING_RESOLUTION_DUPLICATE'));
+});
+
+test('GPT-REV-125: validateHandoff — unknown findingId → FINDING_ID_UNKNOWN', () => {
+  const r = validateHandoff(sampleReport(), { authoritativeFindings: ['bogus-id'] });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'FINDING_ID_UNKNOWN' && e.message.includes('bogus-id')));
+});
+
+test('GPT-REV-125: validateHandoff — exact set khớp authoritative → READY_FOR_REVIEW', () => {
+  const items = [IDX('GPT-REV-118'), IDX('GPT-REV-119')];
+  const r = validateHandoff(sampleReport({ findingResolution: { items } }), { authoritativeFindings: ['GPT-REV-118', 'GPT-REV-119'] });
+  assert.equal(r.status, 'READY_FOR_REVIEW');
+});
+
+test('GPT-REV-125: validateHandoff — authoritative rỗng + items rỗng (chỉ hợp lệ khi bỏ semantic check); bỏ qua vì semantic rule yêu cầu items', () => {
+  // Xác nhận hành vi: với items=[] (vi phạm FINDING_RESOLUTION_ITEMS_REQUIRED) → PARTIAL_EVIDENCE,
+  // nhưng KHÔNG có FINDING_ID_UNKNOWN / UNRESOLVED_EXTRA_FINDING. Caller phải chứa items khi authoritative
+  // rỗng (back-compat với report không có review chain).
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [] } }), { authoritativeFindings: [] });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(!r.errors.some((e) => ['FINDING_ID_UNKNOWN', 'UNRESOLVED_EXTRA_FINDING', 'UNRESOLVED_FINDING_IN_CHAIN', 'FINDING_RESOLUTION_DUPLICATE'].includes(e.code)),
+    'không có finding lỗi authoritative khi cả 2 set rỗng');
 });
 
 
