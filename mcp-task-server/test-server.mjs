@@ -77,7 +77,7 @@ for (const bad of [{ state: "weird" }, { limit: 0 }, { limit: 2000 }, { limit: 1
 
 // GPT-REV-123: registered repos phải đọc từ canonical Soc_brain #17 Project Registry
 // (schema v1.0.0) — consumer-only; KHÔNG dùng .agent/config.json hay legacy registry làm allowlist.
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -549,31 +549,84 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 2g) GPT-REV-125 — server derive authoritative finding set + caller assertion
-//     (pure helpers, không cần gh) — fixture qua AI_PR_REVIEWER_FIXTURE_REVIEW_STATE.
+// 2g) Policy-authority deterministic (KHÔNG phụ thuộc process.cwd) + GPT-REV-125
+//     server derive authoritative finding set + caller assertion.
+//     Pure helpers, không cần gh — fixture qua AI_PR_REVIEWER_FIXTURE_REVIEW_STATE.
 // ---------------------------------------------------------------------------
-console.log("[2g] GPT-REV-125 derive authoritative findings (pure helpers)");
+console.log("[2g] Policy-authority deterministic + GPT-REV-125 derive authoritative findings");
 
 const GPT_REVIEWER = "gpt-reviewer-bot-125";
 import {
-  loadPolicyAuthority, resolveReviewState, deriveAuthoritativeFindings,
+  loadPolicyAuthority, resolvePolicyAuthorityPath, resolveReviewState, deriveAuthoritativeFindings,
 } from "./server.mjs";
 
+// Regression cho Soc_brain #35 / PR #36: reviewer policy KHÔNG resolve từ process.cwd().
+// Fixtures: canonicalRoot (authority hợp lệ), unrelatedRoot (cwd chứa policy TRAP),
+// bareRoot (không có policy — chứng minh no-fabrication + path deterministic),
+// badRoot (policy sai shape — fail-closed).
 const polDir = mkdtempSync(path.join(tmpdir(), "mcp-pol-"));
+const prevCwd = process.cwd();
+const prevPolicyEnv = process.env.AI_PR_POLICY_PATH;
+delete process.env.AI_PR_POLICY_PATH; // ép resolution canonical module-relative trong test
 try {
-  mkdirSync(path.join(polDir, ".github"), { recursive: true });
-  writeFileSync(path.join(polDir, ".github", "ai-review-policy.json"),
+  const canonicalRoot = path.join(polDir, "canonical-root");
+  const unrelatedRoot = path.join(polDir, "unrelated-cwd");
+  const bareRoot = path.join(polDir, "bare-cwd");
+  const badRoot = path.join(polDir, "bad-cwd");
+  for (const d of [canonicalRoot, unrelatedRoot, bareRoot, badRoot]) mkdirSync(d, { recursive: true });
+  mkdirSync(path.join(canonicalRoot, ".github"), { recursive: true });
+  writeFileSync(path.join(canonicalRoot, ".github", "ai-review-policy.json"),
     JSON.stringify({ approvalAuthorities: {
       gptApprovalCommentAuthors: [GPT_REVIEWER],
+      localApprovalCommentAuthors: ["human-admin"],
+    } }), { encoding: "utf8" });
+  mkdirSync(path.join(unrelatedRoot, ".github"), { recursive: true });
+  writeFileSync(path.join(unrelatedRoot, ".github", "ai-review-policy.json"),
+    JSON.stringify({ approvalAuthorities: {
+      gptApprovalCommentAuthors: ["imposter-cwd"],
       localApprovalCommentAuthors: [],
-    } }),
-    { encoding: "utf8" });
-  const prevCwd = process.cwd();
-  process.chdir(polDir);
+    } }), { encoding: "utf8" });
+  mkdirSync(path.join(badRoot, ".github"), { recursive: true });
+  writeFileSync(path.join(badRoot, ".github", "ai-review-policy.json"),
+    JSON.stringify({ foo: 1 }), { encoding: "utf8" });
+
+  // (1) Task server launched từ unrelated cwd KHÔNG resolve reviewer policy từ cwd đó.
+  process.chdir(unrelatedRoot);
   try {
-    const auth = loadPolicyAuthority();
-    ok(auth.ok === true && auth.gpt.includes(GPT_REVIEWER),
-      "loadPolicyAuthority: cwd=.github/ → đọc được allowlist gptApprovalCommentAuthors");
+    const p = resolvePolicyAuthorityPath();
+    ok(!p.startsWith(unrelatedRoot), "(1) resolvePolicyAuthorityPath không resolve từ cwd (policy trap)");
+    const authTrapped = loadPolicyAuthority();
+    ok(authTrapped.ok === true && !authTrapped.gpt.includes("imposter-cwd"),
+      "(1) loadPolicyAuthority bỏ qua policy giả trong cwd (KHÔNG đọc từ process.cwd)");
+  } finally {
+    process.chdir(prevCwd);
+  }
+
+  // (4) No target-repo/cwd policy fabrication + path deterministic bất kể cwd.
+  process.chdir(bareRoot);
+  let pathFromBare;
+  try {
+    pathFromBare = resolvePolicyAuthorityPath();
+    ok(!existsSync(path.join(bareRoot, ".github", "ai-review-policy.json")),
+      "(4) no policy fabrication trong cwd (không tạo .github/ai-review-policy.json)");
+  } finally {
+    process.chdir(canonicalRoot);
+    const pathFromCanon = resolvePolicyAuthorityPath();
+    process.chdir(prevCwd);
+    ok(pathFromBare === pathFromCanon, "(4) resolvePolicyAuthorityPath deterministic bất kể cwd");
+    ok(/ai-review-policy\.json$/.test(pathFromBare), "(4) resolvePolicyAuthorityPath trỏ tới canonical .github/ai-review-policy.json");
+  }
+
+  // (2) Valid canonical reviewer context resolve đúng (explicit validated root).
+  const auth = loadPolicyAuthority({ policyRoot: canonicalRoot });
+  ok(auth.ok === true && auth.gpt.includes(GPT_REVIEWER) && auth.local.includes("human-admin"),
+    "(2) loadPolicyAuthority(policyRoot=canonical) → đọc đúng allowlist gpt/local");
+
+  // (3) Missing/invalid authority vẫn fail-closed.
+  ok(loadPolicyAuthority({ policyRoot: bareRoot }).ok === false,
+    "(3) loadPolicyAuthority(policyRoot không có policy) → fail-closed (missing)");
+  ok(loadPolicyAuthority({ policyRoot: badRoot }).ok === false,
+    "(3) loadPolicyAuthority(policy sai shape) → fail-closed (invalid)");
 
     const fixture = JSON.stringify([
       { id: 1, author: GPT_REVIEWER,
@@ -633,10 +686,10 @@ try {
       if (prevEnv === undefined) delete process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE;
       else process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = prevEnv;
     }
-  } finally {
-    process.chdir(prevCwd);
-  }
 } finally {
+  process.chdir(prevCwd);
+  if (prevPolicyEnv === undefined) delete process.env.AI_PR_POLICY_PATH;
+  else process.env.AI_PR_POLICY_PATH = prevPolicyEnv;
   rmSync(polDir, { recursive: true, force: true });
 }
 

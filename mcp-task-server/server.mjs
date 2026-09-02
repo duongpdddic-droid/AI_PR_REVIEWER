@@ -225,8 +225,28 @@ export function buildListArgs({ state = "open", status, agent, limit = 100 } = {
 // Reader review-state: test-only fixture env (AI_PR_REVIEWER_FIXTURE_REVIEW_STATE) hoặc gh thật.
 // Fail-closed: policy missing / review-state unreadable / ambiguous → từ chối task_handoff trước mutation.
 // ---------------------------------------------------------------------------
-export function loadPolicyAuthority() {
-  const p = path.join(process.cwd(), ".github", "ai-review-policy.json");
+export const REVIEWER_POLICY_FILE = ".github/ai-review-policy.json";
+
+/**
+ * Resolve deterministic đường dẫn tới canonical reviewer policy.
+ * KHÔNG BAO GIỜ dùng `process.cwd()` — fix blocker Soc_brain Issue #35 / PR #36: trước đây
+ * resolve theo cwd của tiến trình MCP (khi Cline bắn server với cwd = nơi cài VS Code) nên đọc nhầm
+ * `<cwd>/.github/ai-review-policy.json` ở nơi không có → HANDOFF_FINDINGS_AUTHORITY_UNAVAILABLE.
+ *
+ * Nguồn (theo thứ tự, fail-closed ở `loadPolicyAuthority`):
+ *   1. `policyRoot` tường minh được cung cấp — đã validated: read fail-closed nếu thiếu/hỏng;
+ *   2. env `AI_PR_POLICY_PATH` (khớp `loadCanonicalPolicyLocal` trong scripts/effective-policy.mjs);
+ *   3. canonical reviewer context = chính AI_PR_REVIEWER repo (module-relative, KHÔNG cwd).
+ */
+export function resolvePolicyAuthorityPath({ policyRoot = null } = {}) {
+  if (policyRoot) return path.resolve(policyRoot, REVIEWER_POLICY_FILE);
+  if (process.env.AI_PR_POLICY_PATH) return path.resolve(process.env.AI_PR_POLICY_PATH, REVIEWER_POLICY_FILE);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, "..", REVIEWER_POLICY_FILE);
+}
+
+export function loadPolicyAuthority({ policyRoot = null } = {}) {
+  const p = resolvePolicyAuthorityPath({ policyRoot });
   try {
     const pol = JSON.parse(readFileSync(p, "utf8"));
     const aa = pol && pol.approvalAuthorities;
@@ -239,7 +259,7 @@ export function loadPolicyAuthority() {
       local: aa.localApprovalCommentAuthors,
     };
   } catch (err) {
-    return { ok: false, errors: [`policy read thất bại: ${err.message}`] };
+    return { ok: false, errors: [`policy read thất bại: ${err.message} (path=${p})`] };
   }
 }
 
