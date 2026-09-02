@@ -337,8 +337,14 @@ const FIXTURE_STATE = JSON.stringify([
   { id: 1, author: "duongpdddic-droid", body: "[GPT-REV-000]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T00:00:00Z" },
 ]);
 
+// GPT-REV-129: bỏ dependency live PR #47 + hard-coded remote HEAD — child dùng fixture PR HEAD.
+// Skip-through env: AI_PR_REVIEWER_TEST_SKIP_E2E=1 để chỉ chạy phần deterministic [2g] (không cần gh).
+const FIXTURE_PR_HEAD = "e7431244cac7484ceda6b4706fbeef97e4629d4d";
+if (process.env.AI_PR_REVIEWER_TEST_SKIP_E2E === "1") {
+  console.log("[skip] live e2e bị bỏ qua (AI_PR_REVIEWER_TEST_SKIP_E2E=1)");
+} else {
 const child = spawn(process.execPath, [fileURLToPath(new URL("./server.mjs", import.meta.url))], {
-  env: { ...process.env, MCP_TASK_REPOS: REPO, SOC_PROJECT_REGISTRY_PATH: e2eRegPath, AI_PR_REVIEWER_FIXTURE_REVIEW_STATE: FIXTURE_STATE },
+  env: { ...process.env, MCP_TASK_REPOS: REPO, SOC_PROJECT_REGISTRY_PATH: e2eRegPath, AI_PR_REVIEWER_FIXTURE_REVIEW_STATE: FIXTURE_STATE, AI_PR_REVIEWER_FIXTURE_PR_HEAD: JSON.stringify({ "47": FIXTURE_PR_HEAD }) },
   stdio: ["pipe", "pipe", "pipe"],
 });
 let lineBuf = "";
@@ -547,6 +553,7 @@ try {
   rmSync(e2eDir, { recursive: true, force: true });
   rmSync(fxDir, { recursive: true, force: true });
 }
+} // end if(!skip e2e)
 
 // ---------------------------------------------------------------------------
 // 2g) Policy-authority deterministic (KHÔNG phụ thuộc process.cwd) + GPT-REV-125
@@ -628,6 +635,39 @@ try {
   ok(loadPolicyAuthority({ policyRoot: badRoot }).ok === false,
     "(3) loadPolicyAuthority(policy sai shape) → fail-closed (invalid)");
 
+  // GPT-REV-128 — canonical policy binding: repo/version/digest/split-brain (fail-closed).
+  const writePol = (d, pol) => { mkdirSync(path.join(d, ".github"), { recursive: true }); writeFileSync(path.join(d, ".github", "ai-review-policy.json"), JSON.stringify(pol), "utf8"); };
+  const boundRoot = path.join(polDir, "bound-root");
+  const badRepoRoot = path.join(polDir, "bad-repo-root");
+  const badVerRoot = path.join(polDir, "bad-ver-root");
+  const badDigestRoot = path.join(polDir, "bad-digest-root");
+  const sinRoot = path.join(polDir, "sin-root");
+  writePol(boundRoot, { policyVersion: "2026-09-02.1", scope: { appliesTo: [REPO, "duongpdddic-droid/AI_PR_REVIEWER"] }, approvalAuthorities: { gptApprovalCommentAuthors: [GPT_REVIEWER], localApprovalCommentAuthors: ["human-admin"] } });
+  writePol(badRepoRoot, { policyVersion: "2026-09-02.1", scope: { appliesTo: ["duongpdddic-droid/AI_PR_REVIEWER"] }, approvalAuthorities: { gptApprovalCommentAuthors: [GPT_REVIEWER], localApprovalCommentAuthors: ["human-admin"] } });
+  writePol(badVerRoot, { policyVersion: "2026-08-23.7", scope: { appliesTo: [REPO] }, approvalAuthorities: { gptApprovalCommentAuthors: [GPT_REVIEWER], localApprovalCommentAuthors: ["human-admin"] } });
+  writePol(badDigestRoot, { policyVersion: "2026-09-02.1", scope: { appliesTo: [REPO] }, approvalAuthorities: { gptApprovalCommentAuthors: [GPT_REVIEWER], localApprovalCommentAuthors: ["human-admin"] } });
+  writePol(sinRoot, { policyVersion: "2026-09-02.1", scope: { appliesTo: [REPO] }, approvalAuthorities: { gptApprovalCommentAuthors: [GPT_REVIEWER], localApprovalCommentAuthors: ["human-admin"] } });
+
+  // (5) Valid canonical binding → ok + policyVersion + digest sha256 (bind repo/version/digest).
+  const bauth = loadPolicyAuthority({ policyRoot: boundRoot, expectedRepo: REPO, requireVersion: true });
+  ok(bauth.ok === true && bauth.policyVersion === "2026-09-02.1" && typeof bauth.digest === "string" && /^[0-9a-f]{64}$/.test(bauth.digest),
+    "(5) bind canonical → ok + policyVersion + digest sha256");
+  // (6) Wrong-repo (policy không áp dụng cho repo đích) → POLICY_REPO_MISMATCH fail-closed.
+  ok(loadPolicyAuthority({ policyRoot: badRepoRoot, expectedRepo: REPO, requireVersion: true }).errors?.[0]?.code === "POLICY_REPO_MISMATCH",
+    "(6) policy không áp dụng cho repo → POLICY_REPO_MISMATCH fail-closed");
+  // (7) Missing policyVersion (requireVersion) → POLICY_VERSION_MISSING fail-closed.
+  ok(loadPolicyAuthority({ policyRoot: canonicalRoot, requireVersion: true }).errors?.[0]?.code === "POLICY_VERSION_MISSING",
+    "(7) policy thiếu policyVersion (requireVersion) → POLICY_VERSION_MISSING fail-closed");
+  // (8) Pinned version khác policy → POLICY_VERSION_MISMATCH fail-closed.
+  ok(loadPolicyAuthority({ policyRoot: badVerRoot, expectedRepo: REPO, expectedVersion: "2099-01-01.0", requireVersion: true }).errors?.[0]?.code === "POLICY_VERSION_MISMATCH",
+    "(8) pinned version khác policy → POLICY_VERSION_MISMATCH fail-closed");
+  // (9) expectedDigest sai → POLICY_DIGEST_MISMATCH fail-closed.
+  ok(loadPolicyAuthority({ policyRoot: badDigestRoot, expectedRepo: REPO, requireVersion: true, expectedDigest: "deadbeef" }).errors?.[0]?.code === "POLICY_DIGEST_MISMATCH",
+    "(9) expectedDigest sai → POLICY_DIGEST_MISMATCH fail-closed");
+  // (10) Split-brain (compareCanonical + policyRoot ≠ canonical, digest khác) → POLICY_SPLIT_BRAIN fail-closed.
+  ok(loadPolicyAuthority({ policyRoot: sinRoot, compareCanonical: true, requireVersion: true }).errors?.[0]?.code === "POLICY_SPLIT_BRAIN",
+    "(10) 2 nguồn policy khác digest → POLICY_SPLIT_BRAIN fail-closed");
+
     const fixture = JSON.stringify([
       { id: 1, author: GPT_REVIEWER,
         body: "[GPT-REV-118]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T01:00:00Z" },
@@ -653,14 +693,15 @@ try {
       ok(sameFindingSet(derived.findings, ["GPT-REV-118"]) === false,
         "sameFindingSet authoritative vs caller subset → false");
 
-      // Non-authority actor: comment từ actor không có authority → bị bỏ qua → authoritative rỗng.
+      // Non-authority actor (unauthorized-only): comment từ actor KHÔNG có authority, không có
+      // finding nào do authority hợp lệ tạo → GPT-REV-127 fail-closed (KHÔNG silent drop).
       process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = JSON.stringify([
         { id: 9, author: "imposter-bot",
           body: "[GPT-REV-200]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T01:00:00Z" },
       ]);
       const derivedNA = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth });
-      ok(derivedNA.ok === true && derivedNA.findings.length === 0,
-        "actor không có authority → authoritative rỗng (không scrape comment tùy ý)");
+      ok(derivedNA.ok === false && derivedNA.errors.some((e) => e.code === "AUTHORITY_UNAVAILABLE"),
+        "unauthorized-only findings → AUTHORITY_UNAVAILABLE (không scrape comment tùy ý)");
 
       // Malformed marker: comment thiếu FINDING_REQUIRED_FIELDS → parser bỏ qua (không authoritative).
       process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = JSON.stringify([
@@ -670,18 +711,53 @@ try {
       ok(derivedMal.ok === true && derivedMal.findings.length === 0,
         "comment không có marker đầy đủ → parser skip → authoritative rỗng");
 
-      // Empty authority allowlist (arrays present nhưng rỗng) → KHÔNG reviewer principal có quyền
-      // → mọi finding bị bỏ qua → authoritative rỗng (không phải AUTHORITY_UNAVAILABLE).
+      // GPT-REV-127: Empty authority allowlist (arrays present nhưng rỗng) → KHÔNG reviewer principal có
+      // quyền → AUTHORITY_UNAVAILABLE (fail-closed), KHÔNG được coi authoritative rỗng là thành công.
       process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = fixture;
       const derivedEmptyAuth = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: { gpt: [], local: [] } });
-      ok(derivedEmptyAuth.ok === true && derivedEmptyAuth.findings.length === 0,
-        "empty authority allowlist → mọi finding dropped → authoritative rỗng");
+      ok(derivedEmptyAuth.ok === false && derivedEmptyAuth.errors.some((e) => e.code === "AUTHORITY_UNAVAILABLE"),
+        "empty authority allowlist → AUTHORITY_UNAVAILABLE (fail-closed, không silent drop)");
 
       // Missing authority (null) khi có finding → AUTHORITY_UNAVAILABLE fail-closed.
       const derivedNoAuth = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: null });
       ok(derivedNoAuth.ok === false && derivedNoAuth.errors.some((e) => e.code === "AUTHORITY_UNAVAILABLE"),
         "missing authority + có finding → AUTHORITY_UNAVAILABLE");
-      // GPT-REV-125-B
+
+      // GPT-REV-129 — reader injection: reader synthetic ≡ production adapter (fixture env) cho cùng dữ liệu.
+      const derivedViaReader = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth, reader: (repo, pr) => resolveReviewState(repo, pr) });
+      ok(sameFindingSet(derivedViaReader.findings, derived.findings) === true,
+        "GPT-REV-129: reader injected ≡ production adapter cho cùng authoritative set");
+
+      // Pagination: reader ghép toàn bộ comments (nhiều hơn 1 trang) → derive dedupe trên 3 finding active.
+      const manyComments = Array.from({ length: 120 }, (_, i) => ({
+        id: 1000 + i, author: GPT_REVIEWER,
+        body: `[GPT-REV-${String((i % 3) + 118).padStart(3, "0")}]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open`,
+        ts: `2026-09-02T${String(i % 24).padStart(2, "0")}:00:00Z`,
+      }));
+      const derivedPaged = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth, reader: () => ({ ok: true, comments: manyComments }) });
+      ok(derivedPaged.ok === true && derivedPaged.findings.length === 3 && sameFindingSet(derivedPaged.findings, ["GPT-REV-118", "GPT-REV-119", "GPT-REV-120"]),
+        "GPT-REV-129: pagination (120 comments) → dedupe trên 3 finding active, không tràn");
+
+      // Malformed shape: reader trả comments không phải mảng → REVIEW_STATE_MALFORMED fail-closed.
+      const derivedBadShape = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth, reader: () => ({ ok: true, comments: "not-array" }) });
+      ok(derivedBadShape.ok === false && derivedBadShape.errors.some((e) => e.code === "REVIEW_STATE_MALFORMED"),
+        "GPT-REV-129: malformed review-state shape → REVIEW_STATE_MALFORMED fail-closed");
+
+      // API failure: reader throw → REVIEW_STATE_READER_FAILED fail-closed (no mutation).
+      const derivedFail = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth, reader: () => { throw new Error("gh api 500"); } });
+      ok(derivedFail.ok === false && derivedFail.errors.some((e) => e.code === "REVIEW_STATE_READER_FAILED"),
+        "GPT-REV-129: API failure (reader throw) → REVIEW_STATE_READER_FAILED fail-closed");
+
+      // Duplicate comments: cùng finding ID, trạng thái sau (withdrawn) thắng → loại khỏi active.
+      process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = JSON.stringify([
+        { id: 1, author: GPT_REVIEWER, body: "[GPT-REV-118]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: open", ts: "2026-09-02T01:00:00Z" },
+        { id: 2, author: GPT_REVIEWER, body: "[GPT-REV-118]\nseverity: high\nevidence: x\nrisk: y\nexpectedOutcome: z\nstatus: withdrawn", ts: "2026-09-02T03:00:00Z" },
+      ]);
+      const derivedDup = deriveAuthoritativeFindings("duongpdddic-droid/QLDA_DTXD", 35, { authority: auth });
+      ok(derivedDup.ok === true && derivedDup.findings.length === 0,
+        "GPT-REV-129: duplicate comment cùng finding ID → trạng thái cuối (withdrawn) thắng → rỗng");
+      process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = fixture;
+
     } finally {
       if (prevEnv === undefined) delete process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE;
       else process.env.AI_PR_REVIEWER_FIXTURE_REVIEW_STATE = prevEnv;
