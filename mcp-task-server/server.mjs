@@ -10,7 +10,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { validateHandoff, canRequestReview, verifyHandoffIdentity, CONTRACT_VERSION, reportDigest } from "../scripts/review-handoff-contract.mjs";
+import { validateHandoff, canRequestReview, verifyHandoffIdentity, verifyPreviousReportRef, CONTRACT_VERSION, reportDigest } from "../scripts/review-handoff-contract.mjs";
 import { scanForSecrets, scanForAbsolutePaths } from "../scripts/project-registry.mjs";
 import { loadRegistryRepos, resolveCanonicalRegistryPath } from "./soc-registry-consumer.mjs";
 
@@ -267,7 +267,7 @@ export const ops = {
     return { repo: r, number, status: `status:${check.to}`, labels };
   },
 
-  async task_handoff({ repo, number, pr, handoffReport }) {
+  async task_handoff({ repo, number, pr, handoffReport, expectedFindings = null }) {
     const r = repo ?? defaultRepos()[0];
     if (!r) throw new Error("Chưa xác định repo");
     // GPT-REV-115: handoffReport BẮT BUỘC — thiếu → fail-closed TRƯỚC mọi mutation.
@@ -280,11 +280,25 @@ export const ops = {
     if (reg.ok !== true) {
       throw new Error(`HANDOFF_REGISTRY_UNAVAILABLE: ${reg.errors.join("; ")}`);
     }
+    // GPT-REV-124 — resolver previous report (incremental chain): đọc comment report trước đó
+    // theo previousReportRef.repo/commentId, parse JSON từ block ```json. Unresolved → { resolved:false }
+    // → validateHandoff fail-closed (PREVIOUS_REPORT_UNRESOLVED) nếu report khai incremental ref.
+    const resolvePreviousReport = (ref) => {
+      try {
+        const raw = gh(["api", `repos/${validateRepo(ref.repo)}/issues/comments/${ref.commentId}`]);
+        const c = JSON.parse(raw);
+        const m = c.body && c.body.match(/```json\n([\s\S]*?)\n```/);
+        if (!m) return { resolved: false };
+        return { resolved: true, report: JSON.parse(m[1]) };
+      } catch {
+        return { resolved: false };
+      }
+    };
     // GPT-REV-117: gate — chỉ report canRequestReview===true mới được transition;
     // BLOCKED / PARTIAL_EVIDENCE / invalid / exception đều chặn fail-closed.
     let v;
     try {
-      v = validateHandoff(handoffReport, { registeredRepos: reg.repos });
+      v = validateHandoff(handoffReport, { registeredRepos: reg.repos, expectedFindings, resolvePreviousReport });
     } catch (err) {
       throw new Error(`HANDOFF_PARTIAL_EVIDENCE: report không hợp lệ (exception khi validate) — ${err.message}`);
     }
@@ -437,7 +451,8 @@ export const TOOLS = [
   { name: "task_handoff", description: "Coder bàn giao: in-progress/changes-requested → review-requested + agent:gpt. BẮT BUỘC kèm handoffReport đạt READY_FOR_REVIEW theo canonical REVIEW HANDOFF CONTRACT (Issue #32); thiếu hoặc không hợp lệ → chặn fail-closed trước mọi mutation.",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       pr: { type: "number", description: "Số PR bàn giao (tùy chọn, sẽ comment lên Issue)" },
-      handoffReport: { type: "object", description: "Handoff report theo REVIEW HANDOFF CONTRACT v1.0.0 (bắt buộc, phải READY_FOR_REVIEW)" } }, required: ["number", "handoffReport"] } },
+      handoffReport: { type: "object", description: "Handoff report theo REVIEW HANDOFF CONTRACT v1.0.0 (bắt buộc, phải READY_FOR_REVIEW)" },
+      expectedFindings: { type: "array", items: { type: "string" }, description: "Review/finding context hiện hành: mọi finding ID này bắt buộc phải có resolution trong findingResolution (GPT-REV-124)" } }, required: ["number", "handoffReport"] } },
   { name: "task_review", description: "Reviewer chấm: review-requested → approved | changes-requested (+agent:cline)",
     inputSchema: { type: "object", properties: { repo: repoProp, number: numberProp,
       verdict: { type: "string", enum: ["approve", "request-changes"] },

@@ -27,6 +27,12 @@ export const CANONICAL_CONTRACT_PATH = 'scripts/review-handoff-contract.mjs';
 // Repository canonical chứa contract (nguồn sự thật của chính contract này).
 export const CANONICAL_CONTRACT_REPO = 'duongpdddic-droid/AI_PR_REVIEWER';
 
+// Category của finding — dùng để xác định finding fail-closed/mutation phải kèm negative assertion.
+export const FINDING_CATEGORIES = Object.freeze(['type', 'failClosed', 'mutation']);
+
+// Status finding mà evidence (code + test) là BẮT BUỘC; 'unresolved' không cần evidence.
+export const FIXED_DISPUTED_STATUSES = Object.freeze(['fixed', 'disputed']);
+
 // ---------------------------------------------------------------------------
 // Schema canonical — 10 sections + required fields (Issue #32 body).
 // Mỗi section: { title, fields: [tên trường bắt buộc] }.
@@ -201,6 +207,80 @@ export const SEMANTIC_RULES = Object.freeze([
     },
     message: 'Delivery thiếu commitSha (40-hex)/pushResult/prActions hoặc headReadBack/noApprovalClaim chưa đúng',
   },
+  {
+    code: 'CODE_EVIDENCE_NOT_DOCS_ONLY',
+    section: 'codeEvidence',
+    description: 'Ít nhất 1 mục code evidence phải là source code thật (file thực thi), không chỉ docs (.md/.txt/.html) — docs-only không phải code evidence để reviewer đánh giá offline',
+    check: (r) => {
+      const items = r.codeEvidence?.items;
+      if (!Array.isArray(items) || items.length === 0) return false;
+      return items.some((it) => it && typeof it.file === 'string' && !/\.(md|txt|html?|adoc|rst|csv)$/i.test(it.file));
+    },
+    message: 'codeEvidence chỉ gồm docs (không có source code thật) → không review offline được',
+  },
+  {
+    code: 'FINDING_RESOLUTION_EVIDENCE_REQUIRED',
+    section: 'findingResolution',
+    description: 'Finding fixed|disputed phải liên kết code evidence (file + symbol/function/export) và test evidence cụ thể (name + location); finding loại failClosed/mutation phải kèm negativeAssertion/no-mutation evidence',
+    check: (r) => {
+      const items = r.findingResolution?.items;
+      if (!Array.isArray(items) || items.length === 0) return false;
+      return items.every((it) => {
+        if (!it || typeof it !== 'object') return false;
+        if (!FIXED_DISPUTED_STATUSES.includes(it.status)) return true; // unresolved không cần evidence
+        const ev = it.evidence;
+        if (!ev || typeof ev !== 'object') return false;
+        const ce = Array.isArray(ev.codeEvidence) ? ev.codeEvidence : [];
+        const te = Array.isArray(ev.testEvidence) ? ev.testEvidence : [];
+        if (ce.length === 0 || te.length === 0) return false;
+        const ceOk = ce.every((c) => c && typeof c === 'object' && typeof c.file === 'string' && typeof c.symbol === 'string');
+        const teOk = te.every((t) => t && typeof t === 'object' && typeof t.name === 'string' && typeof t.location === 'string');
+        if (!ceOk || !teOk) return false;
+        // finding fail-closed/mutation (category) → bắt buộc negative assertion cụ thể
+        if (it.category === 'failClosed' || it.category === 'mutation') {
+          const negOk = te.some((t) => typeof t.negativeAssertion === 'string'
+            && t.negativeAssertion.trim() !== ''
+            && !/^(n\/?a|none|not applied|not applicable|[-—\s]*)$/i.test(t.negativeAssertion.trim()));
+          if (!negOk) return false;
+        }
+        return true;
+      });
+    },
+    message: 'Finding fixed/disputed thiếu code evidence (file+symbol) hoặc test evidence (name+location), hoặc finding failClosed/mutation thiếu negative assertion cụ thể',
+  },
+  {
+    code: 'TESTS_NO_AGGREGATE_ONLY',
+    section: 'tests',
+    description: 'Không chấp nhận tổng test count (vd "108 PASS") hoặc chuỗi chung chung làm evidence duy nhất — mỗi tests item phải có setup + assertion cụ thể (không phải format số đếm)',
+    check: (r) => {
+      const items = r.tests?.items;
+      if (!Array.isArray(items) || items.length === 0) return false;
+      const AGG = /^\s*\d+\s*(\/\s*\d+)?\s*(PASS|FAIL|OK)\s*$/i;
+      return items.every((it) => {
+        if (!it || typeof it !== 'object') return false;
+        const setup = typeof it.setup === 'string' ? it.setup.trim() : '';
+        if (setup === '' || AGG.test(setup)) return false;
+        const assertions = Array.isArray(it.assertions) ? it.assertions : [];
+        if (assertions.length === 0) return false;
+        if (assertions.every((a) => typeof a === 'string' && AGG.test(a))) return false;
+        if (typeof it.location !== 'string' || it.location.trim() === '') return false;
+        return true;
+      });
+    },
+    message: 'tests phải có setup + assertion cụ thể (không dùng tổng count / chuỗi chung chung làm evidence duy nhất)',
+  },
+  {
+    code: 'VERIFICATION_NONZERO_EXIT',
+    section: 'verification',
+    description: 'READY_FOR_REVIEW bị chặn nếu bất kỳ exitCode trong verification khác 0 (command failure) — không gọi all-green khi còn nonzero exit',
+    check: (r) => {
+      const v = r.verification ?? {};
+      const codes = Array.isArray(v.exitCodes) ? v.exitCodes : [];
+      const allGreen = r.terminalStatus?.status === 'READY_FOR_REVIEW';
+      return !(allGreen && codes.some((c) => Number(c) !== 0));
+    },
+    message: 'READY_FOR_REVIEW nhưng có exit code khác 0 trong verification (command failure)',
+  },
 ]);
 
 export const SEMANTIC_RULE_CODES = Object.freeze(SEMANTIC_RULES.map((s) => s.code));
@@ -229,7 +309,7 @@ export function sampleReport(overrides = {}) {
       deviations: [],
     },
     codeEvidence: { items: [{ file: 'scripts/review-handoff-contract.mjs', lines: '1-70', symbol: 'validateHandoff', before: 'missing', after: 'structured errors', failClosedGates: 'PARTIAL_EVIDENCE on missing section', mutationOrdering: 'validate before transition', excerpt: 'export function validateHandoff(...)', callerInput: 'report object', mutations: [] }] },
-    findingResolution: { items: [{ findingId: 'GPT-REV-000', severity: 'low', status: 'fixed', rootCause: 'n/a', fix: 'n/a (baseline)' }] },
+    findingResolution: { items: [{ findingId: 'GPT-REV-000', severity: 'low', status: 'fixed', rootCause: 'n/a', fix: 'n/a (baseline)', category: 'type', evidence: { codeEvidence: [{ file: 'scripts/review-handoff-contract.mjs', symbol: 'validateHandoff' }], testEvidence: [{ name: 'happy path: report đủ 10 section → READY_FOR_REVIEW', location: 'scripts/test-review-handoff-contract.mjs', negativeAssertion: 'errors empty' }] } }] },
     tests: { items: [{ name: 'happy path', location: 'scripts/test-review-handoff-contract.mjs', setup: 'full report', interleaving: null, assertions: ['status READY_FOR_REVIEW'], negativeAssertion: 'errors empty', realFs: false, result: 'PASS', exitCode: 0 }] },
     verification: {
       commands: ['node scripts/test-review-handoff-contract.mjs'],
@@ -278,28 +358,143 @@ function deepMerge(base, overrides) {
 
 
 // ---------------------------------------------------------------------------
+// GPT-REV-124 — incremental report chain: resolve previous report ref + verify
+// digest/HEAD/identity/cycle, rồi hợp nhất evidence trước khi validate.
+// Pure logic, ZERO IO — resolver được inject (server cung cấp IO qua gh).
+// ---------------------------------------------------------------------------
+const PREV_REPORT_REF_FIELDS = Object.freeze(['repo', 'issue', 'pr', 'commentId', 'headSha', 'reportDigest']);
+
+export function verifyPreviousReportRef(report, { resolvePreviousReport, currentDigest = null } = {}) {
+  const ref = report && typeof report === 'object' ? report.previousReportRef : undefined;
+  if (ref === undefined || ref === null) {
+    return { ok: true, incremental: false, previousReport: null, errors: [] };
+  }
+  if (typeof ref !== 'object' || Array.isArray(ref)) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_REF_INVALID', section: 'previousReportRef', field: null, message: 'previousReportRef phải là structured object { repo, issue, pr, commentId, headSha, reportDigest }' }] };
+  }
+  const missing = PREV_REPORT_REF_FIELDS.filter((f) => ref[f] === undefined || ref[f] === null);
+  if (missing.length > 0) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_REF_INCOMPLETE', section: 'previousReportRef', field: missing.join(','), message: `previousReportRef thiếu ${missing.join(', ')}` }] };
+  }
+  if (typeof ref.headSha !== 'string' || !HEAD_SHA_RE.test(ref.headSha)) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_HEAD_INVALID', section: 'previousReportRef', field: 'headSha', message: 'previousReportRef.headSha phải là full 40-hex (exact HEAD)' }] };
+  }
+  if (typeof ref.reportDigest !== 'string' || !/^[0-9a-f]{64}$/.test(ref.reportDigest)) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_DIGEST_INVALID', section: 'previousReportRef', field: 'reportDigest', message: 'previousReportRef.reportDigest phải là 64-hex' }] };
+  }
+  let resolved = null;
+  try {
+    resolved = typeof resolvePreviousReport === 'function' ? resolvePreviousReport(ref) : null;
+  } catch {
+    resolved = null;
+  }
+  if (!resolved || resolved.resolved !== true || !resolved.report || typeof resolved.report !== 'object') {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_UNRESOLVED', section: 'previousReportRef', field: null, message: `Không resolve được previous report (ref: ${ref.repo}#${ref.issue} comment ${ref.commentId}) → fail-closed` }] };
+  }
+  const prev = resolved.report;
+  const actualDigest = reportDigest(prev);
+  if (actualDigest !== ref.reportDigest) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_DIGEST_MISMATCH', section: 'previousReportRef', field: 'reportDigest', message: `Digest previous report ${actualDigest} ≠ ref ${ref.reportDigest}` }] };
+  }
+  const prevId = prev.identity ?? {};
+  if (prevId.repository !== ref.repo || prevId.issue !== ref.issue || prevId.pullRequest !== ref.pr) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_IDENTITY_MISMATCH', section: 'previousReportRef', field: 'identity', message: `Previous report identity không khớp ref (repo/issue/pr)` }] };
+  }
+  if (prevId.headSha !== ref.headSha) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_HEAD_MISMATCH', section: 'previousReportRef', field: 'headSha', message: `Previous report HEAD ${prevId.headSha} ≠ ref ${ref.headSha} (stale/wrong ref)` }] };
+  }
+  const curDigest = currentDigest !== null ? currentDigest : reportDigest(report);
+  const prevPrev = prev.previousReportRef;
+  if (prevPrev && typeof prevPrev === 'object' && prevPrev.reportDigest === curDigest) {
+    return { ok: false, incremental: true, previousReport: null, errors: [{ code: 'PREVIOUS_REPORT_CYCLE', section: 'previousReportRef', field: null, message: `Phát hiện reference cycle: previous report trỏ ngược về chính digest hiện tại ${curDigest}` }] };
+  }
+  return { ok: true, incremental: true, previousReport: prev, errors: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Hợp nhất evidence của previous report vào report hiện tại (current thắng, previous bổ sung
+// phần chưa có) theo findingId/code-symbol/test-name. Dùng cho incremental report để đảm bảo
+// review chain hiện hành đầy đủ evidence mà KHÔNG bắt lặp toàn bộ lịch sử.
+export function mergeIncrementalEvidence(report, previousReport) {
+  if (!previousReport || typeof previousReport !== 'object') return report;
+  const out = { ...report };
+  const curFindings = Array.isArray(report.findingResolution?.items) ? report.findingResolution.items : [];
+  const prevFindings = Array.isArray(previousReport.findingResolution?.items) ? previousReport.findingResolution.items : [];
+  const findingIds = new Set(curFindings.map((f) => f && f.findingId));
+  const mergedFindings = [...curFindings];
+  for (const pf of prevFindings) {
+    if (pf && !findingIds.has(pf.findingId)) mergedFindings.push(pf);
+  }
+  if (mergedFindings.length > 0) out.findingResolution = { items: mergedFindings };
+
+  const curCode = Array.isArray(report.codeEvidence?.items) ? report.codeEvidence.items : [];
+  const prevCode = Array.isArray(previousReport.codeEvidence?.items) ? previousReport.codeEvidence.items : [];
+  const codeKeys = new Set(curCode.map((c) => c && `${c.file}::${c.symbol}`));
+  const mergedCode = [...curCode];
+  for (const pc of prevCode) {
+    const k = pc && `${pc.file}::${pc.symbol}`;
+    if (k && !codeKeys.has(k)) mergedCode.push(pc);
+  }
+  if (mergedCode.length > 0) out.codeEvidence = { items: mergedCode };
+
+  const curTests = Array.isArray(report.tests?.items) ? report.tests.items : [];
+  const prevTests = Array.isArray(previousReport.tests?.items) ? previousReport.tests.items : [];
+  const testKeys = new Set(curTests.map((t) => t && `${t.name}::${t.location}`));
+  const mergedTests = [...curTests];
+  for (const pt of prevTests) {
+    const k = pt && `${pt.name}::${pt.location}`;
+    if (k && !testKeys.has(k)) mergedTests.push(pt);
+  }
+  if (mergedTests.length > 0) out.tests = { items: mergedTests };
+
+  const curRisks = Array.isArray(report.unverifiedRisks?.items) ? report.unverifiedRisks.items : [];
+  const prevRisks = Array.isArray(previousReport.unverifiedRisks?.items) ? previousReport.unverifiedRisks.items : [];
+  const mergedRisks = [...curRisks];
+  for (const pr of prevRisks) {
+    if (typeof pr === 'string' && !curRisks.includes(pr)) mergedRisks.push(pr);
+  }
+  out.unverifiedRisks = { items: mergedRisks };
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Validator — trả { ok, status, errors: [{ code, section, field, message }] }.
 // Fail-closed: bất kỳ lỗi nào → status PARTIAL_EVIDENCE (không bao giờ READY_FOR_REVIEW).
+// GPT-REV-124: nếu report khai previousReportRef và resolvePreviousReport được cấp → resolve +
+// verify digest/HEAD/identity/cycle + hợp nhất evidence TRƯỚC mọi check; lỗi chain → fail-closed.
+// expectedFindings (array findingId) = review/finding context hiện hành: mọi finding bắt buộc phải
+// có resolution trong chain (không hard-code ID).
 // ---------------------------------------------------------------------------
-export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, registeredRepos = null } = {}) {
+export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, registeredRepos = null, expectedFindings = null, resolvePreviousReport = null } = {}) {
   const errors = [];
   if (report === null || typeof report !== 'object' || Array.isArray(report)) {
     return { ok: false, status: 'PARTIAL_EVIDENCE', errors: [{ code: 'INVALID_REPORT', section: null, field: null, message: 'Report không phải object' }] };
   }
-  if (report.contractVersion !== expectedVersion) {
+  // GPT-REV-124 — incremental chain: nếu report khai previousReportRef và resolver được cấp →
+  // resolve + verify digest/HEAD/identity/cycle rồi hợp nhất evidence TRƯỚC mọi check; lỗi chain
+  // → fail-closed (không merge, KHÔNG READY_FOR_REVIEW).
+  let working = report;
+  if (typeof resolvePreviousReport === 'function' && report && report.previousReportRef) {
+    const chain = verifyPreviousReportRef(report, { resolvePreviousReport });
+    if (!chain.ok) {
+      return { ok: false, status: 'PARTIAL_EVIDENCE', errors: chain.errors };
+    }
+    working = mergeIncrementalEvidence(report, chain.previousReport);
+  }
+  if (working.contractVersion !== expectedVersion) {
     errors.push({ code: 'CONTRACT_VERSION_MISMATCH', section: null, field: 'contractVersion', message: `contractVersion phải là ${expectedVersion}` });
   }
   // Cross-repository (Issue #32): target repo phải thuộc registry được phép —
   // repo chưa đăng ký / lạ → fail-closed (unknown/unregistered repository).
   if (Array.isArray(registeredRepos)) {
-    const repo = report.identity && report.identity.repository;
+    const repo = working.identity && working.identity.repository;
     if (typeof repo !== 'string' || !registeredRepos.includes(repo)) {
       errors.push({ code: 'UNKNOWN_REPOSITORY', section: 'identity', field: 'repository', message: `Repository chưa đăng ký hoặc không được phép: ${String(repo)}` });
     }
   }
   for (const id of SECTION_IDS) {
     const def = REQUIRED_SECTIONS[id];
-    const value = report[id];
+    const value = working[id];
     if (value === undefined || value === null) {
       errors.push({ code: 'MISSING_SECTION', section: id, field: null, message: `Thiếu section: ${id} (${def.title})` });
       continue;
@@ -317,15 +512,26 @@ export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, re
   // Semantic constraints — render từ SEMANTIC_RULES (cùng source với contractContent).
   for (const rule of SEMANTIC_RULES) {
     try {
-      if (!rule.check(report)) {
+      if (!rule.check(working)) {
         errors.push({ code: rule.code, section: rule.section, field: rule.section, message: rule.message });
       }
     } catch {
       errors.push({ code: rule.code, section: rule.section, field: rule.section, message: `${rule.message} (exception khi check)` });
     }
   }
+  // GPT-REV-124 — review/finding context hiện hành: mọi finding trong expectedFindings bắt buộc
+  // phải được resolve trong findingResolution (consolidated hoặc sau khi hợp nhất chain).
+  if (Array.isArray(expectedFindings)) {
+    const items = working.findingResolution?.items ?? [];
+    const resolved = new Set(items.map((it) => it && it.findingId));
+    for (const fid of expectedFindings) {
+      if (!resolved.has(fid)) {
+        errors.push({ code: 'UNRESOLVED_FINDING_IN_CHAIN', section: 'findingResolution', field: 'findingId', message: `Finding ${fid} chưa được resolve trong findingResolution (bắt buộc thuộc review chain hiện hành)` });
+      }
+    }
+  }
   const ok = errors.length === 0;
-  const ts = report.terminalStatus && report.terminalStatus.status;
+  const ts = working.terminalStatus && working.terminalStatus.status;
   const status = ok ? (TERMINAL_STATUSES.includes(ts) ? ts : 'PARTIAL_EVIDENCE') : 'PARTIAL_EVIDENCE';
   return { ok, status, errors };
 }

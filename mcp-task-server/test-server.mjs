@@ -499,6 +499,24 @@ try {
   ok(after118.status === issue35.status && after118.agent === issue35.agent,
     "label #35 KHÔNG đổi sau mọi handoff identity-mismatch (không mutation rò rỉ)");
 
+  // GPT-REV-124: expectedFindings (review/finding context) — report đủ semantic nhưng thiếu
+  // finding bắt buộc trong chain → HANDOFF_PARTIAL_EVIDENCE TRƯỚC mọi mutation (không đọc PR).
+  const missingFindingsHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: validQlda(), expectedFindings: ["GPT-REV-118", "GPT-REV-119"] } });
+  ok(missingFindingsHandoff.result?.isError === true, "task_handoff expectedFindings thiếu → isError (fail-closed)");
+  ok(/HANDOFF_PARTIAL_EVIDENCE/.test(missingFindingsHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PARTIAL_EVIDENCE");
+  ok(/UNRESOLVED_FINDING_IN_CHAIN/.test(missingFindingsHandoff.result.content[0].text), "lỗi nêu rõ UNRESOLVED_FINDING_IN_CHAIN");
+  const afterFindings = JSON.parse(
+    (await rpc("tools/call", { name: "task_get", arguments: { repo: REPO, number: 35 } })).result.content[0].text);
+  ok(afterFindings.status === issue35.status && afterFindings.agent === issue35.agent,
+    "label #35 KHÔNG đổi sau handoff expectedFindings thiếu (không mutation rò rỉ)");
+
+  // GPT-REV-124: expectedFindings đủ → qua gate seal → tiến tới đọc PR (PR #999 không tồn tại →
+  // HANDOFF_PR_HEAD_READ_FAILED chứng minh expectedFindings đã được chấp nhận, không reject).
+  const okFindingsHandoff = await rpc("tools/call", { name: "task_handoff", arguments: { repo: REPO, number: 35, pr: 999, handoffReport: validQlda(), expectedFindings: ["GPT-REV-000"] } });
+  ok(okFindingsHandoff.result?.isError === true, "task_handoff expectedFindings đủ → không reject ở gate");
+  ok(/HANDOFF_PR_HEAD_READ_FAILED/.test(okFindingsHandoff.result.content[0].text), "lỗi nêu rõ HANDOFF_PR_HEAD_READ_FAILED (đã qua gate expectedFindings)");
+
+
   // Repo bẩn bị chặn bởi validateRepo
   const badRepo = await rpc("tools/call", { name: "task_get", arguments: { repo: "../evil", number: 1 } });
   ok(badRepo.result?.isError === true, "repo dạng bẩn → isError (chống injection)");

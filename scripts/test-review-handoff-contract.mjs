@@ -6,6 +6,7 @@ import {
   CONTRACT_VERSION, TERMINAL_STATUSES, SECTION_IDS, REQUIRED_SECTIONS,
   sampleReport, validateHandoff, canRequestReview, contractContent, buildTaskPacket,
   verifyHandoffIdentity, validateCanonicalRef, contractContentHash, reportDigest,
+  verifyPreviousReportRef, mergeIncrementalEvidence,
   CANONICAL_CONTRACT_PATH, CANONICAL_CONTRACT_REPO,
 } from './review-handoff-contract.mjs';
 
@@ -418,6 +419,140 @@ test('reportDigest ignore thứ tự key (stableStringify)', () => {
 });
 
 
+
+
+// ---------------------------------------------------------------------------
+// GPT-REV-124 — READY_FOR_REVIEW gắn với review/finding context hiện hành.
+// ---------------------------------------------------------------------------
+const IDX = (fid) => ({ findingId: fid, severity: 'high', status: 'fixed', rootCause: 'r', fix: 'f', category: 'failClosed',
+  evidence: { codeEvidence: [{ file: 'server.mjs', symbol: 'task_handoff' }], testEvidence: [{ name: 'handoff no-mutation ' + fid, location: 'test-server.mjs', negativeAssertion: 'label #35 KHÔNG đổi' }] } });
+
+const weakReport = () => sampleReport({
+  codeEvidence: { items: [{ file: 'docs/REVIEW_HANDOFF_CONTRACT.md', lines: '113-115', symbol: 'bullets', before: 'x', after: 'y', failClosedGates: 'x', mutationOrdering: 'x', excerpt: 'x', callerInput: 'x', mutations: [] }] },
+  findingResolution: { items: [{ findingId: 'GPT-REV-123', severity: 'low', status: 'fixed', rootCause: 'r', fix: 'f', category: 'type',
+    evidence: { codeEvidence: [{ file: 'docs/REVIEW_HANDOFF_CONTRACT.md', symbol: 'section' }], testEvidence: [{ name: 'suite', location: 'node test.mjs', negativeAssertion: 'n/a' }] } }] },
+  tests: { items: [{ name: 'test suite', location: 'node test.mjs', setup: 'all tests', interleaving: null, assertions: ['108 PASS'], negativeAssertion: 'n/a', realFs: false, result: '108 PASS', exitCode: 0 }] },
+});
+
+test('GPT-REV-124: report như comment 5486779460 (thiếu 118-121 + docs-only + aggregate count) → PARTIAL_EVIDENCE', () => {
+  const r = validateHandoff(weakReport(), { expectedFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121'] });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  const codes = r.errors.map((e) => e.code);
+  assert.ok(codes.includes('UNRESOLVED_FINDING_IN_CHAIN'), 'thiếu 118-121 → UNRESOLVED_FINDING_IN_CHAIN');
+  assert.ok(codes.includes('CODE_EVIDENCE_NOT_DOCS_ONLY'), 'docs-only → CODE_EVIDENCE_NOT_DOCS_ONLY');
+  assert.ok(codes.includes('TESTS_NO_AGGREGATE_ONLY'), 'aggregate count → TESTS_NO_AGGREGATE_ONLY');
+  assert.equal(canRequestReview(r), false);
+});
+
+test('GPT-REV-124: finding fixed thiếu code-link → FINDING_RESOLUTION_EVIDENCE_REQUIRED', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [{ findingId: 'G', severity: 'low', status: 'fixed', rootCause: 'r', fix: 'f', category: 'type', evidence: { codeEvidence: [], testEvidence: [{ name: 't', location: 'l', negativeAssertion: '' }] } }] } }));
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'FINDING_RESOLUTION_EVIDENCE_REQUIRED'));
+});
+
+test('GPT-REV-124: finding fixed thiếu test-link → FINDING_RESOLUTION_EVIDENCE_REQUIRED', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [{ findingId: 'G', severity: 'low', status: 'fixed', rootCause: 'r', fix: 'f', category: 'type', evidence: { codeEvidence: [{ file: 'server.mjs', symbol: 'task_handoff' }], testEvidence: [] } }] } }));
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'FINDING_RESOLUTION_EVIDENCE_REQUIRED'));
+});
+
+test('GPT-REV-124: finding failClosed thiếu negative assertion → FINDING_RESOLUTION_EVIDENCE_REQUIRED', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [{ findingId: 'G', severity: 'high', status: 'fixed', rootCause: 'r', fix: 'f', category: 'failClosed', evidence: { codeEvidence: [{ file: 'server.mjs', symbol: 'task_handoff' }], testEvidence: [{ name: 't', location: 'l', negativeAssertion: 'n/a' }] } }] } }));
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'FINDING_RESOLUTION_EVIDENCE_REQUIRED'));
+});
+
+test('GPT-REV-124: unresolved finding không cần evidence → READY_FOR_REVIEW', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [{ findingId: 'G', severity: 'high', status: 'unresolved', rootCause: 'r', fix: '' }] } }));
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 'READY_FOR_REVIEW');
+});
+
+test('GPT-REV-124: verification exitCode≠0 khi báo READY_FOR_REVIEW → VERIFICATION_NONZERO_EXIT', () => {
+  const r = validateHandoff(sampleReport({ verification: { commands: ['node t'], exitCodes: [0, 1], passCount: 1, failCount: 0, diffCheck: 'clean', worktreeStatus: 'clean', remainingFailures: [] } }));
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'VERIFICATION_NONZERO_EXIT'));
+});
+
+test('GPT-REV-124: verification 153/154 (failCount=1 + remainingFailures) → ALL_GREEN_WITH_FAILURE', () => {
+  const r = validateHandoff(sampleReport({ verification: { commands: ['node t'], exitCodes: [1], passCount: 153, failCount: 1, diffCheck: 'dirty', worktreeStatus: 'dirty', remainingFailures: ['git diff --check fails'] } }));
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'ALL_GREEN_WITH_FAILURE'));
+});
+
+
+// --- Incremental chain: previousReportRef resolve + digest/HEAD/cycle ---
+const FULL_HEAD = 'f1ea7f7419e2447ffedbb6c4496bebf049481d95';
+const mkPrevReport = (overrides = {}) => sampleReport({
+  identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: FULL_HEAD },
+  findingResolution: { items: [IDX('GPT-REV-118'), IDX('GPT-REV-119'), IDX('GPT-REV-120'), IDX('GPT-REV-121')] },
+  ...overrides,
+});
+const mkCurReport = (overrides = {}) => sampleReport({
+  identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: FULL_HEAD },
+  previousReportRef: { repo: REPO_AIPR, issue: 32, pr: 33, commentId: '5486779460', headSha: FULL_HEAD, reportDigest: reportDigest(mkPrevReport()) },
+  findingResolution: { items: [IDX('GPT-REV-122'), IDX('GPT-REV-123'), IDX('GPT-REV-124')] },
+  ...overrides,
+});
+const resolveTo = (rep) => () => ({ resolved: true, report: rep });
+
+test('GPT-REV-124: incremental resolve đúng previous (cùng HEAD + digest) + merge → READY_FOR_REVIEW cho 118-124', () => {
+  const r = validateHandoff(mkCurReport(), { resolvePreviousReport: resolveTo(mkPrevReport()), expectedFindings: ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121', 'GPT-REV-122', 'GPT-REV-123', 'GPT-REV-124'] });
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 'READY_FOR_REVIEW');
+});
+
+test('GPT-REV-124: previousReportRef thiếu → PREVIOUS_REPORT_REF_INCOMPLETE', () => {
+  const cur = sampleReport({ previousReportRef: { repo: REPO_AIPR, issue: 32, pr: 33 } });
+  const r = validateHandoff(cur, { resolvePreviousReport: resolveTo(mkPrevReport()) });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'PREVIOUS_REPORT_REF_INCOMPLETE'));
+});
+
+test('GPT-REV-124: missing previous report (resolver unresolved) → PREVIOUS_REPORT_UNRESOLVED', () => {
+  const r = validateHandoff(mkCurReport(), { resolvePreviousReport: () => ({ resolved: false }) });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'PREVIOUS_REPORT_UNRESOLVED'));
+});
+
+test('GPT-REV-124: wrong digest (HEAD lệch) → PREVIOUS_REPORT_DIGEST_MISMATCH', () => {
+  const prev = mkPrevReport({ identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: '0'.repeat(40) } });
+  const cur = sampleReport({
+    identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: FULL_HEAD },
+    previousReportRef: { repo: REPO_AIPR, issue: 32, pr: 33, commentId: '1', headSha: '0'.repeat(40), reportDigest: reportDigest(prev) },
+  });
+  const r = validateHandoff(cur, { resolvePreviousReport: resolveTo(mkPrevReport()) });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'PREVIOUS_REPORT_DIGEST_MISMATCH'));
+});
+
+test('GPT-REV-124: wrong HEAD (resolver trả HEAD khác ref) → PREVIOUS_REPORT_HEAD_MISMATCH', () => {
+  const prev = mkPrevReport({ identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: '0'.repeat(40) } });
+  const cur = sampleReport({
+    identity: { repository: REPO_AIPR, issue: 32, pullRequest: 33, headSha: FULL_HEAD },
+    previousReportRef: { repo: REPO_AIPR, issue: 32, pr: 33, commentId: '1', headSha: FULL_HEAD, reportDigest: reportDigest(prev) },
+  });
+  const r = validateHandoff(cur, { resolvePreviousReport: resolveTo(prev) });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'PREVIOUS_REPORT_HEAD_MISMATCH'));
+});
+
+test('GPT-REV-124: cycle (previous trỏ ngược về chính digest hiện tại) → PREVIOUS_REPORT_CYCLE', () => {
+  const cur = mkCurReport();
+  const prev = mkPrevReport({ previousReportRef: { repo: REPO_AIPR, issue: 32, pr: 33, commentId: '1', headSha: FULL_HEAD, reportDigest: reportDigest(cur) } });
+  const r = validateHandoff(cur, { resolvePreviousReport: resolveTo(prev) });
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'PREVIOUS_REPORT_CYCLE'));
+});
+
+test('GPT-REV-124: mergeIncrementalEvidence hợp nhất finding/code/test (current thắng)', () => {
+  const merged = mergeIncrementalEvidence(mkCurReport(), mkPrevReport());
+  const ids = merged.findingResolution.items.map((f) => f.findingId).sort();
+  assert.deepEqual(ids, ['GPT-REV-118', 'GPT-REV-119', 'GPT-REV-120', 'GPT-REV-121', 'GPT-REV-122', 'GPT-REV-123', 'GPT-REV-124']);
+  assert.ok(merged.codeEvidence.items.length > 0);
+  assert.ok(merged.tests.items.length > 0);
+});
 
 
 // Runner — đếm PASS/FAIL, exit 1 nếu có lỗi.
