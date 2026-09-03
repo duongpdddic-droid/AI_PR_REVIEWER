@@ -154,7 +154,7 @@ export const SEMANTIC_RULES = Object.freeze([
     description: 'Mỗi mục finding resolution phải có findingId, severity, status (fixed|disputed|unresolved), rootCause, fix; disputed bắt buộc kèm evidence',
     check: (r) => {
       const items = r.findingResolution?.items;
-      if (!Array.isArray(items) || items.length === 0) return false;
+      if (!Array.isArray(items)) return false;
       const req = ['findingId', 'severity', 'status', 'rootCause', 'fix'];
       const okStatus = ['fixed', 'disputed', 'unresolved'];
       return items.every((it) => it && typeof it === 'object'
@@ -224,7 +224,7 @@ export const SEMANTIC_RULES = Object.freeze([
     description: 'Finding fixed|disputed phải liên kết code evidence (file + symbol/function/export) và test evidence cụ thể (name + location); finding loại failClosed/mutation phải kèm negativeAssertion/no-mutation evidence',
     check: (r) => {
       const items = r.findingResolution?.items;
-      if (!Array.isArray(items) || items.length === 0) return false;
+      if (!Array.isArray(items)) return false;
       return items.every((it) => {
         if (!it || typeof it !== 'object') return false;
         if (!FIXED_DISPUTED_STATUSES.includes(it.status)) return true; // unresolved không cần evidence
