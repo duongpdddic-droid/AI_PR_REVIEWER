@@ -7,7 +7,7 @@
     "workspaceId": "ai-pr-reviewer-main",
     "description": "Cline rules + Memory Bank + verify + Git Handoff control plane"
   },
-  "policy": { "pin": "ai-review-policy.json", "version": "2026-08-23.7" },
+  "policy": { "pin": "ai-review-policy.json", "version": "2026-09-02.1" },
   "verify": { "adapter": "pnpm-verify" },
   "deploy": { "capability": false, "humanAuthorization": true },
   "telegram": { "route": "dm-boss" },
