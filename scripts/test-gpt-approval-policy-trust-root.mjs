@@ -7,6 +7,7 @@
 import { performApproval, performManualApproval, performRevoke } from './gpt-approval.mjs';
 import {
   LABELS, AGENTS, computePolicyDigest, buildApprovalMarker, parseApprovalMarkers,
+  resolvePolicySourceTrust, POLICY_SOURCE_TRUST,
 } from './review-contract.mjs';
 import { CANONICAL_REPO, CANONICAL_PATH, resolvePolicyForRepo } from './effective-policy.mjs';
 import path from 'node:path';
@@ -61,19 +62,37 @@ function makeIo(opts = {}) {
     comments: [...(opts.comments ?? [PASS_MARKER])],
   };
   const s = { mutations: [], audit: [], policyCalls: [] };
-  const sourceCommit = opts.sourceCommitInvalid ? 'not-a-40-hex' : (opts.canonicalSha ?? CANONICAL_SHA);
-  const fetchContent = (_r, p) => JSON.stringify(POLICY);
+  const fetchContent = (_r, p) => {
+    // [GPT-REV-138] Nhánh project repo: project config bắt buộc khai policySource pin canonical
+    // (full SHA + pinnedVersion) để resolvePolicyForRepo đi đúng nhánh; canonical policy là POLICY.
+    if (p !== CANONICAL_PATH) {
+      return JSON.stringify({ policySource: { repo: CANONICAL_REPO, ref: CANONICAL_SHA, path: CANONICAL_PATH, pinnedVersion: POLICY.policyVersion } });
+    }
+    return JSON.stringify(POLICY);
+  };
+  let srcCall = 0; // [GPT-REV-138] đếm lần resolveCanonicalSource để mô phỏng tip drift (case 5)
   const io = {
     getPrView() { return { state: pr.state, headRefOid: pr.headRefOid, labels: [...pr.labels] }; },
     // [GPT-REV-137] Server-resolved canonical source — TACH BIET khoi PR HEAD.
+    // [GPT-REV-138] `driftTip` khi set: kể từ lần resolve thứ 3+ (getPolicy bên trong là lần 2)
+    // trả về tip KHÁC — mô phỏng canonical default-branch tip đổi giữa lúc resolve và lúc mutation.
     resolveCanonicalSource() {
       if (opts.sourceResolveThrows) throw new Error('gh api canonical FAIL');
-      return { repo: CANONICAL_REPO, ref: 'main', sourceCommit, path: CANONICAL_PATH };
+      srcCall++;
+      let sc = opts.sourceCommitInvalid ? 'not-a-40-hex' : (opts.canonicalSha ?? CANONICAL_SHA);
+      if (opts.driftTip && srcCall >= 3) sc = opts.driftTip;
+      return { repo: CANONICAL_REPO, ref: 'main', sourceCommit: sc, path: CANONICAL_PATH };
     },
     getPolicy(repo, ref, policySourceRef) {
       s.policyCalls.push({ repo, ref, policySourceRef });
       if (opts.getPolicyThrows) throw new Error(opts.getPolicyThrowMsg || 'BLOCKED_CANONICAL_INVALID: bat buoc policySourceRef');
-      if (opts.realResolve) return resolvePolicyForRepo({ repo, ref, policySourceRef, fetchContent });
+      if (opts.realResolve) {
+        // [GPT-REV-138] Mirror production trust boundary: server tự resolve tip, caller ref chỉ là assertion.
+        const srcTip = this.resolveCanonicalSource().sourceCommit;
+        const trust = resolvePolicySourceTrust({ callerRef: policySourceRef, serverTip: srcTip });
+        if (!trust.ok) throw new Error(trust.code + ': ' + trust.error);
+        return resolvePolicyForRepo({ repo, ref, policySourceRef: trust.sourceCommit, fetchContent }).policy;
+      }
       return JSON.parse(JSON.stringify(POLICY));
     },
     getCurrentUser() { return opts.currentUser ?? 'user'; },
@@ -264,10 +283,64 @@ function lastApprovalMarker(pr) {
     tru('K: policy identity tach bach khoi target', parsed.policySource.sourceCommit !== parsed.headSha);
   }
 
+  // ------------------------------------------------------------------ GPT-REV-138
+  // --- L. Caller assertion = historical full-40-hex commit khác server tip → getPolicy reject, no mutation ---
+  {
+    const historical = 'd'.repeat(40); // valid 40-hex nhưng != canonicall tip
+    const { io, state } = makeIo({ realResolve: true });
+    await expectThrow('L: historical rollback', async () => io.getPolicy('o/r', SHA, historical), 'BLOCKED_CANONICAL_SOURCE_ROLLBACK');
+    tru('L: khong mutation', state.mutations.length === 0);
+  }
+  // --- M. Caller assertion = random/unreachable 40-hex → getPolicy reject, no mutation ---
+  {
+    const random = 'e'.repeat(40);
+    const { io, state } = makeIo({ realResolve: true });
+    await expectThrow('M: random ref rollback', async () => io.getPolicy('o/r', SHA, random), 'BLOCKED_CANONICAL_SOURCE_ROLLBACK');
+    tru('M: khong mutation', state.mutations.length === 0);
+  }
+  // --- N. Caller assertion không phải 40-hex → getPolicy reject, no mutation ---
+  {
+    const { io, state } = makeIo({ realResolve: true });
+    await expectThrow('N: ref khong 40hex', async () => io.getPolicy('o/r', SHA, 'main'), 'BLOCKED_CANONICAL_SOURCE_ROLLBACK');
+    tru('N: khong mutation', state.mutations.length === 0);
+  }
+  // --- O. operator server-derived: payload.actor (caller-controlled) KHÔNG thể đè operator trong marker ---
+  {
+    const { io, pr } = makeIo({ currentUser: 'user' });
+    const payload = { ...APPROVAL_PAYLOAD, actor: 'evil-actor' };
+    const r = await performApproval(io, { repo: 'o/r', pr: 7, payload });
+    tru('O: mutated', r.mutated);
+    const mk = lastApprovalMarker(pr);
+    eq('O: operator = server getCurrentUser', mk && mk.operator, 'user');
+    tru('O: operator khong phai payload.actor', mk && mk.operator !== 'evil-actor');
+  }
+  // --- P. pure resolvePolicySourceTrust: OK + moi negative case (khong phai chi regex SHA) ---
+  {
+    const tNoAssert = resolvePolicySourceTrust({ callerRef: null, serverTip: CANONICAL_SHA });
+    tru('P: khong assertion -> ok', tNoAssert.ok);
+    eq('P: sourceCommit = tip', tNoAssert.sourceCommit, CANONICAL_SHA);
+    const tMatch = resolvePolicySourceTrust({ callerRef: CANONICAL_SHA, serverTip: CANONICAL_SHA });
+    tru('P: caller == tip -> ok', tMatch.ok);
+    const tHist = resolvePolicySourceTrust({ callerRef: 'd'.repeat(40), serverTip: CANONICAL_SHA });
+    tru('P: historical != tip -> rollback', !tHist.ok && tHist.code === POLICY_SOURCE_TRUST.ROLLBACK);
+    const tRand = resolvePolicySourceTrust({ callerRef: 'e'.repeat(40), serverTip: CANONICAL_SHA });
+    tru('P: random != tip -> rollback', !tRand.ok && tRand.code === POLICY_SOURCE_TRUST.ROLLBACK);
+    const tNotHex = resolvePolicySourceTrust({ callerRef: 'main', serverTip: CANONICAL_SHA });
+    tru('P: caller not 40hex -> rollback', !tNotHex.ok && tNotHex.code === POLICY_SOURCE_TRUST.ROLLBACK);
+    const tInvalidTip = resolvePolicySourceTrust({ callerRef: CANONICAL_SHA, serverTip: 'not-a-40-hex' });
+    tru('P: invalid tip -> invalid', !tInvalidTip.ok && tInvalidTip.code === POLICY_SOURCE_TRUST.INVALID);
+  }
+  // --- Q. canonical tip đổi giữa resolution & mutation (case 5) -> reject, no mutation ---
+  {
+    const { io, state } = makeIo({ realResolve: true, driftTip: 'a'.repeat(40) });
+    await expectThrow('Q: canonical source drift', async () => performApproval(io, { repo: 'o/r', pr: 7, payload: APPROVAL_PAYLOAD }), 'CANONICAL_SOURCE_DRIFT');
+    tru('Q: khong mutation', state.mutations.length === 0);
+  }
+
   // ------------------------------------------------------------------ report
   const failed = results.filter((r) => !r.ok);
   const terse = [];
-  for (const k of 'ABCDEFGHIJK') {
+  for (const k of 'ABCDEFGHIJKLMNOPQ') {
     const group = results.filter((r) => r.name.startsWith(k + ':'));
     if (group.length && group.every((r) => r.ok)) terse.push(k);
   }
@@ -280,4 +353,3 @@ function lastApprovalMarker(pr) {
   console.log('ALL ' + results.length + ' assertions PASS');
   process.exit(0);
 })();
-

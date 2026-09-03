@@ -31,9 +31,10 @@ import {
   normalizeStatusLabels, planEscalationForPhase,
   planApprovalDrift, planCiRouting, planPhaseActivation, planPreReviewOutcome,
   planHeadLock, resolveReviewPhase, scanDiffForSecrets,
+  resolvePolicySourceTrust, POLICY_SOURCE_TRUST,
   isUnfrozenAfter,
 } from './review-contract.mjs';
-import { CANONICAL_PATH, CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
+import { CANONICAL_PATH, CANONICAL_REPO, resolvePolicyForRepo, PolicyResolutionError } from './effective-policy.mjs';
 import { notifyRaw } from './telegram-gateway/adapter-ai-pr-reviewer.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -85,13 +86,21 @@ function defaultIo() {
     getPolicy(repo, ref, policySourceRef) {
       // [GPT-REV-042] Không còn legacy mirror: project repo bắt buộc project config +
       // canonical từ đúng policySource.repo+full SHA+path; canonical repo dùng nội bộ.
+      // [GPT-REV-138] Server LUÔN tự resolve canonical default-branch tip qua resolveCanonicalSource().
+      // Caller-supplied policySourceRef chỉ là ASSERTION: bắt buộc == server tip, nếu không → reject
+      // (chống historical-policy rollback). Authoritative source = server tip, không phải caller choice.
       try {
+        const src = this.resolveCanonicalSource();
+        const trust = resolvePolicySourceTrust({ callerRef: policySourceRef, serverTip: src.sourceCommit });
+        if (!trust.ok) {
+          throw new PolicyResolutionError(trust.code, trust.error);
+        }
         return resolvePolicyForRepo({
           repo,
           ref,
           // [GPT-REV-137] Canonical self-review: policy AUTHORITY từ server-resolved canonical
           // source commit, KHÔNG từ PR HEAD (ref).
-          policySourceRef: policySourceRef || this.resolveCanonicalSource().sourceCommit,
+          policySourceRef: trust.sourceCommit,
           fetchContent: (r, p, rr) => {
             const b64 = this.gh(['api', `repos/${r}/contents/${p}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
             return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');

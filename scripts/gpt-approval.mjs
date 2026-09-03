@@ -36,8 +36,9 @@ import {
   isApprovalValid, isManualApprovalValid, parseApprovalMarkers,
   validateApprovalPayload, computePolicyDigest,
   parseGptEvidenceArtifact, validateGptEvidenceBind, isReviewerAuthorized, validateManualActivationTarget,
+  resolvePolicySourceTrust, POLICY_SOURCE_TRUST,
 } from './review-contract.mjs';
-import { CANONICAL_PATH, CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
+import { CANONICAL_PATH, CANONICAL_REPO, resolvePolicyForRepo, PolicyResolutionError } from './effective-policy.mjs';
 
 // ---------------------------------------------------------------- IO adapter (DI cho test)
 
@@ -59,13 +60,18 @@ export function defaultIo() {
     },
     getPolicy(repo, ref, policySourceRef) {
       // [GPT-REV-042] Không còn legacy mirror: fail-closed qua resolvePolicyForRepo (throw).
+      // [GPT-REV-138] Server LUÔN tự resolve canonical default-branch tip qua resolveCanonicalSource().
+      // Caller-supplied policySourceRef chỉ là ASSERTION: bắt buộc == server tip, nếu không → reject
+      // (chống historical-policy rollback). Authoritative source = server tip, không phải caller choice.
+      const src = this.resolveCanonicalSource();
+      const trust = resolvePolicySourceTrust({ callerRef: policySourceRef, serverTip: src.sourceCommit });
+      if (!trust.ok) {
+        throw new PolicyResolutionError(trust.code, trust.error);
+      }
       return resolvePolicyForRepo({
         repo,
         ref,
-        // [GPT-REV-137] Canonical self-review: policy AUTHORITY từ server-resolved canonical
-        // source commit, KHÔNG từ PR HEAD. policySourceRef (nếu truyền) hoặc resolve qua
-        // resolveCanonicalSource() — tách bạch khỏi target PR.
-        policySourceRef: policySourceRef || this.resolveCanonicalSource().sourceCommit,
+        policySourceRef: trust.sourceCommit,
         fetchContent: (r, p, rr) => {
           const b64 = gh(['api', `repos/${r}/contents/${p}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
           return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');
@@ -576,6 +582,15 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
     marker,
   ].join('\n');
 
+  // [GPT-REV-138] Re-resolve canonical source NGAY TRƯỚC mutation: tip đổi giữa lúc resolve và lúc
+  // mutation (case 5) → fail-closed, KHÔNG mutation — chống policy rollback khi tip di chuyển.
+  const finalSource = io.resolveCanonicalSource();
+  if (String(finalSource.sourceCommit || '').toLowerCase() !== String(policySource.sourceCommit || '').toLowerCase()) {
+    throw new Error('TỪ CHỐI (CANONICAL_SOURCE_DRIFT): canonical default-branch tip đổi giữa resolution và mutation ('
+      + String(policySource.sourceCommit || '').slice(0, 12) + ' → ' + String(finalSource.sourceCommit || '').slice(0, 12)
+      + ') — KHÔNG mutation (GPT-REV-138).');
+  }
+
   io.postComment(repo, pr, body); // lỗi → ném ra, CHƯA mutation nhãn nào
 
   const afterComments = io.listPrComments(repo, pr);
@@ -825,6 +840,14 @@ export async function performManualApproval(io, {
   }
   if (!canMutatePr(view2.state)) {
     throw new Error('TỪ CHỐI: PR state đổi thành ' + view2.state + ' — không mutation.');
+  }
+  // [GPT-REV-138] Re-resolve canonical source NGAY TRƯỚC mutation: tip đổi giữa lúc resolve và lúc
+  // mutation (case 5) → fail-closed, KHÔNG mutation — chống policy rollback khi tip di chuyển.
+  const finalSource = io.resolveCanonicalSource();
+  if (String(finalSource.sourceCommit || '').toLowerCase() !== String(policySource.sourceCommit || '').toLowerCase()) {
+    throw new Error('TỪ CHỐI (CANONICAL_SOURCE_DRIFT): canonical default-branch tip đổi giữa resolution và mutation ('
+      + String(policySource.sourceCommit || '').slice(0, 12) + ' → ' + String(finalSource.sourceCommit || '').slice(0, 12)
+      + ') — KHÔNG mutation (GPT-REV-138).');
   }
 
   // --- 9. [GPT-REV-130] Audit TRƯỚC marker (transaction state) + idempotency/repair ---

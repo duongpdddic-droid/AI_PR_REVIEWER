@@ -186,6 +186,51 @@ export function planPreReviewOutcome({ verdict, round = 0, maxRounds = 3, decisi
     removeLabels: [LABELS.reviewing],
   };
 }
+// ---------------------------------------------------------------- policy source trust (GPT-REV-138)
+//
+// [GPT-REV-138] Chống historical-policy rollback. Policy AUTHORITY (approvalAuthorities /
+// manualException) phải đến từ server-resolved canonical default-branch tip. Caller-supplied
+// `policySourceRef` (nếu còn được chấp nhận vì lý do compat) KHÔNG được phép tự trở thành nguồn
+// authority: nó chỉ là một ASSERTION và bắt buộc bằng ĐÚNG server-derived current tip. Mọi trường
+// hợp lệch/missing/invalid → { ok:false, code, error } (reject TRƯỚC mutation). Không phải thêm
+// một SHA regex — đây là ràng buộc equality với tip do server resolve ở thời điểm hiện tại.
+//
+// Negative cases (đều fail-closed, KHÔNG mutation):
+//   1. valid full-40-hex commit nhưng KHÁC tip hiện tại (historical)   -> ROLLBACK
+//   2. random/unreachable full-40-hex SHA khác tip                     -> ROLLBACK
+//   3. commit ngoài canonical default-branch lineage (bất kỳ SHA≠tip)   -> ROLLBACK
+//   4. caller assertion khác current tip                                -> ROLLBACK
+//   6. tip missing/unreadable/không phải full 40-hex                    -> INVALID
+// (ca 5 — tip đổi giữa lúc resolve và lúc mutation — do DRIFT check ở performApproval /
+//  performManualApproval bắt, nơi có re-resolve ngay trước mutation.)
+export const POLICY_SOURCE_TRUST = {
+  OK: 'OK',
+  INVALID: 'BLOCKED_CANONICAL_SOURCE_INVALID',
+  ROLLBACK: 'BLOCKED_CANONICAL_SOURCE_ROLLBACK',
+};
+
+export function resolvePolicySourceTrust({ callerRef, serverTip }) {
+  if (!/^[0-9a-f]{40}$/i.test(String(serverTip || ''))) {
+    return { ok: false, code: POLICY_SOURCE_TRUST.INVALID,
+      error: `server canonical default-branch tip không phải full 40-hex: "${String(serverTip || '')}"` };
+  }
+  const tip = String(serverTip).toLowerCase();
+  const hasAssertion = callerRef !== null && callerRef !== undefined && callerRef !== '';
+  if (!hasAssertion) {
+    return { ok: true, sourceCommit: tip };
+  }
+  if (!/^[0-9a-f]{40}$/i.test(String(callerRef))) {
+    return { ok: false, code: POLICY_SOURCE_TRUST.ROLLBACK,
+      error: `caller policySourceRef không phải full 40-hex: "${String(callerRef)}"` };
+  }
+  if (String(callerRef).toLowerCase() !== tip) {
+    return { ok: false, code: POLICY_SOURCE_TRUST.ROLLBACK,
+      error: `caller policySourceRef != server canonical current tip — historical/random/ngoài-lineage policy rollback bị chặn (GPT-REV-138)` };
+  }
+  return { ok: true, sourceCommit: tip };
+}
+
+
 
 // ---------------------------------------------------------------- approval khóa HEAD SHA
 
