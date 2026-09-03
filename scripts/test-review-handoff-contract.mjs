@@ -22,8 +22,8 @@ const dropField = (report, section, field) => {
   return r;
 };
 
-test('happy path: report đủ 10 section → READY_FOR_REVIEW + canRequestReview=true', () => {
-  const r = validateHandoff(sampleReport());
+test('happy path: report đủ 10 section + authoritative context → READY_FOR_REVIEW + canRequestReview=true', () => {
+  const r = validateHandoff(sampleReport(), { authoritativeFindings: ['GPT-REV-000'] });
   assert.equal(r.ok, true);
   assert.equal(r.status, 'READY_FOR_REVIEW');
   assert.deepEqual(r.errors, []);
@@ -117,7 +117,7 @@ test('contractVersion mismatch → PARTIAL_EVIDENCE (CONTRACT_VERSION_MISMATCH)'
 });
 
 test('BLOCKED hợp lệ khi report đầy đủ + status=BLOCKED → canRequestReview=false', () => {
-  const r = validateHandoff(sampleReport({ terminalStatus: { status: 'BLOCKED' } }));
+  const r = validateHandoff(sampleReport({ terminalStatus: { status: 'BLOCKED' } }), { authoritativeFindings: ['GPT-REV-000'] });
   assert.equal(r.ok, true);
   assert.equal(r.status, 'BLOCKED');
   assert.equal(canRequestReview(r), false, 'BLOCKED không được request review');
@@ -215,7 +215,7 @@ test('2 fixtures repo khác nhau nhận cùng pinned canonical contract version'
 test('target-repo handoff đủ evidence pass KHÔNG cần contract bản sao trong repo đó', () => {
   const reg = [REPO_AIPR, REPO_QLDA];
   const report = sampleReport({ identity: { repository: REPO_QLDA } });
-  const r = validateHandoff(report, { registeredRepos: reg });
+  const r = validateHandoff(report, { registeredRepos: reg, authoritativeFindings: ['GPT-REV-000'] });
   assert.equal(r.ok, true);
   assert.equal(r.status, 'READY_FOR_REVIEW');
   assert.equal(canRequestReview(r), true);
@@ -466,7 +466,7 @@ test('GPT-REV-124: finding failClosed thiếu negative assertion → FINDING_RES
 });
 
 test('GPT-REV-124: unresolved finding không cần evidence → READY_FOR_REVIEW', () => {
-  const r = validateHandoff(sampleReport({ findingResolution: { items: [{ findingId: 'G', severity: 'high', status: 'unresolved', rootCause: 'r', fix: '' }] } }));
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [{ findingId: 'GPT-REV-118', severity: 'high', status: 'unresolved', rootCause: 'r', fix: '' }] } }), { authoritativeFindings: ['GPT-REV-118'] });
   assert.equal(r.ok, true);
   assert.equal(r.status, 'READY_FOR_REVIEW');
 });
@@ -621,9 +621,58 @@ test('GPT-REV-125: sameFindingSet — order/dup bỏ qua, khác tỷ lệ → fa
   assert.equal(sameFindingSet([], []), true);
 });
 
-test('GPT-REV-125: validateHandoff — authoritativeFindings vắng → không check (back-compat)', () => {
-  const r = validateHandoff(sampleReport());
+test('GPT-REV-127: canonicalActiveFindings — empty allowlist (gpt=[] và local=[]) → AUTHORITY_UNAVAILABLE', () => {
+  const e = parseSample(118, 'open').findings[0];
+  const r = canonicalActiveFindings([e], { authority: { gpt: [], local: [] } });
+  assert.equal(r.ok, false);
+  assert.equal(r.errors[0].code, 'AUTHORITY_UNAVAILABLE');
+});
+
+test('GPT-REV-127: canonicalActiveFindings — thiếu authority theo finding type (finding gpt nhưng gpt=[]) → AUTHORITY_UNAVAILABLE', () => {
+  const e = parseSample(118, 'open').findings[0];
+  const r = canonicalActiveFindings([e], { authority: { gpt: [], local: ['human-admin'] } });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((er) => er.code === 'AUTHORITY_UNAVAILABLE'));
+});
+
+test('GPT-REV-127: canonicalActiveFindings — unauthorized-only (mọi finding do actor KHÔNG có quyền) → AUTHORITY_UNAVAILABLE', () => {
+  const e = parseSample(118, 'open').findings[0];
+  e.author = 'imposter';
+  const r = canonicalActiveFindings([e], { authority: AUTHORITY });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((er) => er.code === 'AUTHORITY_UNAVAILABLE'));
+});
+
+test('GPT-REV-127: canonicalActiveFindings — valid configured authority → đúng active set (positive)', () => {
+  const entries = [parseSample(118, 'open').findings[0], parseSample(119, 'open').findings[0]];
+  const r = canonicalActiveFindings(entries, { authority: AUTHORITY });
   assert.equal(r.ok, true);
+  assert.deepEqual(r.findings, ['GPT-REV-118', 'GPT-REV-119']);
+});
+
+
+test('GPT-REV-126: validateHandoff — authoritativeFindings omitted → AUTHORITATIVE_FINDINGS_REQUIRED, KHÔNG READY', () => {
+  const r = validateHandoff(sampleReport());
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'AUTHORITATIVE_FINDINGS_REQUIRED'));
+  assert.equal(canRequestReview(r), false, 'thiếu authoritative context → không request review');
+});
+
+test('GPT-REV-126: validateHandoff — authoritativeFindings null → AUTHORITATIVE_FINDINGS_REQUIRED, KHÔNG READY', () => {
+  const r = validateHandoff(sampleReport(), { authoritativeFindings: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'AUTHORITATIVE_FINDINGS_REQUIRED'));
+  assert.equal(canRequestReview(r), false);
+});
+
+test('GPT-REV-126: validateHandoff — authoritativeFindings malformed (không phải array) → AUTHORITATIVE_FINDINGS_REQUIRED', () => {
+  const r = validateHandoff(sampleReport(), { authoritativeFindings: 'GPT-REV-118' });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'AUTHORITATIVE_FINDINGS_REQUIRED'));
+  assert.equal(canRequestReview(r), false);
 });
 
 test('GPT-REV-125: validateHandoff — caller báo `[]` trong khi authoritative có finding → UNRESOLVED_FINDING_IN_CHAIN', () => {
@@ -673,14 +722,66 @@ test('GPT-REV-125: validateHandoff — exact set khớp authoritative → READY_
   assert.equal(r.status, 'READY_FOR_REVIEW');
 });
 
-test('GPT-REV-125: validateHandoff — authoritative rỗng + items rỗng (chỉ hợp lệ khi bỏ semantic check); bỏ qua vì semantic rule yêu cầu items', () => {
-  // Xác nhận hành vi: với items=[] (vi phạm FINDING_RESOLUTION_ITEMS_REQUIRED) → PARTIAL_EVIDENCE,
-  // nhưng KHÔNG có FINDING_ID_UNKNOWN / UNRESOLVED_EXTRA_FINDING. Caller phải chứa items khi authoritative
-  // rỗng (back-compat với report không có review chain).
+test('GPT-REV-132: validateHandoff — authoritative rỗng + items rỗng → READY_FOR_REVIEW (hết deadlock)', () => {
+  // GPT-REV-132: zero-authoritative-findings giờ là trạng thái hand-off được.
+  // items=[] là structurally hợp lệ (empty array, `.every` trên [] → true) — không phạm
+  // FINDING_RESOLUTION_ITEMS_REQUIRED / FINDING_RESOLUTION_EVIDENCE_REQUIRED; exact-set validation:
+  // authoritative=[] + items=[] → 2 set rỗng khớp nhau (không có UNRESOLVED_*).
   const r = validateHandoff(sampleReport({ findingResolution: { items: [] } }), { authoritativeFindings: [] });
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 'READY_FOR_REVIEW');
+  assert.deepEqual(r.errors, []);
+});
+
+test('GPT-REV-132: empty items là structurally valid (không phạm 2 rule semantic findingResolution)', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [] } }), { authoritativeFindings: [] });
+  assert.ok(!r.errors.some((e) => e.code === 'FINDING_RESOLUTION_ITEMS_REQUIRED'), 'empty items không được phạm FINDING_RESOLUTION_ITEMS_REQUIRED');
+  assert.ok(!r.errors.some((e) => e.code === 'FINDING_RESOLUTION_EVIDENCE_REQUIRED'), 'empty items không được phạm FINDING_RESOLUTION_EVIDENCE_REQUIRED');
+});
+
+test('GPT-REV-132: authoritative=[] + extra/synthetic finding → UNRESOLVED_EXTRA_FINDING (superset fail-closed)', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [IDX('GPT-REV-999')] } }), { authoritativeFindings: [] });
+  assert.equal(r.ok, false);
   assert.equal(r.status, 'PARTIAL_EVIDENCE');
-  assert.ok(!r.errors.some((e) => ['FINDING_ID_UNKNOWN', 'UNRESOLVED_EXTRA_FINDING', 'UNRESOLVED_FINDING_IN_CHAIN', 'FINDING_RESOLUTION_DUPLICATE'].includes(e.code)),
-    'không có finding lỗi authoritative khi cả 2 set rỗng');
+  assert.ok(r.errors.some((e) => e.code === 'UNRESOLVED_EXTRA_FINDING' && e.message.includes('GPT-REV-999')));
+});
+
+test('GPT-REV-132: authoritative=[F1] + items=[] → UNRESOLVED_FINDING_IN_CHAIN (missing fail-closed)', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [] } }), { authoritativeFindings: ['GPT-REV-118'] });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'UNRESOLVED_FINDING_IN_CHAIN' && e.message.includes('GPT-REV-118')));
+});
+
+test('GPT-REV-132: authoritative=[F1] + exact resolved F1 → READY_FOR_REVIEW (không weaken exact-set)', () => {
+  const r = validateHandoff(sampleReport({ findingResolution: { items: [IDX('GPT-REV-118')] } }), { authoritativeFindings: ['GPT-REV-118'] });
+  assert.equal(r.ok, true);
+  assert.equal(r.status, 'READY_FOR_REVIEW');
+  assert.deepEqual(r.errors, []);
+});
+
+test('GPT-REV-132: validateHandoff — missing authoritativeFindings → AUTHORITATIVE_FINDINGS_REQUIRED fail-closed', () => {
+  const r = validateHandoff(sampleReport());
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'AUTHORITATIVE_FINDINGS_REQUIRED'));
+});
+
+test('GPT-REV-132: validateHandoff — null authoritativeFindings → AUTHORITATIVE_FINDINGS_REQUIRED fail-closed', () => {
+  const r = validateHandoff(sampleReport(), { authoritativeFindings: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'PARTIAL_EVIDENCE');
+  assert.ok(r.errors.some((e) => e.code === 'AUTHORITATIVE_FINDINGS_REQUIRED'));
+});
+
+test('GPT-REV-132: derivation failure không được ngụy trang thành success-empty (canonicalActiveFindings ok=false)', () => {
+  // Khi không xác định được reviewer authority (derivation failure) → canonicalActiveFindings
+  // trả { ok:false, findings:[] } — KHÔNG phải empty-set thành công. Server PHẢI gate on !ok
+  // (xem deriveAuthoritativeFindings trong mcp-task-server/server.mjs) trước khi thả [] vào validate.
+  const r = canonicalActiveFindings([parseSample(118).findings[0]], { authority: { gpt: [], local: [] } });
+  assert.equal(r.ok, false);
+  assert.equal(r.findings.length, 0);
+  assert.equal(r.errors[0].code, 'AUTHORITY_UNAVAILABLE');
 });
 
 

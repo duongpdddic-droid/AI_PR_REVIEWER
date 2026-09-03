@@ -154,7 +154,7 @@ export const SEMANTIC_RULES = Object.freeze([
     description: 'Mỗi mục finding resolution phải có findingId, severity, status (fixed|disputed|unresolved), rootCause, fix; disputed bắt buộc kèm evidence',
     check: (r) => {
       const items = r.findingResolution?.items;
-      if (!Array.isArray(items) || items.length === 0) return false;
+      if (!Array.isArray(items)) return false;
       const req = ['findingId', 'severity', 'status', 'rootCause', 'fix'];
       const okStatus = ['fixed', 'disputed', 'unresolved'];
       return items.every((it) => it && typeof it === 'object'
@@ -224,7 +224,7 @@ export const SEMANTIC_RULES = Object.freeze([
     description: 'Finding fixed|disputed phải liên kết code evidence (file + symbol/function/export) và test evidence cụ thể (name + location); finding loại failClosed/mutation phải kèm negativeAssertion/no-mutation evidence',
     check: (r) => {
       const items = r.findingResolution?.items;
-      if (!Array.isArray(items) || items.length === 0) return false;
+      if (!Array.isArray(items)) return false;
       return items.every((it) => {
         if (!it || typeof it !== 'object') return false;
         if (!FIXED_DISPUTED_STATUSES.includes(it.status)) return true; // unresolved không cần evidence
@@ -521,7 +521,10 @@ export function parseReviewComment(body, { commentId = null, author = null, ts =
 // authority = { gpt:[login], local:[login] } (từ policy approvalAuthorities) — reviewer principal có
 // quyền tạo finding. Finding do actor KHÔNG có authority → bị bỏ qua (không authoritative).
 // Finding ở FINDING_TERMINAL_STATES → loại khỏi active set (withdraw/superseded có authority).
-// entries có finding nhưng thiếu authority → fail-closed (không đoán reviewer principal).
+// Fail-closed (GPT-REV-127): authority vắng/hỏng → AUTHORITY_UNAVAILABLE; gpt=[] và local=[] (empty
+// allowlist) KHÔNG được coi là thành công rỗng → AUTHORITY_UNAVAILABLE; có finding type nhưng authority
+// cho type đó rỗng → AUTHORITY_UNAVAILABLE; mọi finding đều do actor KHÔNG có authority tạo (unauthorized
+// only) → AUTHORITY_UNAVAILABLE. KHÔNG silent drop review entries rồi coi authoritative set rỗng là ok.
 export function canonicalActiveFindings(entries, { authority = null } = {}) {
   const errors = [];
   const typed = [];
@@ -532,24 +535,47 @@ export function canonicalActiveFindings(entries, { authority = null } = {}) {
     typed.push({ ...e, type: t });
   }
   if (typed.length > 0) {
-    if (!authority || typeof authority !== 'object' || !Array.isArray(authority.gpt) || !Array.isArray(authority.local)) {
-      return { ok: false, findings: [], errors: [{ code: 'AUTHORITY_UNAVAILABLE', message: 'Không có authority allowlist để xác định reviewer principal của finding (fail-closed)' }] };
+    // Authority bắt buộc hợp lệ (gpt + local đều là array) khi có finding để phân loại principal.
+    const authorityValid = authority && typeof authority === 'object'
+      && Array.isArray(authority.gpt) && Array.isArray(authority.local);
+    if (!authorityValid) {
+      return { ok: false, findings: [], errors: [{ code: 'AUTHORITY_UNAVAILABLE', message: 'Không có authority allowlist (gpt/local) để xác định reviewer principal của finding (fail-closed)' }] };
     }
-  }
-  // Sắp theo thứ tự xuất hiện (comments theo thời gian) → trạng thái cuối cùng (withdraw) thắng.
-  const latest = new Map();
-  for (const e of typed) {
-    const allow = authority ? (e.type === 'gpt' ? authority.gpt : authority.local) : [];
-    if (allow && Array.isArray(allow) && !allow.includes(e.author)) {
-      continue; // actor không có reviewer authority → không authoritative
+    // Empty allowlist (gpt=[] và local=[]) → không reviewer principal có quyền → fail-closed.
+    if (authority.gpt.length === 0 && authority.local.length === 0) {
+      return { ok: false, findings: [], errors: [{ code: 'AUTHORITY_UNAVAILABLE', message: 'Authority allowlist rỗng (gpt=[] và local=[]) → không reviewer principal hợp lệ (fail-closed)' }] };
     }
-    latest.set(e.id, e.status); // giữ trạng thái cuối
+    // Missing authority theo finding type (có finding 'gpt' nhưng authority.gpt rỗng) → fail-closed.
+    for (const t of ['gpt', 'local']) {
+      if (typed.some((e) => e.type === t) && authority[t].length === 0) {
+        errors.push({ code: 'AUTHORITY_UNAVAILABLE', message: `Authority '${t}' rỗng nhưng có finding type '${t}' → fail-closed (không silent drop)` });
+      }
+    }
+    // Nếu đã có error type-specific → fail-closed ngay (không đưa ra set rỗng).
+    if (errors.some((e) => e.code === 'AUTHORITY_UNAVAILABLE')) {
+      return { ok: false, findings: [], errors };
+    }
+    // Sắp theo thứ tự xuất hiện (comments theo thời gian) → trạng thái cuối cùng (withdraw) thắng.
+    const latest = new Map();
+    const byType = { gpt: new Set(authority.gpt), local: new Set(authority.local) };
+    for (const e of typed) {
+      const allow = byType[e.type];
+      if (!allow || !allow.has(e.author)) continue; // actor không có reviewer authority → không authoritative
+      latest.set(e.id, e.status); // giữ trạng thái cuối
+    }
+    // Unauthorized-only: có finding hợp lệ nhưng KHÔNG finding nào do actor có quyền tạo → fail-closed.
+    if (latest.size === 0) {
+      errors.push({ code: 'AUTHORITY_UNAVAILABLE', message: 'Mọi finding đều do actor KHÔNG có reviewer authority tạo → không xác định được authoritative set (fail-closed)' });
+      return { ok: false, findings: [], errors };
+    }
+    const active = [];
+    for (const [id, status] of latest) {
+      if (!FINDING_TERMINAL_STATES.includes(status)) active.push(id);
+    }
+    return { ok: true, findings: active.sort(), errors };
   }
-  const active = [];
-  for (const [id, status] of latest) {
-    if (!FINDING_TERMINAL_STATES.includes(status)) active.push(id);
-  }
-  return { ok: true, findings: active.sort(), errors };
+  // Không có finding nào trong review state (typed rỗng) → empty authoritative set là hợp lệ.
+  return { ok: true, findings: [], errors };
 }
 
 // So sánh 2 tập finding ID bằng nhau (không quan tâm thứ tự, dedupe) — dùng cho caller assertion.
@@ -622,6 +648,11 @@ export function validateHandoff(report, { expectedVersion = CONTRACT_VERSION, re
     } catch {
       errors.push({ code: rule.code, section: rule.section, field: rule.section, message: `${rule.message} (exception khi check)` });
     }
+  }
+  // GPT-REV-126: authoritative context BẮT BUỘC — omitted/undefined/null → fail-closed.
+  // KHÔNG được READY_FOR_REVIEW khi thiếu authoritativeFindings (không schema-only lọt qua gate).
+  if (!Array.isArray(authoritativeFindings)) {
+    errors.push({ code: 'AUTHORITATIVE_FINDINGS_REQUIRED', section: 'findingResolution', field: 'authoritativeFindings', message: 'authoritativeFindings bắt buộc (mảng) khi validate handoff — omitted/undefined/null → fail-closed' });
   }
   // GPT-REV-125 — authoritative finding set (server derive từ canonical review state, KHÔNG tin caller):
   // mọi finding bắt buộc phải được resolve ĐÚNG tập authoritative (không subset/superset/duplicate/unknown).
