@@ -19,6 +19,10 @@ const TEST_AUDIT_PATH = path.join(TEST_TMP, 'audit.jsonl');
 const TEST_WORKTREE = fs.mkdtempSync(path.join(os.tmpdir(), 'gpt-139-wt-'));
 const TEST_ACK_PATH = path.join(TEST_TMP, 'ack.txt');
 fs.writeFileSync(TEST_ACK_PATH, ['OPERATOR: bo', 'REASON: PRE_REVIEW_DIFF_LIMIT', 'ACK_AT: 2026-09-01T10:00:00Z', 'ISSUE_REF: #36'].join('\n'), 'utf8');
+// Rule 08 temp-hygiene: dọn dir tạm ngoài repo trong finally; idempotent + an toàn (recursive có force).
+function cleanup() {
+  for (const p of [TEST_TMP, TEST_WORKTREE]) { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} }
+}
 
 // [GPT-REV-139] HAI commit hoàn toàn khác nhau:
 const TARGET_PR_HEAD = 'c'.repeat(40);         // target PR HEAD (review target identity)
@@ -147,6 +151,7 @@ const MANUAL_OPTS = {
 };
 
 (async () => {
+try {
   // --- H1. Hai commit hoàn toàn khác nhau (non-circular structural invariant) ---
   tru('H1: policySourceCommit != targetPrHead', POLICY_SOURCE_COMMIT !== TARGET_PR_HEAD);
   tru('H1: manualException target head == targetPrHead', POLICY.manualException.target.headSha === TARGET_PR_HEAD);
@@ -215,8 +220,15 @@ const MANUAL_OPTS = {
   if (failed.length) {
     console.error('FAIL (' + failed.length + '/' + results.length + '):');
     for (const f of failed) console.error(' - ' + f.name + ' expected=' + JSON.stringify(f.want) + ' got=' + JSON.stringify(f.got));
+    cleanup();
     process.exit(1);
   }
   console.log('ALL ' + results.length + ' assertions PASS');
+  cleanup();
   process.exit(0);
+} catch (e) {
+  cleanup();
+  console.error('UNEXPECTED: ' + String((e && e.stack) || e));
+  process.exit(1);
+}
 })();
