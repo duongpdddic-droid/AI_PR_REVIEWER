@@ -174,16 +174,28 @@ const projectConfigQldA = {
   ok('thiếu project config hoặc canonical lỗi nguồn → BLOCKED_CANONICAL_UNAVAILABLE');
 }
 
-// --- [GPT-REV-042] canonical self-review dùng canonical nội bộ tại ref ---
+// --- [GPT-REV-137] canonical self-review: policy AUTHORITY từ policySourceRef, KHÔNG từ PR HEAD ---
 {
   let saw;
   const out = resolvePolicyForRepo({
-    repo: CANONICAL_REPO, ref: '1'.repeat(40),
+    repo: CANONICAL_REPO, ref: '1'.repeat(40), policySourceRef: '2'.repeat(40),
     fetchContent: (r, p, rr) => { saw = { r, p, rr }; return JSON.stringify(canonical); },
   });
   assert.equal(out.policy.policyVersion, canonical.policyVersion);
-  assert.deepEqual(saw, { r: CANONICAL_REPO, p: CANONICAL_PATH, rr: '1'.repeat(40) });
-  ok('AI_PR_REVIEWER tự review → canonical nội bộ tại head ref');
+  assert.deepEqual(saw, { r: CANONICAL_REPO, p: CANONICAL_PATH, rr: '2'.repeat(40) });
+  ok('AI_PR_REVIEWER tự review → policy authority từ policySourceRef (tách bạch khỏi PR HEAD)');
+}
+
+// --- [GPT-REV-137] canonical self-review THIẾU policySourceRef → fail-closed (không đọc policy từ HEAD) ---
+{
+  assert.throws(
+    () => resolvePolicyForRepo({
+      repo: CANONICAL_REPO, ref: '1'.repeat(40),
+      fetchContent: (_r, _p, _rr) => JSON.stringify(canonical),
+    }),
+    (e) => e instanceof PolicyResolutionError && e.code === 'BLOCKED_CANONICAL_INVALID',
+  );
+  ok('canonical self-review thiếu policySourceRef → BLOCKED_CANONICAL_INVALID (chặn fixed-point self-reference)');
 }
 
 // --- [GPT-REV-044] Canonical identity enforcement ---
@@ -235,7 +247,7 @@ const projectConfigQldA = {
   delete brokenCanon.projectPolicyContract.canonicalPath;
   assert.throws(
     () => resolvePolicyForRepo({
-      repo: CANONICAL_REPO, ref: 'h'.repeat(40),
+      repo: CANONICAL_REPO, ref: 'h'.repeat(40), policySourceRef: '2'.repeat(40),
       fetchContent: () => JSON.stringify(brokenCanon),
     }),
     (e) => e.code === 'BLOCKED_CANONICAL_INVALID' && e.message.includes('canonicalRepo/canonicalPath'),
@@ -279,6 +291,7 @@ const projectConfigQldA = {
     resolvePolicyForRepo({
       repo: CANONICAL_REPO,
       ref: 'b'.repeat(40),
+      policySourceRef: '2'.repeat(40),
       fetchContent: (_r, p) => (p === CANONICAL_PATH ? dupRaw : '{}'),
     });
   } catch (e) { threw = e; }
@@ -290,6 +303,7 @@ const projectConfigQldA = {
   const okRes = resolvePolicyForRepo({
     repo: CANONICAL_REPO,
     ref: 'b'.repeat(40),
+    policySourceRef: '2'.repeat(40),
     fetchContent: (_r, p) => (p === CANONICAL_PATH ? raw : '{}'),
   });
   assert.equal(okRes.policy.policyVersion, canonical.policyVersion);

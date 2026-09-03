@@ -27,7 +27,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import { decidePrePushGuard } from './review-contract.mjs';
-import { resolvePolicyForRepo } from './effective-policy.mjs';
+import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
 
 const exec = (cmd, args) => {
   const res = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
@@ -38,6 +38,20 @@ const exec = (cmd, args) => {
 };
 
 const gh = (args) => exec('gh', args);
+
+// [GPT-REV-137] Resolve canonical policy source commit (server-controlled default branch) —
+// TÁCH BIỆT khỏi PR HEAD. Không tin caller/PR/process.cwd.
+function canonicalSourceCommit() {
+  const defaultBranch = String(gh(['api', `repos/${CANONICAL_REPO}`, '--jq', '.default_branch'])).trim();
+  if (!defaultBranch || !/^[a-zA-Z0-9._-]+$/.test(defaultBranch)) {
+    throw new Error('không resolve được canonical default_branch — fail-closed (GPT-REV-137).');
+  }
+  const commit = String(gh(['api', `repos/${CANONICAL_REPO}/commits/${defaultBranch}`, '--jq', '.sha'])).trim();
+  if (!/^[0-9a-f]{40}$/.test(commit)) {
+    throw new Error('canonical source commit không phải full 40-hex SHA — fail-closed (GPT-REV-137).');
+  }
+  return commit;
+}
 
 function parseOrigin(repoUrl) {
   const s = String(repoUrl || '').trim();
@@ -64,8 +78,11 @@ function listPrComments(repo, number) {
 
 function policyApprovers(repo, branch, headSha) {
   try {
+    // [GPT-REV-137] Policy AUTHORITY phải đến từ server-resolved canonical default-branch source
+    // commit (không tin PR HEAD/headSha làm nguồn policy cho canonical self-review).
+    const sourceCommit = canonicalSourceCommit();
     const p = resolvePolicyForRepo({
-      repo, ref: headSha,
+      repo, ref: headSha, policySourceRef: sourceCommit,
       fetchContent: (r, path, rr) => {
         const b64 = gh(['api', `repos/${r}/contents/${path}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
         return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');

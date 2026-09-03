@@ -36,8 +36,9 @@ import {
   isApprovalValid, isManualApprovalValid, parseApprovalMarkers,
   validateApprovalPayload, computePolicyDigest,
   parseGptEvidenceArtifact, validateGptEvidenceBind, isReviewerAuthorized, validateManualActivationTarget,
+  resolvePolicySourceTrust, POLICY_SOURCE_TRUST,
 } from './review-contract.mjs';
-import { resolvePolicyForRepo } from './effective-policy.mjs';
+import { CANONICAL_PATH, CANONICAL_REPO, resolvePolicyForRepo, PolicyResolutionError } from './effective-policy.mjs';
 
 // ---------------------------------------------------------------- IO adapter (DI cho test)
 
@@ -57,16 +58,39 @@ export function defaultIo() {
     getPrView(repo, number) {
       return JSON.parse(gh(['pr', 'view', String(number), '--repo', repo, '--json', 'state,headRefOid,labels']));
     },
-    getPolicy(repo, ref) {
+    getPolicy(repo, ref, policySourceRef) {
       // [GPT-REV-042] Không còn legacy mirror: fail-closed qua resolvePolicyForRepo (throw).
+      // [GPT-REV-138] Server LUÔN tự resolve canonical default-branch tip qua resolveCanonicalSource().
+      // Caller-supplied policySourceRef chỉ là ASSERTION: bắt buộc == server tip, nếu không → reject
+      // (chống historical-policy rollback). Authoritative source = server tip, không phải caller choice.
+      const src = this.resolveCanonicalSource();
+      const trust = resolvePolicySourceTrust({ callerRef: policySourceRef, serverTip: src.sourceCommit });
+      if (!trust.ok) {
+        throw new PolicyResolutionError(trust.code, trust.error);
+      }
       return resolvePolicyForRepo({
         repo,
         ref,
+        policySourceRef: trust.sourceCommit,
         fetchContent: (r, p, rr) => {
           const b64 = gh(['api', `repos/${r}/contents/${p}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
           return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');
         },
       }).policy;
+    },
+    // [GPT-REV-137] Resolve canonical policy source commit (server-controlled default branch),
+    // TÁCH BIỆT khỏi target PR HEAD. Policy identity = canonical repo + default_branch, resolve
+    // qua gh API để không tin caller/PR/process.cwd. Trả { repo, ref, sourceCommit, path }.
+    resolveCanonicalSource() {
+      const defaultBranch = String(gh(['api', `repos/${CANONICAL_REPO}`, '--jq', '.default_branch'])).trim();
+      if (!defaultBranch || !/^[a-zA-Z0-9._-]+$/.test(defaultBranch)) {
+        throw new Error('không resolve được canonical default_branch — fail-closed (GPT-REV-137).');
+      }
+      const sourceCommit = String(gh(['api', `repos/${CANONICAL_REPO}/commits/${defaultBranch}`, '--jq', '.sha'])).trim();
+      if (!/^[0-9a-f]{40}$/.test(sourceCommit)) {
+        throw new Error('canonical source commit không phải full 40-hex SHA — fail-closed (GPT-REV-137).');
+      }
+      return { repo: CANONICAL_REPO, ref: defaultBranch, sourceCommit, path: CANONICAL_PATH };
     },
     getChecks(repo, number) {
       return JSON.parse(gh(['pr', 'checks', String(number), '--repo', repo, '--json', 'name,state']));
@@ -474,10 +498,12 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
   }
 
   let policy;
+  let policySource = null;
   try {
-    policy = io.getPolicy(repo, headSha);
+    policySource = io.resolveCanonicalSource();
+    policy = io.getPolicy(repo, headSha, policySource.sourceCommit);
   } catch (e) {
-    throw new Error(`TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại HEAD — ${String((e && e.message) || e).slice(0, 160)}`);
+    throw new Error(`TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại canonical source — ${String((e && e.message) || e).slice(0, 160)}`);
   }
 
   const gptApprovers = policy && policy.approvalAuthorities && policy.approvalAuthorities.gptApprovalCommentAuthors;
@@ -528,6 +554,8 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
   }
 
   // --- GIAO DỊCH (GPT-REV-033): marker TRƯỚC → read-back → approved SAU ---
+  const reviewerPrincipals = Array.isArray(policy && policy.approvalAuthorities && policy.approvalAuthorities.reviewerAuthorityAllowlist)
+    ? policy.approvalAuthorities.reviewerAuthorityAllowlist.map(String) : [];
   const marker = buildApprovalMarker({
     repository: repo,
     prNumber: pr,
@@ -538,6 +566,10 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
     ciEvidence: { ciState, checks: ((checks && checks.checks) || []).map((c) => `${c.name}=${c.state}`) },
     openBlockingFindings: 0,
     reviewedAt: new Date().toISOString(),
+    // [GPT-REV-137] Provenance: policy identity tách bạch khỏi target; identities derive từ policy.
+    policySource,
+    operator: String(actor || ''),
+    reviewerPrincipals,
   });
   const body = [
     '## ✅ APPROVAL CUỐI — GPT (quyết định relay bởi người dùng)',
@@ -549,6 +581,15 @@ export async function performApproval(io, { repo, pr, payload, note = '' }) {
     '',
     marker,
   ].join('\n');
+
+  // [GPT-REV-138] Re-resolve canonical source NGAY TRƯỚC mutation: tip đổi giữa lúc resolve và lúc
+  // mutation (case 5) → fail-closed, KHÔNG mutation — chống policy rollback khi tip di chuyển.
+  const finalSource = io.resolveCanonicalSource();
+  if (String(finalSource.sourceCommit || '').toLowerCase() !== String(policySource.sourceCommit || '').toLowerCase()) {
+    throw new Error('TỪ CHỐI (CANONICAL_SOURCE_DRIFT): canonical default-branch tip đổi giữa resolution và mutation ('
+      + String(policySource.sourceCommit || '').slice(0, 12) + ' → ' + String(finalSource.sourceCommit || '').slice(0, 12)
+      + ') — KHÔNG mutation (GPT-REV-138).');
+  }
 
   io.postComment(repo, pr, body); // lỗi → ném ra, CHƯA mutation nhãn nào
 
@@ -596,6 +637,7 @@ export async function performManualApproval(io, {
   // → NonAuditableBootstrapFailure, KHÔNG ghi audit, KHÔNG mutation.
   let resolvedAuditPath = '';
   let policy = null;
+  let policySource = null;
   let headSha = '';
   try {
   // --- 1. Preconditions (chỉ đọc) ---
@@ -605,9 +647,10 @@ export async function performManualApproval(io, {
     throw new Error('TỪ CHỐI: PR ' + repo + '#' + pr + ' state=' + view.state + ' — chỉ PR open được mutation.');
   }
   try {
-    policy = io.getPolicy(repo, headSha);
+    policySource = io.resolveCanonicalSource();
+    policy = io.getPolicy(repo, headSha, policySource.sourceCommit);
   } catch (e) {
-    throw new Error('TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại HEAD — ' + String((e && e.message) || e).slice(0, 160));
+    throw new Error('TỪ CHỐI (CI_UNKNOWN): không đọc được policy tại canonical source — ' + String((e && e.message) || e).slice(0, 160));
   }
   const manualPolicy = policy && policy.manualException;
   if (!manualPolicy || typeof manualPolicy !== 'object' || manualPolicy.enabled !== true) {
@@ -798,6 +841,14 @@ export async function performManualApproval(io, {
   if (!canMutatePr(view2.state)) {
     throw new Error('TỪ CHỐI: PR state đổi thành ' + view2.state + ' — không mutation.');
   }
+  // [GPT-REV-138] Re-resolve canonical source NGAY TRƯỚC mutation: tip đổi giữa lúc resolve và lúc
+  // mutation (case 5) → fail-closed, KHÔNG mutation — chống policy rollback khi tip di chuyển.
+  const finalSource = io.resolveCanonicalSource();
+  if (String(finalSource.sourceCommit || '').toLowerCase() !== String(policySource.sourceCommit || '').toLowerCase()) {
+    throw new Error('TỪ CHỐI (CANONICAL_SOURCE_DRIFT): canonical default-branch tip đổi giữa resolution và mutation ('
+      + String(policySource.sourceCommit || '').slice(0, 12) + ' → ' + String(finalSource.sourceCommit || '').slice(0, 12)
+      + ') — KHÔNG mutation (GPT-REV-138).');
+  }
 
   // --- 9. [GPT-REV-130] Audit TRƯỚC marker (transaction state) + idempotency/repair ---
   // Giao dịch: audit PASS phải tồn tại TRƯỚC khi marker được coi là hoàn chỉnh.
@@ -808,11 +859,18 @@ export async function performManualApproval(io, {
   // ttlSeconds <= 0 hoặc missing → không có expiry (giữ tương thích forward cho hạ tầng deploy cũ).
   const ttlSeconds = Number(manualPolicy.activationTtlSeconds ?? 0);
   const nowMs = Date.now();
+  const reviewerPrincipalsAudit = Array.isArray(policy && policy.approvalAuthorities && policy.approvalAuthorities.reviewerAuthorityAllowlist)
+    ? policy.approvalAuthorities.reviewerAuthorityAllowlist.map(String) : [];
   const auditEntry = {
     timestamp: new Date(nowMs).toISOString(), repository: repo, prNumber: pr, headSha, reason, ciRunId,
     gptEvidence: String(gptEvidence && gptEvidence.url || ''), operatorAckPath,
     policyVersion: policy.policyVersion, policyDigest: String(expectedPolicyDigest),
     decisionId, result: 'PASS', failureReason: null,
+    // [GPT-REV-137] Policy identity provenance (server-resolved canonical source), TÁCH BIỆT
+    // khỏi target repo/PR/HEAD. Không lộ secret/credential.
+    policySource,
+    operator: String(actor || ''),
+    reviewerPrincipals: reviewerPrincipalsAudit,
     // [GPT-REV-149] Activation target: bind exact repository/prNumber/full-40-hex headSha/decisionId
     // (Issue #38) — activation không thể được tái sử dụng cho target khác.
     target: { repository: repo, prNumber: pr, headSha, decisionId },
@@ -880,6 +938,8 @@ export async function performManualApproval(io, {
       : { ...gptEvidence, authorLogin: '' },
     operatorAck: verifiedOperatorAck ? { source: 'local-state', ackPath: operatorAckPath, operator: verifiedOperatorAck.operator, reason: String(reason), ackAt: verifiedOperatorAck.ackAt, issueRef: verifiedOperatorAck.issueRef } : null,
     openBlockingFindings, reviewedAt: new Date().toISOString(),
+    // [GPT-REV-137] Provenance: policy identity tách bạch khỏi target; identities derive từ policy.
+    policySource, operator: String(actor || ''), reviewerPrincipals: reviewerPrincipalsAudit,
     auditWritten: true, auditRef: String(decisionId),
   };
   const preVerdict = isManualApprovalValid({ ...probeMarker, commentId: 'probe', authorLogin: actor }, { ...manualCtx, auditVerified: true });
@@ -950,6 +1010,18 @@ export async function performRevoke(io, { repo, pr, reason }) {
   const headSha = view.headRefOid;
   if (!canMutatePr(view.state)) {
     throw new Error(`TỪ CHỐI: PR ${repo}#${pr} state=${view.state} — chỉ PR open được mutation.`);
+  }
+  // [GPT-REV-137] Revoke idempotency: nếu đã có marker revoke cho cùng repo/pr/head và PR đã ở
+  // status:review-requested (không còn status:approved) → KHÔNG đăng comment trùng, không mutation
+  // thừa. Giữ audit append-only (không xoá entry cũ). Skip idempotent fail-closed.
+  const revokeKey = `ai-pr-reviewer:key=${repo}::${pr}::${headSha}::revoke`;
+  const bodies = io.listPrComments(repo, pr);
+  const alreadyRevoked = bodies.some((b) =>
+    String(b && b.body != null ? b.body : b).includes(revokeKey));
+  const currentNames = labelNames(io.getPrView(repo, pr));
+  const stillApproved = currentNames.includes(LABELS.approved);
+  if (alreadyRevoked && !stillApproved) {
+    return { mutated: false, skipped: 'already-revoked', headSha, message: `BỎ QUA: revoke cho ${repo}#${pr} tại HEAD ${headSha.slice(0, 12)} đã tồn tại — idempotent, không đăng trùng.` };
   }
   io.removeLabels(repo, pr, [LABELS.approved]);
   io.removeLabels(repo, pr, OTHER_STATUSES.filter((l) => l !== LABELS.reviewRequested));
