@@ -12,7 +12,7 @@ export const SUPPORTED_SCHEMA_VERSION = '1.0';
 export const MIN_SCHEMA_VERSION = '1.0';
 // Canonical policy version — single source of truth = .github/ai-review-policy.json#policyVersion.
 // Manifest phải pin đúng version này (gate POLICY_VERSION_MISMATCH). Không drift.
-export const CANONICAL_POLICY_VERSION = '2026-09-02.1';
+export const CANONICAL_POLICY_VERSION = '2026-09-03.1';
 
 // Machine-local registry path (NGOÀI worktree, ngoài Git).
 export const DEFAULT_REGISTRY_DIR = path.join(os.homedir(), '.ai-pr-reviewer');
