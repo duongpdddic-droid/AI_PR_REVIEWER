@@ -69,6 +69,10 @@ function makeManualIo(opts = {}) {
       if (opts.policyFails) throw new Error('gh api policy FAIL');
       return JSON.parse(JSON.stringify(opts.customPolicy || POLICY));
     },
+    // [GPT-REV-137] Mock: policy source commit server-controlled, tách bạch khỏi PR HEAD.
+    resolveCanonicalSource() {
+      return { repo: 'duongpddcic-droid/AI_PR_REVIEWER', ref: 'main', sourceCommit: SHA, path: '.github/ai-review-policy.json' };
+    },
     getCiRun() {
       if (opts.ciRunFails) throw new Error('gh api ci FAIL');
       if (opts.ciRunNotFound) return null;

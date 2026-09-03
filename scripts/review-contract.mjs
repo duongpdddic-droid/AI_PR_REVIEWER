@@ -230,6 +230,11 @@ export function buildApprovalMarker(record) {
     // cho MANUAL_REVIEW_EXCEPTION_APPROVED kind — orphan marker (audit chưa PASS) bị từ chối fail-closed.
     auditWritten: record.auditWritten === true ? true : undefined,
     auditRef: record.auditRef ? String(record.auditRef) : undefined,
+    // [GPT-REV-137] Provenance: policy identity (server-resolved canonical source) tách bạch khỏi
+    // target; identities derive từ policy (không hand-type). Không lộ secret/credential.
+    policySource: record.policySource ? record.policySource : undefined,
+    operator: record.operator != null ? String(record.operator) : undefined,
+    reviewerPrincipals: Array.isArray(record.reviewerPrincipals) ? record.reviewerPrincipals.map(String) : undefined,
   });
   return `<!-- ai-review-approval:${json} -->`;
 }
