@@ -21,6 +21,28 @@ export const TERMINAL_STATUSES = Object.freeze(['READY_FOR_REVIEW', 'BLOCKED', '
 // HEAD SHA chuẩn: full 40-hex (khóa HEAD theo approval gate — không chấp nhận short SHA).
 const HEAD_SHA_RE = /^[0-9a-f]{40}$/;
 
+// Canonical identity-boundary normalizer (GPT-REV-126).
+// Hợp nhất: JSON-RPC có thể wrap number thành boxed `Number` object; strict `!==` giữa
+// primitive và boxed cùng giá trị thì vẫn `true` → identity gate fail-closed sai.
+// `repo` so sánh sau `String()` để chống trộn string/Number ở caller; `issue`/`pr` ép về
+// decimal digit string (bỏ leading zeros, chấp nhận cả `"75"` lẫn `75` lẫn `new Number(75)`).
+// KHÔNG dùng để bypass khác: khác giá trị thực (vd `"75" !== "76"`) vẫn fail-closed.
+function canonIdValue(v) {
+  if (v === null || v === undefined) return v;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  if (typeof v === 'object' && typeof v.valueOf === 'function') {
+    const n = Number(v.valueOf());
+    if (Number.isFinite(n)) return String(n);
+  }
+  return v;
+}
+function canonIdEqual(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  return canonIdValue(a) === canonIdValue(b);
+}
+
 // Path canonical của contract trong repo nguồn — reference pin phải trỏ đúng path này (GPT-REV-121).
 export const CANONICAL_CONTRACT_PATH = 'scripts/review-handoff-contract.mjs';
 
@@ -711,13 +733,13 @@ export function verifyHandoffIdentity(report, { repo, number, pr, prHeadSha, che
   if (!id || typeof id !== 'object') {
     return { ok: false, errors: [{ code: 'IDENTITY_MISSING', section: 'identity', field: null, message: 'handoffReport.identity bắt buộc để bind với dữ liệu server' }] };
   }
-  if (id.repository !== repo) {
+  if (!canonIdEqual(id.repository, repo)) {
     errors.push({ code: 'IDENTITY_REPOSITORY_MISMATCH', section: 'identity', field: 'repository', message: `report.identity.repository=${id.repository} ≠ repo server=${repo}` });
   }
-  if (id.issue !== number) {
+  if (!canonIdEqual(id.issue, number)) {
     errors.push({ code: 'IDENTITY_ISSUE_MISMATCH', section: 'identity', field: 'issue', message: `report.identity.issue=${id.issue} ≠ issue server=${number}` });
   }
-  if (id.pullRequest !== pr) {
+  if (!canonIdEqual(id.pullRequest, pr)) {
     errors.push({ code: 'IDENTITY_PR_MISMATCH', section: 'identity', field: 'pullRequest', message: `report.identity.pullRequest=${id.pullRequest} ≠ pr server=${pr}` });
   }
   // Exact PR HEAD từ nguồn tin cậy — không chỉ check 40-hex (stale HEAD / random 40-hex bị chặn).
