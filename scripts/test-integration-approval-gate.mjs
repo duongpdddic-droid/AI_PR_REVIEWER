@@ -40,6 +40,10 @@ function makeGateIo(opts = {}) {
       if (opts.policyFails) throw new Error('gh api policy FAIL');
       return JSON.parse(JSON.stringify(POLICY));
     },
+    // [GPT-REV-137] Mock: policy source commit server-controlled, tách bạch khỏi PR HEAD.
+    resolveCanonicalSource() {
+      return { repo: 'duongpddcic-droid/AI_PR_REVIEWER', ref: 'main', sourceCommit: SHA, path: '.github/ai-review-policy.json' };
+    },
     getChecks() {
       if (opts.checksFail) throw new Error('gh checks FAIL');
       return { checks: [{ name: 'verify', state: opts.ciState ?? 'SUCCESS' }] };

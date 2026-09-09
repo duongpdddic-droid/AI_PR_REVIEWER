@@ -102,6 +102,8 @@ try {
     'test-gpt-approval-manual-exception.mjs',
     'test-gpt-approval-getgatestate.mjs',
     'test-gpt-approval-regress.mjs',
+    'test-gpt-approval-policy-trust-root.mjs',
+    'test-gpt-approval-activation-non-circular.mjs',
     'test-gpt-approval-evidence.mjs',
     'test-context-routing.mjs',
     'test-context-manager.mjs',

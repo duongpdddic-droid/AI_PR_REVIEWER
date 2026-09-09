@@ -31,9 +31,10 @@ import {
   normalizeStatusLabels, planEscalationForPhase,
   planApprovalDrift, planCiRouting, planPhaseActivation, planPreReviewOutcome,
   planHeadLock, resolveReviewPhase, scanDiffForSecrets,
+  resolvePolicySourceTrust, POLICY_SOURCE_TRUST,
   isUnfrozenAfter,
 } from './review-contract.mjs';
-import { CANONICAL_REPO, resolvePolicyForRepo } from './effective-policy.mjs';
+import { CANONICAL_PATH, CANONICAL_REPO, resolvePolicyForRepo, PolicyResolutionError } from './effective-policy.mjs';
 import { notifyRaw } from './telegram-gateway/adapter-ai-pr-reviewer.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -82,13 +83,24 @@ function defaultIo() {
         };
       });
     },
-    getPolicy(repo, ref) {
+    getPolicy(repo, ref, policySourceRef) {
       // [GPT-REV-042] Không còn legacy mirror: project repo bắt buộc project config +
       // canonical từ đúng policySource.repo+full SHA+path; canonical repo dùng nội bộ.
+      // [GPT-REV-138] Server LUÔN tự resolve canonical default-branch tip qua resolveCanonicalSource().
+      // Caller-supplied policySourceRef chỉ là ASSERTION: bắt buộc == server tip, nếu không → reject
+      // (chống historical-policy rollback). Authoritative source = server tip, không phải caller choice.
       try {
+        const src = this.resolveCanonicalSource();
+        const trust = resolvePolicySourceTrust({ callerRef: policySourceRef, serverTip: src.sourceCommit });
+        if (!trust.ok) {
+          throw new PolicyResolutionError(trust.code, trust.error);
+        }
         return resolvePolicyForRepo({
           repo,
           ref,
+          // [GPT-REV-137] Canonical self-review: policy AUTHORITY từ server-resolved canonical
+          // source commit, KHÔNG từ PR HEAD (ref).
+          policySourceRef: trust.sourceCommit,
           fetchContent: (r, p, rr) => {
             const b64 = this.gh(['api', `repos/${r}/contents/${p}?ref=${encodeURIComponent(rr)}`, '--jq', '.content']);
             return Buffer.from(String(b64).replace(/\s+/g, ''), 'base64').toString('utf8');
@@ -98,6 +110,19 @@ function defaultIo() {
         const code = (e && e.code) || 'BLOCKED_CANONICAL_UNAVAILABLE';
         return { policy: null, error: `${code}: ${String((e && e.message) || e).slice(0, 200)}` };
       }
+    },
+    // [GPT-REV-137] Resolve canonical policy source commit (server-controlled default branch),
+    // TÁCH BIỆT khỏi target PR HEAD. Không tin caller/PR/process.cwd.
+    resolveCanonicalSource() {
+      const defaultBranch = String(this.gh(['api', `repos/${CANONICAL_REPO}`, '--jq', '.default_branch'])).trim();
+      if (!defaultBranch || !/^[a-zA-Z0-9._-]+$/.test(defaultBranch)) {
+        throw new Error('không resolve được canonical default_branch — fail-closed (GPT-REV-137).');
+      }
+      const sourceCommit = String(this.gh(['api', `repos/${CANONICAL_REPO}/commits/${defaultBranch}`, '--jq', '.sha'])).trim();
+      if (!/^[0-9a-f]{40}$/.test(sourceCommit)) {
+        throw new Error('canonical source commit không phải full 40-hex SHA — fail-closed (GPT-REV-137).');
+      }
+      return { repo: CANONICAL_REPO, ref: defaultBranch, sourceCommit, path: CANONICAL_PATH };
     },
     // [GPT-REV-045][GPT-REV-046] Đọc comments Issue KÈM METADATA (id/author/created_at) để
     // xác thực authority của activation marker — không còn nối body thuần. Body encode base64

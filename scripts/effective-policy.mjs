@@ -157,18 +157,29 @@ export function loadCanonicalPolicyLocal(projectRoot) {
  *   (legacy mirror đã bỏ — stale mirror không được dùng làm nguồn policy).
  * - [GPT-REV-044] canonical identity (repo/path) được khóa bởi projectPolicyContract.
  *   project config KHÔNG được override canonical identity.
- * - Mọi lệch shape/ref/thiếu nguồn → PolicyResolutionError fail-closed.
- * @param {{repo: string, ref: string, fetchContent: (repo:string,path:string,ref:string)=>string}} p
+ * - [GPT-REV-137] Canonical self-review KHÔNG đọc policy từ PR HEAD. Policy AUTHORITY
+ *   (approvalAuthorities/manualException) phải đến từ canonical default-branch source commit
+ *   do server resolve, truyền qua `policySourceRef` (full 40-hex SHA) — tách bạch khỏi target PR.
+ *   `ref` (của PR) chỉ dùng cho binding target; mọi lệch shape/ref/thiếu nguồn → fail-closed.
+ * @param {{repo: string, ref: string, policySourceRef?: string, fetchContent: (repo:string,path:string,ref:string)=>string}} p
  * @returns {{policy: object, meta?: object}} meta có mặt khi đi qua project config.
  */
-export function resolvePolicyForRepo({ repo, ref, fetchContent }) {
+export function resolvePolicyForRepo({ repo, ref, policySourceRef, fetchContent }) {
   if (typeof fetchContent !== 'function') {
     throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE', 'thiếu fetchContent IO');
   }
   if (repo === CANONICAL_REPO) {
+    // [GPT-REV-137] Canonical self-review: KHÔNG lấy authority từ PR HEAD (ref) — self-reference
+    // (target.headSha nhúng trong chính commit đó) tạo fixed-point bất khả thi. Policy phải từ
+    // server-resolved canonical default-branch source commit. Thiếu policySourceRef → fail-closed.
+    if (!policySourceRef) {
+      throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID',
+        'canonical self-review bắt buộc policySourceRef (server-resolved canonical source commit) — không đọc policy từ PR HEAD');
+    }
+    assertFullSha(policySourceRef);
     let raw;
-    try { raw = fetchContent(CANONICAL_REPO, CANONICAL_PATH, ref); }
-    catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE', `canonical nội bộ không đọc được tại ${ref}: ${String((e && e.message) || e).slice(0, 160)}`); }
+    try { raw = fetchContent(CANONICAL_REPO, CANONICAL_PATH, policySourceRef); }
+    catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_UNAVAILABLE', `canonical nội bộ không đọc được tại ${policySourceRef}: ${String((e && e.message) || e).slice(0, 160)}`); }
     let parsed;
     try { parsed = JSON.parse(raw); }
     catch (e) { throw new PolicyResolutionError('BLOCKED_CANONICAL_INVALID', `canonical nội bộ sai JSON: ${String((e && e.message) || e).slice(0, 160)}`); }
